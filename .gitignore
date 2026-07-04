@@ -69,3 +69,9 @@ htmlcov/
 
 # Pipecat
 whisker_setup.py
+
+# Remote Agent Protocol runtime state (may contain conversation content --
+# never commit). Everything the app writes at runtime lives under data/.
+data/
+.codebase-memory/
+.agent/

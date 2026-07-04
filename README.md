@@ -1,3 +1,91 @@
+# remote-agent-protocol
+
+**Remote Agent Protocol** is a local-first desktop voice switchboard for
+conversations and background agent work. It combines live speech, Ollama,
+selectable personas (the default assistant is Jess), persistent memory, and
+deterministic routing to Hermes, Code Puppy, OpenClaw, or any command-line
+agent configured by the operator.
+
+The application lives in the [`remote_agent_protocol/`](remote_agent_protocol/)
+package and uses the vendored Pipecat framework under `src/pipecat` for its
+real-time audio pipeline.
+
+## Features
+
+- Voice and typed input share one brain: STT → delegation routing → memory →
+  Ollama → TTS, with live persona/voice/model switching from the GUI.
+- Agent jobs run as background subprocesses, stream output without blocking
+  voice, follow a normalized lifecycle (started / in progress / tool running /
+  waiting / blocked / completed / failed), and are announced out loud.
+- Destructive or elevated delegations are held for spoken or clicked
+  confirmation before they run.
+- Optional wake-word gate (`WAKE_WORD_ENABLED=true` in `.env`): the mic stays
+  closed until you say the wake phrase (default "hey jarvis", fully local via
+  openwakeword), and re-opens after each reply for natural follow-ups.
+- Transcript memory plus semantic (mem0 + Qdrant) memory, both 100% local.
+- `Ctrl+L` focuses typed input, `Ctrl+M` toggles the microphone, and `Ctrl+K`
+  opens the agent task console. The EXPORT button writes a diagnostics bundle.
+- Devices, models, voices, and agent backends are configurable from `.env`
+  without editing Python -- see the "Remote Agent Protocol" section of
+  `env.example`.
+- All runtime state (conversation memory, vector store, logs, job history)
+  lives under `data/`, which is ignored by Git.
+
+## Requirements
+
+- Windows 11 (the GUI and audio path are developed and tested there), Python 3.12.
+- [Ollama](https://ollama.com) running locally with at least one chat model
+  (see [docs/MODELS.md](docs/MODELS.md) for the model map).
+- A microphone and speakers. A CUDA GPU is optional but makes Whisper STT fast.
+
+## Setup
+
+```bat
+:: 1. Create the virtual environment (once)
+python -m venv .venv
+.venv\Scripts\pip install -e ".[local,silero,whisper,moonshine,kokoro,openai]"
+.venv\Scripts\pip install mem0ai ollama openwakeword
+
+:: 2. Configure (optional -- sensible defaults work out of the box)
+copy env.example .env
+
+:: 3. Make sure Ollama is serving and the configured model is registered
+ollama list
+```
+
+## Run
+
+| What | Command |
+| --- | --- |
+| Desktop control panel | `start_gui.bat` or `.venv\Scripts\python -m remote_agent_protocol` |
+| Terminal mode (no GUI) | `start_terminal.bat` or `.venv\Scripts\python -m remote_agent_protocol.terminal` |
+| List audio devices | `.venv\Scripts\python scripts\list_audio_devices.py` |
+| App tests | `.venv\Scripts\python -m pytest tests\test_agent_bridge.py tests\test_session_controls.py ...` |
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `remote_agent_protocol/` | The application package: GUI (`gui*.py`), voice session, agent bridge, wake word, memory, personas, config |
+| `src/pipecat/` | Vendored Pipecat framework (merge from the `upstream` remote; do not mix app code in) |
+| `tests/test_*.py` | App unit tests live alongside the framework's tests |
+| `scripts/` | `mock_agent.py`, `smoke_agent_bridge.py`, `list_audio_devices.py`, plus upstream tooling |
+| `config/` | `persona_overrides.example.json` -- template for `data/persona_overrides.json` |
+| `models/` | Ollama Modelfiles for local GGUFs |
+| `data/` | Runtime state (memory, vector store, logs, job history) -- gitignored |
+| `docs/` | [Architecture](docs/architecture.md), [model map](docs/MODELS.md), [wake-word research](docs/wake_word_research.md), framework changelog, assets |
+| `VERSION`, `CHANGELOG.md` | Product version and changelog (`docs/CHANGELOG.pipecat.md` is the framework's) |
+
+See the [architecture guide](docs/architecture.md) for the application
+boundary, configuration, known limits, and product roadmap.
+
+## Pipecat foundation
+
+Remote Agent Protocol preserves Pipecat's BSD-2-Clause license and upstream
+framework history. The framework documentation follows.
+
+---
+
 <h1><div align="center">
  <img alt="pipecat" width="300px" height="auto" src="https://raw.githubusercontent.com/pipecat-ai/pipecat/main/pipecat.png">
 </div></h1>
@@ -69,7 +157,7 @@ and install any of the available plugins.
 
 ### 🧩 Community integrations
 
-Build and share your own Pipecat service integrations! Browse existing [community integrations](https://docs.pipecat.ai/api-reference/server/services/supported-services) or check out our [guide](COMMUNITY_INTEGRATIONS.md) to create your own.
+Build and share your own Pipecat service integrations! Browse existing [community integrations](https://docs.pipecat.ai/api-reference/server/services/supported-services) or check out our [guide](docs/COMMUNITY_INTEGRATIONS.md) to create your own.
 
 ### 📺️ Pipecat TV channel
 

@@ -2,6 +2,25 @@
 
 This file provides guidance to AI coding agents when working with code in this repository.
 
+## This repository: remote-agent-protocol
+
+This repo is **Remote Agent Protocol**, a local-first desktop voice switchboard
+(the default assistant persona is Jess). The application lives in the
+`remote_agent_protocol/` package; the Pipecat framework under `src/pipecat` is
+**vendored** -- treat it as a library, merge changes from the `upstream` Git
+remote, and do not mix application code into it.
+
+- App entry points: `python -m remote_agent_protocol` (GUI),
+  `python -m remote_agent_protocol.terminal` (terminal mode).
+- App tests: `.venv\Scripts\python -m pytest tests/test_<name>.py` using the
+  repo's `.venv` (not `uv run`). Lint with `.venv\Scripts\python -m ruff`.
+- Runtime state is written to `data/` (gitignored). Config defaults live in
+  `remote_agent_protocol/config.py`, overridable via `.env` (see `env.example`).
+- Architecture and roadmap: `docs/architecture.md`. Product changelog:
+  `CHANGELOG.md` (the framework's is `docs/CHANGELOG.pipecat.md`).
+
+Everything below documents the vendored Pipecat framework.
+
 ## Project Overview
 
 Pipecat is an open-source Python framework for building real-time voice and multimodal conversational AI agents. It orchestrates audio/video, AI services, transports, and conversation pipelines using a frame-based architecture.

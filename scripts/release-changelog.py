@@ -28,7 +28,7 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+DEFAULT_CHANGELOG = Path(__file__).resolve().parent.parent / "docs" / "CHANGELOG.pipecat.md"
 
 PARAGRAPH_SPLIT_RE = re.compile(r"(\n[ \t]*\n+)")
 CONTINUATION_RE = re.compile(r"\n(?![ \t]*[-*+] )[ \t]+")
