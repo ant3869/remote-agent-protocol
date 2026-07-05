@@ -52,7 +52,7 @@ Homepage = "https://pipecat.ai"
 Documentation = "https://docs.pipecat.ai/"
 Source = "https://github.com/pipecat-ai/pipecat"
 Issues = "https://github.com/pipecat-ai/pipecat/issues"
-Changelog = "https://github.com/pipecat-ai/pipecat/blob/main/docs/CHANGELOG.pipecat.md"
+Changelog = "https://github.com/pipecat-ai/pipecat/blob/main/CHANGELOG.md"
 
 [project.scripts]
 # The Pipecat CLI ships with pipecat-ai, but its dependencies are optional (the `cli`
