@@ -1,3 +1,4 @@
+import re
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ class RuntimeLogTests(unittest.TestCase):
                 logger.add(sys.stderr)
 
         self.assertIn("agent status persisted", text)
+        self.assertRegex(text, r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}")
 
 
 if __name__ == "__main__":

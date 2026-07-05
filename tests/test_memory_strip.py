@@ -13,6 +13,7 @@ _INJECTED_PROMPTS = (
     config.DELEGATION_CONFIRM_PROMPT.format(agent="hermes-yolo", task="delete stuff"),
     config.AGENT_CONFIRM_APPROVED_PROMPT.format(agent="hermes-yolo", task="delete stuff"),
     config.AGENT_CONFIRM_DENIED_PROMPT.format(agent="hermes-yolo", task="delete stuff"),
+    config.DELEGATION_UNSENT_PROMPT.format(request="get the weather"),
 )
 
 

@@ -13,9 +13,9 @@ are relative to `remote_agent_protocol/`.
 ## Runtime flow
 
 ```text
-microphone -> [wake gate] -> STT -> transcript/delegation -> memory -> Ollama -> TTS -> speakers
-                                        |                                |
-                                        +-> AgentBridge subprocesses ----+-> spoken job updates
+microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> speakers
+                                      |                         |
+                                      +-> AgentBridge ----------+-> spoken job updates
                                                      |
                                                      +-> main PC or configured remote launcher
 ```
@@ -24,8 +24,14 @@ microphone -> [wake gate] -> STT -> transcript/delegation -> memory -> Ollama ->
   session state, persona controls, and shortcuts.
 - `session.py` owns the Pipecat pipeline and exposes thread-safe commands to the
   GUI. The audio loop never calls Tk directly.
+- `intent_router.py` routes explicit commands and high-confidence keyword
+  matches without model latency, skips pure acknowledgments, and uses a small
+  local classifier only for otherwise-ambiguous requests. Vague references to
+  a named-but-forgotten package/skill/tool are caught deterministically and
+  sent verbatim as identify-then-install tasks, held for confirmation.
 - `session_processors.py` contains the microphone gate, role-scoped transcript
-  observers, and the deterministic delegation processor.
+  observers, delegation processor, and guard against replies that claim agent
+  work without actually dispatching it.
 - `wake_word.py` provides the optional wake-word gate (openwakeword, fully
   local): with `WAKE_WORD_ENABLED=true` mic audio is dropped until the wake
   phrase is heard, then the mic stays open for a configurable window. The
@@ -35,7 +41,12 @@ microphone -> [wake gate] -> STT -> transcript/delegation -> memory -> Ollama ->
 - `app_state.py` remembers the last persona and tool-user picks
   (`jess_app_state.json`) so a restart boots as the character you actually use.
 - `agent_bridge.py` owns external agent subprocesses, bounded output capture,
-  cancellation, completion events, and spoken summaries.
+  cancellation, provider-limit detection, model overrides, completion events,
+  and spoken summaries. See `model-recovery.md` for the exact CLI mappings.
+  Jobs default to a neutral sandbox directory rather than this repository, every
+  task carries a scope preamble, and the host repo's working tree is diffed
+  before/after each run so an unexpected edit to Jess's own source is flagged
+  and announced.
 - `config.py`, `personas.py`, and `persona_config.py` hold operator settings and
   persona overrides.
 - `memory.py`, `memory_manager.py`, and `mem0_setup.py` provide transcript and
@@ -44,8 +55,9 @@ microphone -> [wake gate] -> STT -> transcript/delegation -> memory -> Ollama ->
 ## What is solid
 
 - Voice and typed input use the same session and routing path.
-- Delegation happens in code before the LLM sees the request, so the assistant
-  cannot claim to have launched work it did not launch.
+- Delegation happens in code before the LLM sees the request. Each routing
+  decision is logged; markerless promises are corrected and remembered so a
+  follow-up approval can dispatch the original request.
 - Agent work is asynchronous and streams to a dedicated console.
 - STT, TTS, personas, model choice, wake word, memory, agent completion
   announcements, and audio devices are independently configurable (most of it

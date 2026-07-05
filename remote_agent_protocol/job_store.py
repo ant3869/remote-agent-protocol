@@ -33,6 +33,12 @@ def job_to_row(job: Any) -> dict[str, Any]:
         "step_total": job.step_total,
         "last_completed_step": job.last_completed_step,
         "summary": job.summary,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "failure_kind": job.failure_kind,
+        "failure_detail": job.failure_detail,
+        "model_label": job.model_label,
+        "host_modified": getattr(job, "host_modified", False),
         "lines": list(job.lines)[-_MAX_PERSISTED_LINES:],
     }
 

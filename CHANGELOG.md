@@ -8,6 +8,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.2.0] - 2026-07-05
+
+### Added
+
+- Tiered intent routing keeps explicit commands, acknowledgments, and keyword
+  matches on a zero-model-call path, using the resident `llama3.2:1b` model
+  only for ambiguous requests with a 1.5-second fallback budget.
+- Markerless agent promises are corrected and retained so a follow-up such as
+  "okay, do it" dispatches the request the assistant previously promised.
+- Vague capability references ("there's a package that does X, I forgot the
+  name, make sure we have it") are detected deterministically and shipped to
+  the agent verbatim as an identify-then-install task held for spoken
+  confirmation, instead of being rewritten into a generic action prompt.
+- Agent scope guardrails: delegated jobs run in a neutral sandbox directory
+  (`data/agent_workspace/`) instead of inheriting this repository as their
+  working directory, every task carries a scope preamble telling the agent its
+  cwd is not the subject of the task, and each job is checked afterwards for
+  silent modifications to this application's own working tree -- flagged in
+  the job history and announced out loud.
+
+### Fixed
+
+- Agent CLIs that echo status-protocol examples or print terminal rate-limit
+  errors no longer report false successful completion.
+- Runtime logs and persisted agent jobs now carry full ISO timestamps, and
+  silent agent subprocesses fail after five minutes instead of running forever.
+- Provider quota/rate/capacity failures are classified from streaming output;
+  fatal quota exhaustion is announced immediately and supports spoken OpenAI
+  model switching plus an explicit one-shot retry for CodePuppy and Hermes.
+
 ## [1.1.0] - 2026-07-04
 
 Project renamed to **remote-agent-protocol** (the desktop assistant persona is

@@ -17,6 +17,37 @@ def parse(text: str):
     return voice_commands.parse_delegation(text, BACKENDS, ALIASES)
 
 
+class ModelSwitchCommandTests(unittest.TestCase):
+    def test_contextual_provider_switch(self):
+        self.assertEqual(
+            voice_commands.parse_model_switch("change to OpenAI", ALIASES),
+            (None, "openai", False),
+        )
+
+    def test_explicit_agent_switch_and_retry(self):
+        self.assertEqual(
+            voice_commands.parse_model_switch("switch Code Puppy to OpenAI and retry", ALIASES),
+            ("code-puppy", "openai", True),
+        )
+
+    def test_highest_latest_wording_is_deterministic(self):
+        self.assertEqual(
+            voice_commands.parse_model_switch(
+                "use the highest latest OpenAI model for Hermes", ALIASES
+            ),
+            ("hermes", "openai", False),
+        )
+
+    def test_plain_model_discussion_is_not_a_control_command(self):
+        self.assertIsNone(
+            voice_commands.parse_model_switch("is the OpenAI model any good?", ALIASES)
+        )
+
+    def test_retry_follow_up(self):
+        self.assertTrue(voice_commands.is_retry_request("retry that task"))
+        self.assertFalse(voice_commands.is_retry_request("tell me why retries matter"))
+
+
 class ParseDelegationTests(unittest.TestCase):
     # -- real utterance from ant's logs that previously got vibed at ---------
     def test_real_utterance_tell_hermes_to_write_a_file(self):
@@ -133,6 +164,28 @@ class ParseImplicitTaskTests(unittest.TestCase):
     def test_you_should_preamble(self):
         self.assertIsNotNone(self.parse("you should look up the weather for tomorrow"))
 
+    # -- regression: jess_runtime.log 23:26 -- fabricated storm forecast -----
+    def test_give_me_the_forecast_delegates(self):
+        task = self.parse("Give me the storm forecast for Bentonville.")
+        self.assertIsNotNone(task)
+        self.assertIn("forecast", task)
+
+    def test_whats_the_weather_question_still_delegates(self):
+        # Live data is the one exception to the question-word guard.
+        self.assertIsNotNone(self.parse("What's the weather in Bentonville?"))
+
+    def test_hows_the_traffic_delegates(self):
+        self.assertIsNotNone(self.parse("how's the traffic on the way downtown"))
+
+    def test_tell_me_the_news_delegates(self):
+        self.assertIsNotNone(self.parse("tell me the news headlines this morning"))
+
+    def test_past_tense_weather_question_stays_with_jess(self):
+        self.assertIsNone(self.parse("did you check the weather yet?"))
+
+    def test_weather_small_talk_stays_with_jess(self):
+        self.assertIsNone(self.parse("the weather is really nice today"))
+
     # -- should NOT delegate: chat stays with Jess ---------------------------
     def test_write_me_a_poem_stays_with_jess(self):
         self.assertIsNone(self.parse("write me a poem about space"))
@@ -157,6 +210,61 @@ class ParseImplicitTaskTests(unittest.TestCase):
 
     def test_browser_word_does_not_trigger_browse_verb(self):
         self.assertIsNone(self.parse("my browser is acting weird lately"))
+
+
+class ParseCapabilityRequestTests(unittest.TestCase):
+    def parse(self, text: str):
+        return voice_commands.parse_capability_request(text)
+
+    # -- the real utterance from jess_runtime.log 2026-07-05 12:35 that got
+    # -- flattened into "Enable YouTube video watching on the computer" ------
+    def test_youtube_skill_request_is_a_capability_lookup(self):
+        text = (
+            "there's a skill or a package that helps agents watch YouTube videos "
+            "I don't remember what it's called but can you make sure the "
+            "batcomputer has that"
+        )
+        self.assertEqual(self.parse(text), text)
+
+    def test_verbatim_casing_is_preserved(self):
+        text = "There's a Package for parsing PDFs, I forgot the name, install it"
+        self.assertEqual(self.parse(text), text)
+
+    def test_forgot_the_name_variant(self):
+        self.assertIsNotNone(
+            self.parse("there's a package for X but I forgot the name, can we get it")
+        )
+
+    def test_some_skill_that_does_y_variant(self):
+        self.assertIsNotNone(
+            self.parse(
+                "there's some skill that transcribes podcasts, no idea what "
+                "it's called, can you make sure we have it"
+            )
+        )
+
+    def test_i_think_its_called_variant(self):
+        self.assertIsNotNone(
+            self.parse("that download tool, I think it's called something like wget, add it")
+        )
+
+    def test_plural_capability_noun_matches(self):
+        self.assertIsNotNone(
+            self.parse("there are these plugins for linting, can't remember what they're called")
+        )
+
+    # -- must NOT trigger -----------------------------------------------------
+    def test_named_install_takes_the_normal_path(self):
+        self.assertIsNone(self.parse("install yt-dlp on the batcomputer"))
+
+    def test_forgetful_chat_without_capability_noun_stays_chat(self):
+        self.assertIsNone(self.parse("I watched a great movie, don't remember what it's called"))
+
+    def test_capability_noun_without_uncertainty_stays_on_normal_path(self):
+        self.assertIsNone(self.parse("tell me about the requests package"))
+
+    def test_empty_utterance_does_not_trigger(self):
+        self.assertIsNone(self.parse("   "))
 
 
 class RequiresConfirmationTests(unittest.TestCase):

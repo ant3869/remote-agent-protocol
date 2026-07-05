@@ -26,6 +26,8 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 from loguru import logger
 
@@ -71,6 +73,44 @@ Emit only major milestones, not token-by-token updates. Continue the requested t
 normally; these status lines are consumed by the host application.
 """.strip()
 
+# The status protocol appended to every task is often echoed back verbatim by
+# agent CLIs. Its literal examples must never be mistaken for real progress --
+# the echoed "completed" example would instantly terminate the job.
+_PROTOCOL_EXAMPLE_STATUSES = (
+    {"state": "in_progress", "action": "short current action"},
+    {"state": "completed", "summary": "short result"},
+)
+
+# Agents that crash (rate limits, tracebacks, stream failures) often still
+# exit 0, so a clean return code alone can't be trusted. If the tail of the
+# output looks like this and no structured terminal marker arrived, the job
+# failed. Kept narrow: mid-job errors an agent recovered from scroll out of
+# the inspected window.
+_ERROR_TAIL_RE = re.compile(
+    r"❌"
+    r"|Traceback \(most recent call last\)"
+    r"|\b(?:unexpected|fatal) error\b"
+    r"|\berror:"
+    r"|\bstatus_code:\s*[45]\d\d\b"
+    r"|\busage.?limit.?reached\b"
+    r"|\brate.?limit(?:ed|_error)?\b"
+    r"|\bfailed after \d+ attempts\b"
+    r"|\bpermission denied\b",
+    re.IGNORECASE,
+)
+_ERROR_TAIL_WINDOW = 8  # non-empty lines inspected at the end of the output
+_QUOTA_RE = re.compile(
+    r"usage.?limit.?reached|insufficient.?quota|billing.?hard.?limit|"
+    r"quota (?:has been )?(?:exceeded|exhausted)|out of (?:credits|usage)|"
+    r"credit balance|resource.?exhausted",
+    re.IGNORECASE,
+)
+_RATE_LIMIT_RE = re.compile(r"\b429\b|rate.?limit|too many requests", re.IGNORECASE)
+_CAPACITY_RE = re.compile(
+    r"provider.*(?:capacity|overloaded)|(?:server|service).*(?:overloaded|at capacity)",
+    re.IGNORECASE,
+)
+
 _MAX_KEPT_LINES = 500  # keep logs bounded; tail is what matters
 
 # CLI agents love ANSI colours; Jess should not attempt to pronounce \x1b[0m.
@@ -79,6 +119,10 @@ _QUESTION_MARKER_RE = re.compile(
     r"^\s*(?:follow[-_ ]?up[-_ ]?question|clarifying[-_ ]?question|question)\s*[:\-]\s*(.+)$",
     re.IGNORECASE,
 )
+
+
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
 def clean_line(raw: str) -> str:
@@ -106,18 +150,69 @@ class AgentJob:
     last_completed_step: str = ""
     summary: str = ""
     announce_start: bool = False
+    started_at: str = field(default_factory=_now_iso)
+    finished_at: str = ""
+    failure_kind: str = ""
+    failure_detail: str = ""
+    model_label: str = ""
+    host_modified: bool = False  # the job touched the host app's own source
     _t0: float = field(default=0.0, repr=False)
     _last_status: float = field(default=0.0, repr=False)
+    _host_before: str | None = field(default=None, repr=False)
 
 
-def build_command(template: list[str], task: str) -> list[str]:
+def build_command(
+    template: list[str], task: str, *, extra_args: list[str] | None = None
+) -> list[str]:
     """Substitute placeholders in a backend command template."""
-    return [part.replace("{task}", task).replace("{python}", sys.executable) for part in template]
+    command = [
+        part.replace("{task}", task).replace("{python}", sys.executable) for part in template
+    ]
+    if extra_args:
+        command[1:1] = extra_args
+    return command
+
+
+def detect_provider_failure(line: str) -> str | None:
+    """Classify provider-side quota, throttling, or capacity failures."""
+    if _QUOTA_RE.search(line):
+        return "quota"
+    if _RATE_LIMIT_RE.search(line):
+        return "rate_limit"
+    if _CAPACITY_RE.search(line):
+        return "capacity"
+    return None
 
 
 def with_status_protocol(task: str) -> str:
     """Append the small stdout status contract understood by AgentBridge."""
     return f"{task}\n\n{_STATUS_PROTOCOL}"
+
+
+def with_scope(task: str, cwd: str | None, preamble: str) -> str:
+    """Prepend the scope preamble so agents know the cwd is not the subject.
+
+    Without it, a coding agent handed a vague task treats whatever directory
+    it is standing in as the thing to change (jess_runtime.log 2026-07-05
+    12:35: CodePuppy "enabled YouTube" by editing this application's source).
+    """
+    if not preamble:
+        return task
+    return f"{preamble.format(cwd=cwd or 'unspecified')}\n\n{task}"
+
+
+def resolve_cwd(cwd: str | None, workspace_dir: str | None) -> str | None:
+    """Default a job to the neutral agent workspace, creating it on first use.
+
+    ``cwd=None`` used to mean "inherit the host's working directory" -- i.e.
+    this repository -- so agents woke up inside their own host's source tree.
+    """
+    if cwd:
+        return cwd
+    if not workspace_dir:
+        return None
+    Path(workspace_dir).mkdir(parents=True, exist_ok=True)
+    return workspace_dir
 
 
 def parse_status_line(line: str) -> dict | None:
@@ -142,7 +237,18 @@ def parse_status_line(line: str) -> dict | None:
         field_value = value.get(field_name)
         if isinstance(field_value, int) and field_value > 0:
             status[field_name] = field_value
+    if status in _PROTOCOL_EXAMPLE_STATUSES:
+        return None  # the CLI echoed our own protocol examples back
     return status
+
+
+def error_tail(lines: list[str]) -> str | None:
+    """Return the most recent error-shaped line near the end of the output."""
+    tail = [line.strip() for line in lines if line.strip()][-_ERROR_TAIL_WINDOW:]
+    for line in reversed(tail):
+        if _ERROR_TAIL_RE.search(line):
+            return line[:300]
+    return None
 
 
 def infer_status(line: str) -> dict | None:
@@ -207,16 +313,36 @@ def follow_up_question(job: AgentJob) -> str | None:
 
 def announcement(job: AgentJob) -> str:
     """One-sentence-ish update for Jess to relay to the user."""
+    tamper = (
+        " Warning: this job modified my own source files -- review the working tree."
+        if job.host_modified
+        else ""
+    )
     questions = follow_up_questions(job)
     if questions:
         joined = " ".join(questions)
-        return f"Agent '{job.agent}' needs your input: {joined}"
+        return f"Agent '{job.agent}' needs your input: {joined}{tamper}"
     summary = job.summary or summarize_output(job.lines)
     if job.status == STATUS_DONE:
-        return f"Background task on agent '{job.agent}' finished: {job.task}. Result: {summary}"
+        return (
+            f"Background task on agent '{job.agent}' finished: {job.task}. "
+            f"Result: {summary}{tamper}"
+        )
     if job.status == STATUS_CANCELLED:
-        return f"Background task on agent '{job.agent}' was cancelled: {job.task}."
-    return f"Background task on agent '{job.agent}' FAILED: {job.task}. Last output: {summary}"
+        return f"Background task on agent '{job.agent}' was cancelled: {job.task}.{tamper}"
+    if job.failure_kind == "quota":
+        return (
+            f"Agent '{job.agent}' failed because its current model or provider is out of "
+            f"usage or quota. Say 'switch {job.agent} to OpenAI' and then 'retry'.{tamper}"
+        )
+    if job.failure_kind in {"rate_limit", "capacity"}:
+        return (
+            f"Agent '{job.agent}' failed because its provider is rate-limited or at capacity. "
+            f"You can say 'switch {job.agent} to OpenAI'.{tamper}"
+        )
+    return (
+        f"Background task on agent '{job.agent}' FAILED: {job.task}. Last output: {summary}{tamper}"
+    )
 
 
 class AgentBridge:
@@ -234,6 +360,10 @@ class AgentBridge:
         progress_interval_secs: float = 30.0,
         completion_grace_secs: float = 2.0,
         on_persist: Callable[[AgentJob], "asyncio.Future | None"] | None = None,
+        model_targets: dict | None = None,
+        workspace_dir: str | None = None,
+        scope_preamble: str = "",
+        host_repo: str | None = None,
     ):
         """Initialize the bridge.
 
@@ -247,6 +377,13 @@ class AgentBridge:
             progress_interval_secs: Interval for silent-job heartbeats.
             completion_grace_secs: Grace after a structured terminal marker.
             on_persist: Optional async callback that persists terminal jobs.
+            model_targets: Agent/provider mappings for deterministic model overrides.
+            workspace_dir: Default cwd for jobs started without one; None
+                inherits the host process directory (the old behavior).
+            scope_preamble: Text prepended to every task ({cwd} placeholder);
+                empty disables it.
+            host_repo: Git repository checked for modification by each job;
+                None or empty disables the check.
         """
         self._backends = backends
         self._on_event = on_event
@@ -257,6 +394,12 @@ class AgentBridge:
         self._kill_grace_secs = kill_grace_secs
         self._progress_interval_secs = progress_interval_secs
         self._completion_grace_secs = completion_grace_secs
+        self._workspace_dir = workspace_dir
+        self._scope_preamble = scope_preamble
+        self._host_repo = host_repo
+        self._model_targets = model_targets or {}
+        self._model_overrides: dict[str, list[str]] = {}
+        self._model_labels: dict[str, str] = {}
         self._jobs: dict[str, AgentJob] = {}
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         # Keep strong refs to the streaming tasks: asyncio only holds *weak*
@@ -279,6 +422,19 @@ class AgentBridge:
         """Return a known job by id."""
         return self._jobs.get(job_id)
 
+    def has_active(self) -> bool:
+        """True while any job is running, waiting, or blocked."""
+        return any(job.status in _ACTIVE_STATUSES for job in self._jobs.values())
+
+    def set_model_override(self, agent: str, provider: str) -> str | None:
+        """Select a configured per-run model target; return its spoken label."""
+        target = self._model_targets.get(agent, {}).get(provider)
+        if not isinstance(target, dict) or not target.get("args") or not target.get("label"):
+            return None
+        self._model_overrides[agent] = list(target["args"])
+        self._model_labels[agent] = str(target["label"])
+        return self._model_labels[agent]
+
     # -- lifecycle ------------------------------------------------------------
 
     async def start(
@@ -291,6 +447,7 @@ class AgentBridge:
             task=task,
             machine=self.machine_for(agent),
             announce_start=announce_start,
+            model_label=self._model_labels.get(agent, ""),
         )
         job._t0 = time.monotonic()
         job._last_status = job._t0
@@ -300,8 +457,14 @@ class AgentBridge:
         if template is None:
             return await self._fail_fast(job, f"unknown agent backend '{agent}'")
 
-        command_task = task if agent == "mock" else with_status_protocol(task)
-        command = build_command(template, command_task)
+        cwd = resolve_cwd(cwd, self._workspace_dir)
+        job._host_before = await self._host_snapshot()
+        command_task = (
+            task
+            if agent == "mock"
+            else with_status_protocol(with_scope(task, cwd, self._scope_preamble))
+        )
+        command = build_command(template, command_task, extra_args=self._model_overrides.get(agent))
         try:
             proc = await asyncio.create_subprocess_exec(
                 *command,
@@ -358,6 +521,7 @@ class AgentBridge:
         job.secs = 0.0
         job.lines.append(reason)
         job.summary = reason
+        job.finished_at = _now_iso()
         logger.warning(f"Agent job {job.job_id} failed to start: {reason}")
         self._emit_job(job, "finished", summary=reason)
         await self._notify_finished(job)
@@ -370,6 +534,10 @@ class AgentBridge:
             line = clean_line(raw.decode("utf-8", errors="replace"))
             if not line:
                 continue
+            failure_kind = detect_provider_failure(line)
+            if failure_kind:
+                job.failure_kind = failure_kind
+                job.failure_detail = line[:300]
             status = parse_status_line(line)
             if status is not None:
                 self._apply_status(job, status)
@@ -382,6 +550,13 @@ class AgentBridge:
             job.lines.append(line)
             del job.lines[:-_MAX_KEPT_LINES]
             self._emit_job(job, "output", line=line)
+            if failure_kind == "quota":
+                job.status = STATUS_FAILED
+                job.state = STATE_FAILED
+                job.summary = "Current model/provider usage or quota is exhausted"
+                await self._terminate(proc)
+                job.returncode = await proc.wait()
+                return
             inferred = infer_status(line)
             if inferred is not None:
                 self._apply_status(job, inferred)
@@ -412,15 +587,59 @@ class AgentBridge:
             job.status = STATUS_FAILED
             job.state = STATE_FAILED
         else:
-            job.status = STATUS_DONE if job.returncode == 0 else STATUS_FAILED
-            job.state = STATE_COMPLETED if job.status == STATUS_DONE else STATE_FAILED
+            # No structured terminal marker arrived, so the exit code is the
+            # only signal -- and agents that crash often still exit 0, so an
+            # error-shaped output tail also counts as failure.
+            error_line = error_tail(job.lines) if job.returncode == 0 else None
+            failed = job.returncode != 0 or error_line is not None
+            job.status = STATUS_FAILED if failed else STATUS_DONE
+            job.state = STATE_FAILED if failed else STATE_COMPLETED
+            if error_line and not job.summary:
+                job.summary = error_line
+            if failed and job.failure_kind and not job.summary:
+                job.summary = job.failure_detail
         job.secs = round(time.monotonic() - job._t0, 1)
         summary = job.summary or summarize_output(job.lines)
         job.summary = summary
+        job.finished_at = _now_iso()
+        await self._check_host_repo(job)
         self._emit_job(job, "finished", summary=summary, secs=job.secs)
         logger.info(f"Agent job {job.job_id} [{job.agent}] -> {job.status}")
 
         await self._notify_finished(job)
+
+    async def _host_snapshot(self) -> str | None:
+        """``git status --porcelain`` of the host repo; None when disabled/unavailable."""
+        if not self._host_repo:
+            return None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "-C",
+                self._host_repo,
+                "status",
+                "--porcelain",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), 10.0)
+        except (TimeoutError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        return out.decode("utf-8", errors="replace")
+
+    async def _check_host_repo(self, job: AgentJob) -> None:
+        """Flag the job if the host repo's working tree changed during the run."""
+        if job._host_before is None:
+            return
+        after = await self._host_snapshot()
+        if after is not None and after != job._host_before:
+            job.host_modified = True
+            logger.warning(
+                f"Agent job {job.job_id} [{job.agent}] modified the host repository "
+                f"working tree during the run"
+            )
 
     async def _notify_finished(self, job: AgentJob) -> None:
         """Run best-effort persistence and voice callbacks for terminal jobs."""
@@ -526,6 +745,12 @@ class AgentBridge:
             "step_total": job.step_total,
             "last_completed_step": job.last_completed_step,
             "summary": job.summary,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+            "failure_kind": job.failure_kind,
+            "failure_detail": job.failure_detail,
+            "model_label": job.model_label,
+            "host_modified": job.host_modified,
             "elapsed_secs": job.secs
             if job.secs is not None
             else round(time.monotonic() - job._t0, 1),

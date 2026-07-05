@@ -48,9 +48,10 @@ def _formatter(record) -> str:
         overflow = len(message) - _MAX_LINE
         message = f"{message[:_MAX_LINE].rstrip()} …(+{overflow} chars)"
     record["extra"]["body"] = message
+    record["extra"]["timestamp"] = record["time"].isoformat(timespec="milliseconds")
 
     return (
-        "<green>{time:HH:mm:ss.SSS}</green> │ "
+        "<green>{extra[timestamp]}</green> │ "
         "<level>{level: <5}</level> │ "
         "<cyan>{extra[source]: <26}</cyan> │ "
         "<level>{extra[body]}</level>\n{exception}"

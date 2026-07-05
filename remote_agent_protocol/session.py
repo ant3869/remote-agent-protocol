@@ -9,6 +9,8 @@ import asyncio
 import itertools
 import sys
 import time
+from collections import deque
+from dataclasses import asdict
 from datetime import datetime
 
 from loguru import logger
@@ -33,6 +35,7 @@ from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransp
 from pipecat.workers.runner import WorkerRunner
 from remote_agent_protocol import (
     agent_bridge,
+    intent_router,
     job_store,
     mem0_setup,
     memory,
@@ -52,7 +55,7 @@ from remote_agent_protocol.session_processors import (
     LLMDelegateTap,
     MicGate,
     TranscriptTap,
-    resolve_delegation,
+    looks_like_delegation_promise,
 )
 
 
@@ -88,6 +91,10 @@ class VoiceSession:
             progress_interval_secs=cfg.AGENT_PROGRESS_INTERVAL_SECS,
             completion_grace_secs=cfg.AGENT_COMPLETION_GRACE_SECS,
             on_persist=self._persist_job if cfg.AGENT_HISTORY_FILE else None,
+            model_targets=cfg.AGENT_MODEL_TARGETS,
+            workspace_dir=cfg.AGENT_WORKSPACE_DIR,
+            scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
+            host_repo=cfg.AGENT_HOST_REPO,
         )
         self._agent_last_spoken: dict[str, tuple[float, str]] = {}
         self._default_agent_backend = cfg.AGENT_DEFAULT_BACKEND
@@ -99,6 +106,24 @@ class VoiceSession:
         # Delegations held awaiting the user's yes/no: token -> (agent, task, cwd).
         self._pending_confirmations: dict[str, tuple[str, str, str | None]] = {}
         self._confirm_counter = itertools.count(1)
+        # Fabricated-delegation guard state: the next LLM response legitimately
+        # talks about the agent (it answers an injected ack/update), and how
+        # many correction turns were already spent on the current user turn.
+        self._agent_ack_turn = False
+        self._promise_nudges = 0
+        self._last_user_text = ""  # embedded in correction turns as the real task
+
+        # Intent routing: every utterance gets a RoutingDecision; the last 25
+        # are kept for the diagnostics snapshot. _force_confirm carries an
+        # uncertain mutating decision into _delegate_ack_ex for one call.
+        # _unfulfilled_promise remembers the user request behind a persona
+        # reply that promised agent work without dispatching, so a follow-up
+        # "okay, do it" can dispatch deterministically.
+        self._router = intent_router.IntentRouter()
+        self._routing_history: deque[dict] = deque(maxlen=25)
+        self._force_confirm = False
+        self._unfulfilled_promise = ""
+        self._model_recovery: tuple[str, str] | None = None
         # Strong refs to fire-and-forget tasks; asyncio only keeps weak ones.
         self._bg_tasks: set[asyncio.Task] = set()
 
@@ -183,6 +208,7 @@ class VoiceSession:
                 self._resolve_delegation,
                 self._maybe_consume_confirmation,
                 context_refresh=self._context_refresh_frame,
+                control_check=self._maybe_handle_model_control,
             ),
             user_aggregator,
         ]
@@ -191,7 +217,7 @@ class VoiceSession:
         processors.append(self._llm)
         if cfg.AGENT_LLM_DELEGATE:
             # Before the assistant tap + TTS, so markers never reach speech or GUI.
-            processors.append(LLMDelegateTap(self._llm_delegate))
+            processors.append(LLMDelegateTap(self._llm_delegate, on_response=self._on_llm_response))
         processors += [
             TranscriptTap(self._on_event, role="assistant"),
             self._tts,
@@ -228,6 +254,7 @@ class VoiceSession:
         assert self._worker is not None, "call build() before run()"
         self._loop = asyncio.get_running_loop()
         self._start_voicebox_warmups()
+        self._spawn(self._router.warmup(), name="intent-router-warmup")
 
         # Kick things off. "user" role because Ollama doesn't know "developer".
         remembered = bool(self._context and self._context.get_messages())
@@ -492,6 +519,7 @@ class VoiceSession:
 
     def _context_refresh_frame(self) -> LLMUpdateSettingsFrame | None:
         """Settings frame carrying a freshly stamped system instruction."""
+        self._promise_nudges = 0  # fresh user turn, fresh correction budget
         if self._llm is None:
             return None
         return LLMUpdateSettingsFrame(
@@ -559,8 +587,74 @@ class VoiceSession:
         self._emit({"type": "memory", "scope": "short", "rows": []})
         logger.info("Forgot short-term transcript memory")
 
-    def _resolve_delegation(self, text: str) -> tuple[str, str] | None:
-        return resolve_delegation(text, self._default_agent_backend)
+    async def _resolve_delegation(self, text: str) -> tuple[str, str] | None:
+        """Route one utterance through the intent router; record the decision."""
+        followed_up = self._consume_promise_follow_up(text)
+        if followed_up is not None:
+            return followed_up
+        self._last_user_text = text.strip()
+        decision = await self._router.route(text, self._default_agent_backend)
+        self._record_routing(decision)
+        if decision.action == intent_router.ACTION_NONE:
+            return None
+        self._force_confirm = decision.action == intent_router.ACTION_CONFIRM
+        return decision.agent, decision.task
+
+    def _consume_promise_follow_up(self, text: str) -> tuple[str, str] | None:
+        """Dispatch the promised-but-unsent task when the user approves it.
+
+        The persona sometimes promises agent work without dispatching; the
+        request is remembered in ``_unfulfilled_promise``. A bare approval
+        ("okay, do it") then refers to that promise -- a fact no single-
+        utterance classifier can recover -- so resolve it here, for free.
+        """
+        if not self._unfulfilled_promise or self._pending_confirmations:
+            return None
+        reply = voice_commands.classify_confirmation_reply(text)
+        if reply is None:
+            return None
+        task, self._unfulfilled_promise = self._unfulfilled_promise, ""
+        if reply == "deny":
+            return None
+        self._record_routing(
+            intent_router.RoutingDecision(
+                text=text,
+                action=intent_router.ACTION_DISPATCH,
+                intent="agent_task",
+                category="other_action",
+                requirement="required",
+                confidence=1.0,
+                task=task,
+                agent=self._default_agent_backend,
+                reason="user approved the task the persona had promised",
+                source="follow_up",
+            )
+        )
+        return self._default_agent_backend, task
+
+    def _record_routing(self, decision: intent_router.RoutingDecision) -> None:
+        """Log, emit, and retain one routing decision for inspection."""
+        row = asdict(decision)
+        self._routing_history.append(row)
+        self._emit({"type": "routing", **row})
+        logger.info(
+            f"Routing[{decision.source}] {decision.action}"
+            f" intent={decision.intent} category={decision.category or '-'}"
+            f" confidence={decision.confidence:.2f} requirement={decision.requirement}"
+            f" fallback={decision.fallback or '-'} ({decision.elapsed_ms}ms)"
+            f" reason={decision.reason!r}"
+        )
+        if cfg.DEBUG_MODE:
+            self._emit(
+                {
+                    "type": "sys",
+                    "text": (
+                        f"-- routing: {decision.action} via {decision.source}"
+                        f" ({decision.category or 'chat'},"
+                        f" conf {decision.confidence:.2f}) {decision.reason} --"
+                    ),
+                }
+            )
 
     async def _start_agent_task(self, agent: str, task: str, cwd: str | None = None) -> None:
         await self._bridge.start(agent, task, cwd, announce_start=True)
@@ -576,11 +670,16 @@ class VoiceSession:
 
     def _delegate_ack_ex(self, agent: str, task: str, cwd: str | None = None) -> tuple[str, bool]:
         """Dispatch or hold a delegation; return (LLM-facing ack, was_held)."""
-        if cfg.AGENT_CONFIRM_ENABLED and voice_commands.requires_confirmation(
-            agent,
-            task,
-            elevated_markers=cfg.AGENT_ELEVATED_MARKERS,
-            destructive_words=cfg.AGENT_DESTRUCTIVE_WORDS,
+        self._agent_ack_turn = True  # the reply to the ack talks about the agent truthfully
+        force_confirm, self._force_confirm = self._force_confirm, False
+        if force_confirm or (
+            cfg.AGENT_CONFIRM_ENABLED
+            and voice_commands.requires_confirmation(
+                agent,
+                task,
+                elevated_markers=cfg.AGENT_ELEVATED_MARKERS,
+                destructive_words=cfg.AGENT_DESTRUCTIVE_WORDS,
+            )
         ):
             token = f"confirm-{next(self._confirm_counter)}"
             self._pending_confirmations[token] = (agent, task, cwd)
@@ -610,6 +709,35 @@ class VoiceSession:
         if held:
             self._spawn(self._inject_and_run(ack), name="llm-delegate-confirm")
 
+    def _on_llm_response(self, text: str, dispatched: bool) -> None:
+        """Catch replies that promise agent work but requested none.
+
+        The persona sometimes narrates "I shall summon the agent" without the
+        ``[[delegate: ...]]`` marker -- nothing dispatches and the user is
+        misled. Inject one correction turn so the model either emits the
+        marker for real or walks the claim back. Skipped when the reply
+        legitimately talks about the agent: a marker did dispatch, the turn
+        answers an injected ack/update, work is genuinely in flight, or a
+        correction was already spent on this user turn.
+        """
+        ack_turn, self._agent_ack_turn = self._agent_ack_turn, False
+        if dispatched:
+            self._unfulfilled_promise = ""
+            return
+        if ack_turn or self._pending_confirmations or self._bridge.has_active():
+            return
+        if not looks_like_delegation_promise(text):
+            return
+        self._unfulfilled_promise = self._last_user_text
+        if self._promise_nudges >= 1:
+            logger.warning(f"LLM again promised agent work without a marker: {text!r}")
+            return
+        self._promise_nudges += 1
+        logger.warning(f"LLM promised agent work without a delegate marker; correcting: {text!r}")
+        request = self._last_user_text or "the user's latest request"
+        prompt = cfg.DELEGATION_UNSENT_PROMPT.format(request=request)
+        self._spawn(self._inject_and_run(prompt), name="delegate-correction")
+
     def _maybe_consume_confirmation(self, text: str) -> str | None:
         """If a job is pending and ``text`` is a yes/no, resolve it. Else None."""
         if not self._pending_confirmations:
@@ -619,12 +747,47 @@ class VoiceSession:
             return None
         token = next(reversed(self._pending_confirmations))
         agent, task, cwd = self._pending_confirmations.pop(token)
+        self._agent_ack_turn = True  # the reply relays the confirm/deny outcome
         self._emit({"type": "agent_confirm_resolved", "token": token, "decision": decision})
         if decision == "approve":
             self._spawn(self._bridge.start(agent, task, cwd), name=f"delegate-{agent}")
             return cfg.AGENT_CONFIRM_APPROVED_PROMPT.format(agent=agent, task=task)
         logger.info(f"Delegation denied by voice [{agent}]: {task}")
         return cfg.AGENT_CONFIRM_DENIED_PROMPT.format(agent=agent, task=task)
+
+    async def _maybe_handle_model_control(self, text: str) -> str | None:
+        """Handle a spoken model switch or one-shot retry after provider failure."""
+        if voice_commands.is_retry_request(text):
+            if self._model_recovery is None:
+                return None
+            agent, task = self._model_recovery
+            self._model_recovery = None
+            await self._bridge.start(agent, task)
+            return f"[Agent model control: retrying the failed task on '{agent}'.]"
+
+        parsed = voice_commands.parse_model_switch(text, cfg.AGENT_SPOKEN_ALIASES)
+        if parsed is None:
+            return None
+        explicit_agent, provider, retry = parsed
+        recovery = self._model_recovery
+        agent = explicit_agent or (recovery[0] if recovery else self._default_agent_backend)
+        label = self._bridge.set_model_override(agent, provider)
+        if label is None:
+            return (
+                f"[Agent model control: '{agent}' has no configured {provider} model target. "
+                "Tell the user the switch is unsupported and do not claim it succeeded.]"
+            )
+        if retry and recovery is not None and recovery[0] == agent:
+            self._model_recovery = None
+            await self._bridge.start(agent, recovery[1])
+            return (
+                f"[Agent model control: switched '{agent}' to {label} and retrying the failed "
+                "task now. Confirm this in one short sentence.]"
+            )
+        return (
+            f"[Agent model control: '{agent}' will use {label} on its next run. Confirm the "
+            "switch and say the failed task was not retried yet.]"
+        )
 
     def approve_agent_task(self, token: str) -> None:
         """GUI Approve button: run a held delegation."""
@@ -655,6 +818,7 @@ class VoiceSession:
         """Push a ready-made instruction into the context and run one LLM turn."""
         if self._context is None or self._worker is None:
             return
+        self._agent_ack_turn = True  # injected instructions are app-truth, not LLM claims
         self._context.add_message({"role": "user", "content": content})
         await self._worker.queue_frames([LLMRunFrame()])
 
@@ -685,6 +849,7 @@ class VoiceSession:
             "voice_backend": self._persona.voice_backend,
             "default_agent_backend": self._default_agent_backend,
             "agent_backends": self._bridge.backend_names(),
+            "recent_routing": list(self._routing_history),
             "short_term_memory": memory_manager.transcript_rows(
                 memory.load_memory(cfg.MEMORY_FILE, cfg.MEMORY_MAX_MSGS)
             ),
@@ -695,11 +860,13 @@ class VoiceSession:
         if not text or self._context is None or self._worker is None:
             return
         self._emit({"type": "transcript", "role": "user", "text": text})
-        consumed = self._maybe_consume_confirmation(text)
+        consumed = await self._maybe_handle_model_control(text)
+        if consumed is None:
+            consumed = self._maybe_consume_confirmation(text)
         if consumed is not None:
             content = consumed
         else:
-            parsed = self._resolve_delegation(text)
+            parsed = await self._resolve_delegation(text)
             if parsed is not None:
                 agent, task = parsed
                 logger.info(f"Typed delegation -> [{agent}] {task}")
@@ -716,6 +883,11 @@ class VoiceSession:
 
     async def _announce_agent_job(self, job: agent_bridge.AgentJob) -> None:
         """Speak terminal agent status directly, without depending on the LLM."""
+        if job.status == agent_bridge.STATUS_DONE and self._model_recovery:
+            if self._model_recovery[0] == job.agent:
+                self._model_recovery = None
+        elif job.failure_kind in {"quota", "rate_limit", "capacity"}:
+            self._model_recovery = (job.agent, job.task)
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
         questions = agent_bridge.follow_up_questions(job)

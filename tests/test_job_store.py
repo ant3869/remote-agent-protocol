@@ -22,6 +22,11 @@ class FakeJob:
     step_total: int | None = 4
     last_completed_step: str = "Added color"
     summary: str = "Dog drawn"
+    started_at: str = "2026-07-05T02:44:01.643-05:00"
+    finished_at: str = "2026-07-05T02:47:01.843-05:00"
+    failure_kind: str = ""
+    failure_detail: str = ""
+    model_label: str = ""
 
 
 class JobStoreTests(unittest.TestCase):
@@ -49,6 +54,9 @@ class JobStoreTests(unittest.TestCase):
         self.assertEqual(row["tool"], "windows-mcp")
         self.assertEqual(row["last_completed_step"], "Added color")
         self.assertEqual(row["summary"], "Dog drawn")
+        self.assertEqual(row["started_at"], "2026-07-05T02:44:01.643-05:00")
+        self.assertEqual(row["finished_at"], "2026-07-05T02:47:01.843-05:00")
+        self.assertEqual(row["failure_kind"], "")
 
     def test_missing_file_returns_empty(self):
         self.assertEqual(job_store.load_history("does-not-exist.json"), [])

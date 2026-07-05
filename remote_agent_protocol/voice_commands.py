@@ -72,6 +72,48 @@ _ACTION_VERBS = (
     "list",
     "search",
 )
+# Live-data tier: information that is ALWAYS stale in the model (it has no
+# internet), so any request framed around these nouns must delegate -- even
+# question forms, which the question guard would otherwise keep as chat.
+# ("Give me the storm forecast for Bentonville" got a confidently invented
+# forecast, jess_runtime.log 2026-07-04 23:26. Never again.) Past-tense
+# openers ("did you check the weather") still stay chat: they ask about
+# history, not for data.
+_LIVE_DATA_KEYWORDS = (
+    "weather",
+    "forecast",
+    "temperature",
+    "humidity",
+    "news",
+    "headline",
+    "price",
+    "stock",
+    "traffic",
+)
+_LIVE_REQUEST_WORDS = (
+    "give",
+    "get",
+    "tell",
+    "show",
+    "check",
+    "find",
+    "look",
+    "fetch",
+    "pull",
+    "grab",
+    "read",
+    "update",
+    "what",
+    "what's",
+    "whats",
+    "how",
+    "how's",
+    "hows",
+    "when",
+    "where",
+)
+_PAST_QUESTION_STARTS = ("did", "was", "were", "has", "had", "have", "does", "do", "am")
+
 # Singular forms only -- matching strips a trailing "s" from each word, so
 # "repositories"/"files"/"downloads" all land. (Lesson learned the hard way:
 # "Find trending GitHub repositories" sailed straight past the old list and
@@ -187,6 +229,47 @@ def parse_delegation(
     return None
 
 
+_MODEL_PROVIDER_ALIASES = {"openai": "openai", "open ai": "openai"}
+
+
+def parse_model_switch(text: str, aliases: dict[str, str]) -> tuple[str | None, str, bool] | None:
+    """Parse a spoken provider/model switch, optionally naming an agent."""
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    if not re.search(r"\b(?:change|switch|use)\b", lowered):
+        return None
+    provider = next(
+        (
+            canonical
+            for spoken, canonical in _MODEL_PROVIDER_ALIASES.items()
+            if re.search(rf"\b{re.escape(spoken)}\b", lowered)
+        ),
+        None,
+    )
+    if provider is None:
+        return None
+    agent = next(
+        (
+            aliases[alias]
+            for alias in sorted(aliases, key=len, reverse=True)
+            if re.search(rf"\b{re.escape(alias)}\b", lowered)
+        ),
+        None,
+    )
+    retry = bool(re.search(r"\b(?:retry|rerun|try again|run again)\b", lowered))
+    return agent, provider, retry
+
+
+def is_retry_request(text: str) -> bool:
+    """True for a short command to rerun the last recoverable agent task."""
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    return bool(
+        re.fullmatch(
+            r"(?:retry|rerun|try|run)(?: (?:that|the))?(?: (?:task|request))?(?: again)?",
+            lowered,
+        )
+    )
+
+
 # First words that mean "question / statement about the past", never a command.
 # Checked AFTER filler-stripping, so "can you find..." still delegates while
 # "did you find..." stays chat.
@@ -226,26 +309,186 @@ def parse_implicit_task(text: str) -> str | None:
     me...", "I want you to check..." (the old starts-with approach missed
     "Go and find me the top 5 trending github repos", gui_boot.log 18:39).
     A question-word guard on the FIRST word keeps chat as chat:
-    "did you write the file yet?" -> None.
+    "did you write the file yet?" -> None. Live-data requests are the one
+    exception -- "what's the weather?" is a lookup, not a conversation.
     """
     lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
     if not lowered:
         return None
-    if lowered.split(" ", 1)[0] in _QUESTION_STARTS:
-        return None
+    first = lowered.split(" ", 1)[0]
 
     padded = f" {lowered.replace(',', ' ').replace('.', ' ')} "
-    if any(f" {phrase} " in padded for phrase in _STANDALONE_VERBS):
-        return lowered
-
     words: set[str] = set()
     for w in padded.split():
         words.add(w)  # raw form -- keeps irregulars like "news" intact
         if w.endswith("s"):
             words.add(w[:-1])  # naive singular -- catches files/repos/etc.
+
+    if (
+        first not in _PAST_QUESTION_STARTS
+        and words & set(_LIVE_DATA_KEYWORDS)
+        and words & set(_LIVE_REQUEST_WORDS)
+    ):
+        return lowered
+
+    if first in _QUESTION_STARTS:
+        return None
+    if any(f" {phrase} " in padded for phrase in _STANDALONE_VERBS):
+        return lowered
     if words & set(_ACTION_VERBS) and words & set(_TASK_KEYWORDS):
         return lowered
     return None
+
+
+# ---------------------------------------------------------------------------
+# Vague capability references -- "there's a package that does X, I don't
+# remember what it's called, make sure we have it". The user means a specific
+# installable thing they can't name; any rewrite into a plain action task
+# destroys exactly that. (The YouTube-skill request became the generic task
+# "Enable YouTube video watching on the computer" and the agent went off
+# editing this repo for five minutes, jess_runtime.log 2026-07-05 12:35.
+# Never again.)
+# ---------------------------------------------------------------------------
+
+# Nouns that mean "an installable/enablable capability", not an end task.
+_CAPABILITY_NOUNS = (
+    "skill",
+    "package",
+    "plugin",
+    "plug-in",
+    "tool",
+    "library",
+    "extension",
+    "addon",
+    "add-on",
+    "module",
+    "dependency",
+    "mcp",
+    "cli",
+    "utility",
+    "app",
+    "application",
+    "program",
+)
+
+# Phrases that signal the user cannot produce the exact name.
+_NAME_UNCERTAINTY_PHRASES = (
+    "don't remember",
+    "dont remember",
+    "can't remember",
+    "cant remember",
+    "don't recall",
+    "dont recall",
+    "can't recall",
+    "cant recall",
+    "forgot the name",
+    "forget the name",
+    "forgot its name",
+    "forgot what",
+    "forget what",
+    "what it's called",
+    "what its called",
+    "what it was called",
+    "what's it called",
+    "whats it called",
+    "not sure what",
+    "not sure of the name",
+    "no idea what",
+    "no clue what",
+    "i think it's called",
+    "i think its called",
+    "might be called",
+    "called something like",
+)
+
+
+def parse_capability_request(text: str) -> str | None:
+    """Return the utterance verbatim if it names a capability only by description.
+
+    Fires only when BOTH signals are present: a capability noun ("package",
+    "skill", "plugin", ...) and a name-uncertainty phrase ("I forgot the
+    name", "not sure what it's called", ...). Requests that name the thing
+    outright ("install yt-dlp") don't match and take the normal routing path;
+    neither does chat that is merely forgetful ("I saw a movie, can't
+    remember what it's called").
+    """
+    stripped = text.strip()
+    lowered = _strip_fillers(stripped.lower().rstrip(_TRAILING_PUNCTUATION))
+    if not lowered:
+        return None
+    if not any(phrase in lowered for phrase in _NAME_UNCERTAINTY_PHRASES):
+        return None
+    words: set[str] = set()
+    for w in lowered.replace(",", " ").replace(".", " ").split():
+        words.add(w)
+        if w.endswith("s"):
+            words.add(w[:-1])  # naive singular, same trick as the keyword net
+    if words & set(_CAPABILITY_NOUNS):
+        return stripped
+    return None
+
+
+# Words that make up pure acknowledgments and reactions. An utterance of up to
+# three of these ("thank you", "okay cool", "haha nice") is small talk by
+# construction -- the intent router skips its classifier call entirely, which
+# keeps the most common voice turns on the fast path.
+_SMALLTALK_WORDS = {
+    "thanks",
+    "thank",
+    "you",
+    "okay",
+    "ok",
+    "cool",
+    "nice",
+    "great",
+    "awesome",
+    "sweet",
+    "perfect",
+    "yeah",
+    "yep",
+    "yes",
+    "no",
+    "nope",
+    "nah",
+    "sure",
+    "haha",
+    "lol",
+    "wow",
+    "whoa",
+    "hi",
+    "hello",
+    "hey",
+    "bye",
+    "goodbye",
+    "goodnight",
+    "morning",
+    "huh",
+    "what",
+    "why",
+    "really",
+    "seriously",
+    "right",
+    "alright",
+    "fine",
+    "good",
+    "sorry",
+    "oops",
+    "hmm",
+    "oh",
+    "ah",
+}
+
+
+def is_smalltalk(text: str) -> bool:
+    """True for short pure acknowledgments/reactions ("thank you", "what?").
+
+    Deliberately conservative: at most three words and EVERY word must be in
+    the small-talk lexicon, so "thank you for the forecast" and "okay do the
+    thing" never match and still reach the real routing tiers.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    words = _WORD_RE.findall(lowered)
+    return 0 < len(words) <= 3 and all(word in _SMALLTALK_WORDS for word in words)
 
 
 def requires_confirmation(

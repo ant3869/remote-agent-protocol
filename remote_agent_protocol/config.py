@@ -340,6 +340,28 @@ AGENT_BACKENDS = {
     "code-puppy": ["code-puppy", "-p", "{task}"],
     **_parse_command_map(_env("AGENT_BACKENDS_JSON", ""), "AGENT_BACKENDS_JSON"),
 }
+# Deterministic voice targets. Provider names are not guessed at runtime: each
+# maps to the exact model key/flags supported by that agent's one-shot CLI.
+AGENT_MODEL_TARGETS = {
+    "code-puppy": {
+        "openai": {
+            "label": "OpenAI GPT-5.5",
+            "args": ["--model", "chatgpt-gpt-5.5"],
+        }
+    },
+    "hermes": {
+        "openai": {
+            "label": "OpenAI GPT-5.5",
+            "args": ["--provider", "openai-api", "--model", "gpt-5.5"],
+        }
+    },
+    "hermes-yolo": {
+        "openai": {
+            "label": "OpenAI GPT-5.5",
+            "args": ["--provider", "openai-api", "--model", "gpt-5.5"],
+        }
+    },
+}
 _LOCAL_MACHINE = _env("AGENT_LOCAL_MACHINE", "Main PC")
 AGENT_MACHINES = {
     **{name: _LOCAL_MACHINE for name in AGENT_BACKENDS},
@@ -347,10 +369,10 @@ AGENT_MACHINES = {
 }
 AGENT_ANNOUNCE = True
 
-# How long a delegated job may run before it's force-stopped, in seconds. 0
-# disables the timeout (jobs run until they exit on their own). A hung backend
-# otherwise pins a subprocess -- and its VRAM -- forever.
-AGENT_JOB_TIMEOUT_SECS = float(_env("AGENT_JOB_TIMEOUT_SECS", "0"))
+# How long a delegated job may run before it's force-stopped, in seconds. Five
+# minutes covers normal lookups while preventing a silent backend from hanging
+# forever; set 0 only for deliberately unbounded interactive work.
+AGENT_JOB_TIMEOUT_SECS = float(_env("AGENT_JOB_TIMEOUT_SECS", "300"))
 # Grace period between a polite terminate() and a hard kill() when a job is
 # cancelled or times out. Gives the agent a moment to flush output and exit.
 AGENT_JOB_KILL_GRACE_SECS = float(_env("AGENT_JOB_KILL_GRACE_SECS", "3"))
@@ -366,6 +388,30 @@ AGENT_COMPLETION_GRACE_SECS = float(_env("AGENT_COMPLETION_GRACE_SECS", "2"))
 # Finished jobs are appended here so the Agents panel isn't blank after every
 # restart. Set AGENT_HISTORY_FILE="" to disable persistence entirely.
 AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_history.json"))
+
+# Where delegated agents run when no explicit directory is given. Voice jobs
+# used to inherit Jess's own working directory -- this repo -- which is how a
+# mistranslated task ended with CodePuppy editing this codebase for five
+# minutes (jess_runtime.log 2026-07-05 12:35). A neutral, gitignored sandbox
+# keeps an agent from ever waking up inside its host's source tree.
+AGENT_WORKSPACE_DIR = _env("AGENT_WORKSPACE_DIR", str(DATA_DIR / "agent_workspace"))
+
+# Scope preamble prepended to every dispatched task (the status protocol is
+# appended). A coding agent handed a vague task treats whatever directory it
+# stands in as the thing to change; this tells it not to.
+AGENT_SCOPE_PREAMBLE = (
+    "[Scope: you are a general-purpose executor running one task for a "
+    "voice-assistant host. Your working directory ({cwd}) is a scratch "
+    "workspace, not the subject of the task -- do not modify its files unless "
+    "the task explicitly asks for code changes there. If the task is ambiguous "
+    "about where or on what to act, say so and stop instead of guessing.]"
+)
+
+# Repository whose working tree must never be silently modified by an agent
+# job (this application's own source). Compared via `git status --porcelain`
+# before and after every job; a difference flags the job and is announced out
+# loud. Empty disables the check.
+AGENT_HOST_REPO = _env("AGENT_HOST_REPO", str(_ROOT))
 AGENT_HISTORY_MAX = int(_env("AGENT_HISTORY_MAX", "100"))
 
 # Confirmation gate -- auto-parsed delegations (from natural-language voice or
@@ -420,6 +466,52 @@ AGENT_SPOKEN_ALIASES = {
 AGENT_AUTO_DELEGATE = True
 AGENT_DEFAULT_BACKEND = _env("AGENT_DEFAULT_BACKEND", "hermes")
 
+# ---------------------------------------------------------------------------
+# Intent router -- the semantic net over user requests (intent_router.py).
+# Tiers run cheapest first: explicit agent commands, then a small-talk gate
+# (pure acknowledgments never classify), then vague capability references
+# ("there's a package for X, forgot the name" -- shipped verbatim, held for
+# confirmation), then the keyword net above (a free hit dispatches
+# immediately), and ONLY then an LLM intent classifier -- a schema-constrained
+# Ollama call that judges the user's GOAL, not their wording. Each decision is
+# logged and emitted to the GUI as a "routing" event with intent, category,
+# confidence, tier, and reason.
+# ---------------------------------------------------------------------------
+INTENT_ROUTER_ENABLED = _env_bool("INTENT_ROUTER_ENABLED", True)
+# Any local Ollama model tag. Defaults to mem0's tiny model, which this setup
+# already keeps on disk and which classifies a short utterance in well under
+# a second -- classification is an easy task, it does not need the big voice
+# model. Kept separate from the voice model so the two never fight for VRAM.
+INTENT_MODEL = _env("INTENT_MODEL", "") or MEM0_LLM_MODEL
+# Classifier budget per utterance; on timeout the utterance stays chat (the
+# free tiers have already had their say), so a slow/busy Ollama can delay a
+# turn by at most this much and never stalls the pipeline.
+INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "1.5"))
+# At/above dispatch confidence a task runs. Between confirm and dispatch is
+# the uncertain band: read-only lookups run anyway (a wrong lookup is
+# harmless), state-changing tasks are held for a spoken yes/no. Below the
+# band the utterance stays chat.
+INTENT_DISPATCH_CONFIDENCE = 0.75
+INTENT_CONFIRM_CONFIDENCE = 0.5
+
+# Task template for vague capability references ("there's a package that does
+# X, I forgot the name, make sure we have it"). The utterance ships verbatim:
+# rewriting it is exactly how the YouTube-skill request became the generic
+# task "Enable YouTube video watching on the computer" (jess_runtime.log
+# 2026-07-05 12:35). The agent's job is identify -> verify -> only then install.
+VAGUE_CAPABILITY_TASK_TEMPLATE = (
+    "The user is referring to a specific package, skill, or tool they cannot "
+    'name exactly. Their request, verbatim: "{utterance}". First identify the '
+    "most likely candidates from that description (search if needed), then "
+    "check whether this machine already has the best match, and install or "
+    "enable it only if it is missing and clearly what they want. If no "
+    "candidate is a clear match, report the options back instead of guessing. "
+    "Do NOT reinterpret this as a request to perform the end task yourself. "
+    "The capability may belong to the tool agent itself (a plugin, skill, or "
+    "MCP server) rather than to any codebase -- check your own extension "
+    "mechanisms first."
+)
+
 # LLM-driven fallback delegation. The deterministic parsers above can't cover
 # every phrasing, so the persona is also told (LLM_DELEGATE_STYLE) to embed
 # [[delegate: task]] in its reply whenever the user needs live information or a
@@ -429,12 +521,23 @@ AGENT_DEFAULT_BACKEND = _env("AGENT_DEFAULT_BACKEND", "hermes")
 AGENT_LLM_DELEGATE = _env_bool("AGENT_LLM_DELEGATE", True)
 LLM_DELEGATE_STYLE = (
     " You have no internet access and cannot see files, apps, or live data "
-    "yourself; a tool agent does real-world work for you. When the user wants "
-    "live information (weather, news, prices, places, directions) or an action "
-    "you cannot do, never invent an answer and never pretend you are doing it: "
-    "say in one short sentence that you're sending it to your agent, and include "
-    "the exact marker [[delegate: clear task description]] in your reply."
+    "yourself; a tool agent does real-world work for you. The ONLY way to "
+    "engage it is to include the exact marker [[delegate: clear task "
+    "description]] in your reply -- saying you are checking, dispatching, "
+    "summoning, or verifying something does NOTHING unless that same reply "
+    "carries the marker. When the user wants live information (weather, news, "
+    "prices, places, directions, sports results) or an action you cannot do, "
+    "never invent an answer and never pretend work is happening: say in one "
+    "short sentence that you're sending it to your agent, and include the "
+    "marker. If something cannot be done, say so plainly instead of promising."
 )
+
+# Nouns the persona may use for its tool agent (backend names and spoken
+# aliases are matched too). If an LLM reply pairs one of these with a
+# dispatch-style verb but carries no [[delegate: ...]] marker, nothing was
+# actually sent -- the session injects DELEGATION_UNSENT_PROMPT so the model
+# either emits the marker for real or walks the claim back.
+AGENT_PROMISE_NOUNS = ("agent", "bat computer")
 
 # Appended to the system prompt and refreshed on every user turn so the model
 # knows the real date/time (it has no clock) and who its tool agent is.
@@ -467,6 +570,22 @@ AGENT_CONFIRM_DENIED_PROMPT = (
     "[The user cancelled the delegation to agent '{agent}'. Acknowledge in ONE short "
     "sentence that you did NOT run it.]"
 )
+# Injected when the LLM's reply claimed agent work was underway but included
+# no [[delegate: ...]] marker -- nothing was dispatched, so give it one chance
+# to send the task for real or come clean. Embeds the user's actual request:
+# small models copy prompt examples verbatim, so give them the real task text
+# to copy instead of a placeholder.
+DELEGATION_UNSENT_PROMPT = (
+    "[Correction -- your last reply told the user work was underway, but it "
+    "contained no [[delegate: ...]] marker, so NOTHING was sent to your agent. "
+    "The user's request was: {request}. If it should run, reply with ONE short "
+    "sentence plus a marker carrying that request, like [[delegate: {request}]]. "
+    "Otherwise tell the user plainly that you cannot do it.]"
+)
+
+# Task strings that mean the model parroted a prompt example instead of naming
+# a real task; markers carrying one of these are ignored rather than dispatched.
+DELEGATION_PLACEHOLDER_TASKS = ("clear task description", "task", "task description", "...")
 
 # Marker that prefixes every memory block mem0 injects into the context. Shared
 # by mem0_setup.py (which writes it) and memory.py (which strips stale copies on
@@ -486,4 +605,6 @@ EPHEMERAL_PROMPT_PREFIXES = (
     "[A delegation needs the user's confirmation",
     "[The user confirmed.",
     "[The user cancelled the delegation",
+    "[Correction --",
+    "[Agent model control:",
 )

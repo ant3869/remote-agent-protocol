@@ -16,6 +16,85 @@ class PureHelperTests(unittest.TestCase):
         cmd = agent_bridge.build_command(["{python}", "run", "{task}"], "do a thing")
         self.assertEqual(cmd, [sys.executable, "run", "do a thing"])
 
+    def test_build_command_inserts_model_override_after_executable(self):
+        cmd = agent_bridge.build_command(
+            ["code-puppy", "-p", "{task}"],
+            "do a thing",
+            extra_args=["--model", "chatgpt-gpt-5.5"],
+        )
+        self.assertEqual(
+            cmd,
+            ["code-puppy", "--model", "chatgpt-gpt-5.5", "-p", "do a thing"],
+        )
+
+    def test_provider_failure_detection_distinguishes_quota_and_rate_limit(self):
+        self.assertEqual(
+            agent_bridge.detect_provider_failure("usage_limit_reached: plan exhausted"),
+            "quota",
+        )
+        self.assertEqual(
+            agent_bridge.detect_provider_failure("429 too many requests"),
+            "rate_limit",
+        )
+        self.assertIsNone(agent_bridge.detect_provider_failure("finished normally"))
+
+    def test_model_override_uses_exact_configured_target(self):
+        bridge = agent_bridge.AgentBridge(
+            {},
+            lambda _event: None,
+            model_targets={
+                "code-puppy": {
+                    "openai": {
+                        "label": "OpenAI GPT-5.5",
+                        "args": ["--model", "chatgpt-gpt-5.5"],
+                    }
+                }
+            },
+        )
+
+        label = bridge.set_model_override("code-puppy", "openai")
+
+        self.assertEqual(label, "OpenAI GPT-5.5")
+        self.assertEqual(bridge._model_overrides["code-puppy"], ["--model", "chatgpt-gpt-5.5"])
+
+    def test_scope_preamble_is_prepended_with_cwd(self):
+        wrapped = agent_bridge.with_scope(
+            "do a thing", "C:/sandbox", "[Scope: workspace is {cwd}, hands off.]"
+        )
+        self.assertTrue(wrapped.startswith("[Scope: workspace is C:/sandbox, hands off.]"))
+        self.assertTrue(wrapped.endswith("do a thing"))
+
+    def test_empty_scope_preamble_leaves_task_untouched(self):
+        self.assertEqual(agent_bridge.with_scope("do a thing", "C:/sandbox", ""), "do a thing")
+
+    def test_missing_cwd_is_named_unspecified_in_scope(self):
+        wrapped = agent_bridge.with_scope("t", None, "cwd={cwd}")
+        self.assertIn("cwd=unspecified", wrapped)
+
+    def test_explicit_cwd_wins_over_workspace_default(self):
+        self.assertEqual(agent_bridge.resolve_cwd("C:/somewhere", "C:/workspace"), "C:/somewhere")
+
+    def test_no_workspace_configured_keeps_legacy_inherit(self):
+        self.assertIsNone(agent_bridge.resolve_cwd(None, None))
+
+    def test_default_cwd_is_the_workspace_and_it_is_created(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = str(Path(tmp) / "agent_workspace")
+            resolved = agent_bridge.resolve_cwd(None, workspace)
+            self.assertEqual(resolved, workspace)
+            self.assertTrue(Path(workspace).is_dir())
+
+    def test_announcement_warns_when_job_modified_host_source(self):
+        job = agent_bridge.AgentJob("job-1", "code-puppy", "enable a thing")
+        job.status = agent_bridge.STATUS_DONE
+        job.summary = "did stuff"
+        job.host_modified = True
+        text = agent_bridge.announcement(job)
+        self.assertIn("modified my own source", text)
+
     def test_status_protocol_is_appended_to_agent_task(self):
         task = agent_bridge.with_status_protocol("draw a dog")
 
@@ -92,6 +171,37 @@ class PureHelperTests(unittest.TestCase):
     def test_status_inference_does_not_treat_negated_words_as_state(self):
         self.assertIsNone(agent_bridge.infer_status("The task is not blocked; continuing."))
 
+    def test_echoed_protocol_examples_are_not_real_statuses(self):
+        # Agent CLIs echo the prompt (including our protocol examples) back to
+        # stdout; the completed example must not terminate the job instantly.
+        self.assertIsNone(
+            agent_bridge.parse_status_line(
+                '@@JESS_STATUS {"state":"in_progress","action":"short current action"}'
+            )
+        )
+        self.assertIsNone(
+            agent_bridge.parse_status_line(
+                '@@JESS_STATUS {"state":"completed","summary":"short result"}'
+            )
+        )
+
+    def test_error_tail_finds_agent_crash_in_last_lines(self):
+        lines = [
+            "Executing prompt: put a file on my desktop",
+            "⚡ Streaming interrupted, auto-retrying in 1s... (attempt 1/3)",
+            "❌ Streaming failed after 3 attempts",
+            "Unexpected error: status_code: 429, model_name: gpt-5.5, body: {'type':",
+            "'usage_limit_reached', 'message': 'The usage limit has been reached'}",
+        ]
+        tail = agent_bridge.error_tail(lines)
+        self.assertIsNotNone(tail)
+        self.assertIn("usage_limit_reached", tail)
+
+    def test_error_tail_ignores_recovered_mid_job_errors(self):
+        # An early failure the agent worked around must not fail the job.
+        lines = ["Unexpected error: transient"] + [f"step {i} ok" for i in range(10)] + ["Done"]
+        self.assertIsNone(agent_bridge.error_tail(lines))
+
 
 class BridgeLifecycleTests(unittest.TestCase):
     def _run(self, coro):
@@ -122,6 +232,53 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(len(finished), 1)
         finished_evt = next(e for e in events if e["event"] == "finished")
         self.assertGreaterEqual(finished_evt["secs"], 0.0)
+        self.assertRegex(finished_evt["started_at"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertRegex(finished_evt["finished_at"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_host_repo_modification_is_flagged_on_finish(self):
+        events: list[dict] = []
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(MOCK_BACKEND, events.append, host_repo="unused")
+            snapshots = iter(["", " M remote_agent_protocol/session.py\n"])
+
+            async def fake_snapshot():
+                return next(snapshots, None)
+
+            bridge._host_snapshot = fake_snapshot
+            job_id = await bridge.start("mock", "say hello")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertTrue(job.host_modified)
+        finished_evt = next(e for e in events if e["event"] == "finished")
+        self.assertTrue(finished_evt["host_modified"])
+        self.assertIn("modified my own source", agent_bridge.announcement(job))
+
+    def test_untouched_host_repo_does_not_flag_the_job(self):
+        events: list[dict] = []
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(MOCK_BACKEND, events.append, host_repo="unused")
+
+            async def fake_snapshot():
+                return " M some_file.py\n"  # same before and after
+
+            bridge._host_snapshot = fake_snapshot
+            job_id = await bridge.start("mock", "say hello")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertFalse(job.host_modified)
+        self.assertNotIn("modified my own source", agent_bridge.announcement(job))
 
     def test_failing_job_reports_failed(self):
         events: list[dict] = []
@@ -224,6 +381,64 @@ class BridgeLifecycleTests(unittest.TestCase):
         job = self._run(scenario())
         self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
         self.assertTrue(any("timeout" in line.lower() for line in job.lines))
+
+    def test_usage_limit_fails_immediately_and_explains_recovery(self):
+        events: list[dict] = []
+        script = (
+            "import time; "
+            "print('usage_limit_reached: The usage limit has been reached', flush=True); "
+            "time.sleep(10)"
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]},
+                events.append,
+                timeout_secs=8,
+                kill_grace_secs=0.2,
+            )
+            started = asyncio.get_running_loop().time()
+            job_id = await bridge.start("mock", "search")
+            for _ in range(100):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id), asyncio.get_running_loop().time() - started
+
+        job, elapsed = self._run(scenario())
+        self.assertLess(elapsed, 2)
+        self.assertEqual(job.failure_kind, "quota")
+        self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
+        self.assertIn("usage", agent_bridge.announcement(job).lower())
+        self.assertIn("switch", agent_bridge.announcement(job).lower())
+
+    def test_zero_exit_with_error_tail_reports_failed(self):
+        # Regression: code-puppy hit a 429 usage limit, printed the error, and
+        # exited 0 -- the job was announced as finished with the raw error JSON
+        # as its "result". It must be FAILED with the error line as summary.
+        events: list[dict] = []
+        script = (
+            "print('Executing prompt: put a file on my desktop'); "
+            "print('Unexpected error: status_code: 500, model_name: gpt-5.5, "
+            "body: provider_failure')"
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            job_id = await bridge.start("mock", "put a file on my desktop")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.returncode, 0)
+        self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
+        self.assertIn("500", job.summary)
+        self.assertIn("FAILED", agent_bridge.announcement(job))
 
     def test_persist_hook_fires_on_completion(self):
         persisted: list[str] = []

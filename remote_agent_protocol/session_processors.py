@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Callable
 
@@ -73,17 +74,28 @@ class DelegationTap(FrameProcessor):
     dropped rather than misread.
     """
 
-    def __init__(self, on_delegate, resolve, confirm_check=None, context_refresh=None, **kwargs):
+    def __init__(
+        self,
+        on_delegate,
+        resolve,
+        confirm_check=None,
+        context_refresh=None,
+        control_check=None,
+        **kwargs,
+    ):
         """Initialize the tap.
 
         Args:
             on_delegate: ``(agent, task) -> ack str``; dispatches or holds a job.
-            resolve: ``(text) -> (agent, task) | None`` delegation parser.
+            resolve: ``(text) -> (agent, task) | None`` delegation parser; may
+                be async (the intent router classifies over the network).
             confirm_check: ``(text) -> ack str | None``; resolves a pending
                 confirmation from a spoken yes/no.
             context_refresh: ``() -> Frame | None``; a settings frame pushed
                 ahead of each user utterance (e.g. a fresh system instruction
                 carrying the current date/time).
+            control_check: ``(text) -> ack str | None``; may be async and
+                intercepts model-switch/retry commands before delegation.
             **kwargs: Additional arguments passed to FrameProcessor.
         """
         super().__init__(**kwargs)
@@ -91,6 +103,7 @@ class DelegationTap(FrameProcessor):
         self._resolve = resolve
         self._confirm_check = confirm_check
         self._context_refresh = context_refresh
+        self._control_check = control_check
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         """Swap recognized delegation commands for truthful LLM instructions."""
@@ -100,11 +113,17 @@ class DelegationTap(FrameProcessor):
                 refresh = self._context_refresh()
                 if refresh is not None:
                     await self.push_frame(refresh, direction)
-            ack = self._confirm_check(frame.text) if self._confirm_check else None
+            ack = self._control_check(frame.text) if self._control_check else None
+            if inspect.isawaitable(ack):
+                ack = await ack
+            if ack is None:
+                ack = self._confirm_check(frame.text) if self._confirm_check else None
             if ack is not None:
                 frame.text = ack
             else:
                 parsed = self._resolve(frame.text)
+                if inspect.isawaitable(parsed):
+                    parsed = await parsed
                 if parsed is not None:
                     agent, task = parsed
                     logger.info(f"Voice delegation -> [{agent}] {task}")
@@ -115,6 +134,37 @@ class DelegationTap(FrameProcessor):
 # The LLM requests a delegation by embedding this marker in its reply text.
 _MARKER_RE = re.compile(r"\[\[\s*delegate\s*:\s*(.+?)\s*\]\]", re.IGNORECASE | re.DOTALL)
 _MARKER_HEAD = "[[delegate:"
+
+# Fabricated-delegation guard: a reply that names the tool agent alongside a
+# dispatch-style verb is promising work -- without a marker in the same reply,
+# that work will never happen.
+_PROMISE_VERB_RE = re.compile(
+    r"\b(?:dispatch|summon|task|instruct|consult|deploy|engag|send|sending|"
+    r"check|verif|quer|fetch|initiat|relay|activat|run|running|working|look|ask)\w*\b",
+    re.IGNORECASE,
+)
+
+
+def is_placeholder_task(task: str) -> bool:
+    """True if a marker parroted a prompt example rather than a real task."""
+    placeholders = {p.lower() for p in cfg.DELEGATION_PLACEHOLDER_TASKS}
+    stripped = task.strip(" .!?'\"").lower()
+    return not stripped or stripped in placeholders
+
+
+def looks_like_delegation_promise(text: str) -> bool:
+    """True if ``text`` claims agent work is happening or about to happen.
+
+    Pairs a dispatch-style verb with any known agent noun (configured nouns,
+    backend names, spoken aliases). Used only on responses that carried no
+    ``[[delegate: ...]]`` marker, where such a claim is necessarily false.
+    """
+    if not _PROMISE_VERB_RE.search(text):
+        return False
+    nouns = set(cfg.AGENT_PROMISE_NOUNS) | set(cfg.AGENT_BACKENDS) | set(cfg.AGENT_SPOKEN_ALIASES)
+    nouns.discard("mock")  # too common a word to treat as an agent reference
+    pattern = "|".join(re.escape(noun) for noun in sorted(nouns))
+    return bool(re.search(rf"\b(?:{pattern})\b", text, re.IGNORECASE))
 
 
 def _could_become_marker(tail: str) -> bool:
@@ -142,16 +192,22 @@ class LLMDelegateTap(FrameProcessor):
     per response; actual dispatch stays in session code.
     """
 
-    def __init__(self, on_delegate, **kwargs):
+    def __init__(self, on_delegate, on_response=None, **kwargs):
         """Initialize the tap.
 
         Args:
             on_delegate: ``(task) -> None``; called once per unique task.
+            on_response: ``(text, dispatched) -> None``; called at the end of
+                each response with its full text and whether any marker
+                dispatched, so the session can catch replies that promise
+                agent work without actually requesting it.
             **kwargs: Additional arguments passed to FrameProcessor.
         """
         super().__init__(**kwargs)
         self._on_delegate = on_delegate
+        self._on_response = on_response
         self._buffer = ""
+        self._response_text = ""
         self._dispatched: set[str] = set()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
@@ -159,10 +215,12 @@ class LLMDelegateTap(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, LLMFullResponseStartFrame):
             self._buffer = ""
+            self._response_text = ""
             self._dispatched = set()
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMTextFrame):
             self._buffer += frame.text
+            self._response_text += frame.text
             text = self._drain(final=False)
             if text:
                 await self.push_frame(LLMTextFrame(text=text), direction)
@@ -171,6 +229,11 @@ class LLMDelegateTap(FrameProcessor):
             if text:
                 await self.push_frame(LLMTextFrame(text=text), direction)
             await self.push_frame(frame, direction)
+            if self._on_response is not None:
+                try:
+                    self._on_response(self._response_text, bool(self._dispatched))
+                except Exception as exc:  # the guard must never break the pipeline
+                    logger.warning(f"LLMDelegateTap on_response raised: {exc}")
         else:
             await self.push_frame(frame, direction)
 
@@ -181,7 +244,9 @@ class LLMDelegateTap(FrameProcessor):
             if match is None:
                 break
             task = " ".join(match.group(1).split())
-            if task and task.lower() not in self._dispatched:
+            if is_placeholder_task(task):
+                logger.warning(f"Ignoring placeholder delegation marker: {task!r}")
+            elif task and task.lower() not in self._dispatched:
                 self._dispatched.add(task.lower())
                 logger.info(f"LLM delegation marker -> {task}")
                 self._on_delegate(task)

@@ -2,7 +2,7 @@ import asyncio
 import unittest
 
 from pipecat.frames.frames import TTSSpeakFrame
-from remote_agent_protocol import agent_bridge, personas, session
+from remote_agent_protocol import agent_bridge, personas, session, session_processors
 
 
 class RecordingWorker:
@@ -13,9 +13,23 @@ class RecordingWorker:
         self.frames.extend(frames)
 
 
+class RecordingBridge:
+    def __init__(self):
+        self.selected = []
+        self.started = []
+
+    def set_model_override(self, agent, provider):
+        self.selected.append((agent, provider))
+        return "OpenAI GPT-5.5"
+
+    async def start(self, agent, task, *args, **kwargs):
+        self.started.append((agent, task))
+        return "job-retry"
+
+
 class SessionDelegationTests(unittest.TestCase):
     def test_implicit_delegation_uses_runtime_default_backend(self):
-        parsed = session.resolve_delegation(
+        parsed = session_processors.resolve_delegation(
             "go and find me the top 5 trending github repos",
             default_backend="code-puppy",
         )
@@ -23,15 +37,86 @@ class SessionDelegationTests(unittest.TestCase):
         self.assertEqual(parsed, ("code-puppy", "go and find me the top 5 trending github repos"))
 
     def test_explicit_agent_beats_runtime_default(self):
-        parsed = session.resolve_delegation(
+        parsed = session_processors.resolve_delegation(
             "ask code puppy to add tests to the repo",
             default_backend="hermes-yolo",
         )
 
         self.assertEqual(parsed, ("code-puppy", "add tests to the repo"))
 
+    def test_markerless_promise_is_remembered_until_a_real_dispatch(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        spawned = []
+
+        def close_spawned(coro, *, name):
+            coro.close()
+            spawned.append(name)
+
+        voice_session._spawn = close_spawned
+        voice_session._last_user_text = "get the Bentonville forecast"
+
+        voice_session._on_llm_response("I shall summon the Bat Computer immediately.", False)
+
+        self.assertEqual(voice_session._unfulfilled_promise, "get the Bentonville forecast")
+        self.assertEqual(spawned, ["delegate-correction"])
+
+        voice_session._on_llm_response("Sending it now.", True)
+        self.assertEqual(voice_session._unfulfilled_promise, "")
+
+    def test_approval_dispatches_remembered_promise(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        voice_session._unfulfilled_promise = "get the Bentonville forecast"
+        voice_session._record_routing = lambda _decision: None
+
+        parsed = voice_session._consume_promise_follow_up("okay, do it")
+
+        self.assertEqual(
+            parsed,
+            (voice_session._default_agent_backend, "get the Bentonville forecast"),
+        )
+        self.assertEqual(voice_session._unfulfilled_promise, "")
+
 
 class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quota_failure_is_remembered_for_spoken_recovery(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        worker = RecordingWorker()
+        voice_session._worker = worker
+        job = agent_bridge.AgentJob("job-1", "code-puppy", "find VR games")
+        job.status = agent_bridge.STATUS_FAILED
+        job.failure_kind = "quota"
+
+        await voice_session._announce_agent_job(job)
+
+        self.assertEqual(voice_session._model_recovery, ("code-puppy", "find VR games"))
+        self.assertIn("usage", worker.frames[0].text.lower())
+
+    async def test_contextual_switch_selects_failed_agent_without_retrying(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        bridge = RecordingBridge()
+        voice_session._bridge = bridge
+        voice_session._model_recovery = ("code-puppy", "find VR games")
+
+        prompt = await voice_session._maybe_handle_model_control("change to OpenAI")
+
+        self.assertEqual(bridge.selected, [("code-puppy", "openai")])
+        self.assertEqual(bridge.started, [])
+        self.assertIn("OpenAI GPT-5.5", prompt)
+
+    async def test_switch_and_retry_replays_failed_task_once(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        bridge = RecordingBridge()
+        voice_session._bridge = bridge
+        voice_session._model_recovery = ("code-puppy", "find VR games")
+
+        prompt = await voice_session._maybe_handle_model_control(
+            "switch Code Puppy to OpenAI and retry"
+        )
+
+        self.assertEqual(bridge.started, [("code-puppy", "find VR games")])
+        self.assertIsNone(voice_session._model_recovery)
+        self.assertIn("retrying", prompt.lower())
+
     async def test_completion_uses_direct_tts_without_llm(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
         worker = RecordingWorker()
