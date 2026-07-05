@@ -75,3 +75,11 @@ whisker_setup.py
 data/
 .codebase-memory/
 .agent/
+
+# Machine-generated AI-editor configs (Codebase Memory MCP rules sync).
+# They embed absolute local paths, so they stay per-machine.
+.cursor/
+.zed/
+.claude/CLAUDE.md
+.github/copilot-instructions.md
+.github/instructions/
