@@ -192,11 +192,10 @@ LLM_MODEL = _env("LLM_MODEL", "gemma-e4b-max")
 #   thinking OFF: ~0.4s, ~25 tokens, clean 1-2 sentence reply
 LLM_REASONING_EFFORT = "none"
 
-OLLAMA_BASE_URL = "http://localhost:11434/v1"
-
-# Same Ollama server, but WITHOUT the /v1 suffix -- mem0's Ollama client wants
-# the bare host. (The OpenAI-compat endpoint above keeps the /v1.)
-OLLAMA_HOST = "http://localhost:11434"
+# The OpenAI-compatible client needs /v1 while mem0 and health checks need the
+# bare host. Keep one override so every Ollama consumer follows the same server.
+OLLAMA_HOST = _env("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
 
 # ---------------------------------------------------------------------------
 # Personality & voice -- now driven by PERSONAS
@@ -433,6 +432,7 @@ AGENT_DESTRUCTIVE_WORDS = (
     "erase",
     "wipe",
     "format",
+    "install",  # covers "uninstall" too -- both mutate the system either way
     "uninstall",
     "drop",
     "destroy",
@@ -535,8 +535,8 @@ LLM_DELEGATE_STYLE = (
 # Nouns the persona may use for its tool agent (backend names and spoken
 # aliases are matched too). If an LLM reply pairs one of these with a
 # dispatch-style verb but carries no [[delegate: ...]] marker, nothing was
-# actually sent -- the session injects DELEGATION_UNSENT_PROMPT so the model
-# either emits the marker for real or walks the claim back.
+# actually sent -- the session holds the original request as a real pending
+# confirmation instead of trusting a second LLM response to emit the marker.
 AGENT_PROMISE_NOUNS = ("agent", "bat computer")
 
 # Appended to the system prompt and refreshed on every user turn so the model
@@ -570,19 +570,6 @@ AGENT_CONFIRM_DENIED_PROMPT = (
     "[The user cancelled the delegation to agent '{agent}'. Acknowledge in ONE short "
     "sentence that you did NOT run it.]"
 )
-# Injected when the LLM's reply claimed agent work was underway but included
-# no [[delegate: ...]] marker -- nothing was dispatched, so give it one chance
-# to send the task for real or come clean. Embeds the user's actual request:
-# small models copy prompt examples verbatim, so give them the real task text
-# to copy instead of a placeholder.
-DELEGATION_UNSENT_PROMPT = (
-    "[Correction -- your last reply told the user work was underway, but it "
-    "contained no [[delegate: ...]] marker, so NOTHING was sent to your agent. "
-    "The user's request was: {request}. If it should run, reply with ONE short "
-    "sentence plus a marker carrying that request, like [[delegate: {request}]]. "
-    "Otherwise tell the user plainly that you cannot do it.]"
-)
-
 # Task strings that mean the model parroted a prompt example instead of naming
 # a real task; markers carrying one of these are ignored rather than dispatched.
 DELEGATION_PLACEHOLDER_TASKS = ("clear task description", "task", "task description", "...")

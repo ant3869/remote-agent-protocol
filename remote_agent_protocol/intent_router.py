@@ -114,6 +114,8 @@ _RESPONSE_SCHEMA = {
     "required": ["intent", "category", "task", "confidence", "reason"],
 }
 
+_WARMUP_TIMEOUT_SECS = 30.0
+
 
 @dataclass
 class RoutingDecision:
@@ -228,6 +230,7 @@ class IntentRouter:
             cfg.INTENT_CONFIRM_CONFIDENCE if confirm_confidence is None else confirm_confidence
         )
         self._auto_delegate = cfg.AGENT_AUTO_DELEGATE if auto_delegate is None else auto_delegate
+        self._uses_default_classifier = classify is None
         self._classify = classify or self._default_classify
 
     @staticmethod
@@ -242,13 +245,21 @@ class IntentRouter:
     async def warmup(self) -> None:
         """Preload the classifier model so the first real turn pays nothing.
 
-        Fire-and-forget at session start; any failure just means the first
-        classified turn eats the model load (or times out to the free tiers).
+        Fire-and-forget at session start. Cold model loading gets a larger
+        budget than live turns so it can actually make the classifier resident.
         """
         if not self._enabled:
             return
         try:
-            await self._classify("hello")
+            if self._uses_default_classifier:
+                await classify_with_ollama(
+                    "hello",
+                    host=cfg.OLLAMA_HOST,
+                    model=cfg.INTENT_MODEL,
+                    timeout_secs=max(_WARMUP_TIMEOUT_SECS, self._timeout),
+                )
+            else:
+                await self._classify("hello")
             logger.info("Intent classifier warmed up")
         except Exception as exc:
             logger.warning(f"Intent classifier warmup failed: {exc}")

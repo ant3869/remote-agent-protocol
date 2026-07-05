@@ -107,22 +107,16 @@ class VoiceSession:
         self._pending_confirmations: dict[str, tuple[str, str, str | None]] = {}
         self._confirm_counter = itertools.count(1)
         # Fabricated-delegation guard state: the next LLM response legitimately
-        # talks about the agent (it answers an injected ack/update), and how
-        # many correction turns were already spent on the current user turn.
+        # talks about the agent because it answers an injected ack/update.
         self._agent_ack_turn = False
-        self._promise_nudges = 0
-        self._last_user_text = ""  # embedded in correction turns as the real task
+        self._last_user_text = ""
 
         # Intent routing: every utterance gets a RoutingDecision; the last 25
         # are kept for the diagnostics snapshot. _force_confirm carries an
         # uncertain mutating decision into _delegate_ack_ex for one call.
-        # _unfulfilled_promise remembers the user request behind a persona
-        # reply that promised agent work without dispatching, so a follow-up
-        # "okay, do it" can dispatch deterministically.
         self._router = intent_router.IntentRouter()
         self._routing_history: deque[dict] = deque(maxlen=25)
         self._force_confirm = False
-        self._unfulfilled_promise = ""
         self._model_recovery: tuple[str, str] | None = None
         # Strong refs to fire-and-forget tasks; asyncio only keeps weak ones.
         self._bg_tasks: set[asyncio.Task] = set()
@@ -292,7 +286,15 @@ class VoiceSession:
         """
         task = asyncio.create_task(coro, name=name)
         self._bg_tasks.add(task)
-        task.add_done_callback(self._bg_tasks.discard)
+        task.add_done_callback(self._background_task_done)
+
+    def _background_task_done(self, task: asyncio.Task) -> None:
+        """Release a background task and surface failures that would be lost."""
+        self._bg_tasks.discard(task)
+        if task.cancelled():
+            return
+        if exc := task.exception():
+            logger.error(f"Background task {task.get_name()!r} failed: {exc}")
 
     # -- thread-safe control surface: GUI calls are marshalled onto loop -----
     def _schedule(self, coro) -> bool:
@@ -519,7 +521,6 @@ class VoiceSession:
 
     def _context_refresh_frame(self) -> LLMUpdateSettingsFrame | None:
         """Settings frame carrying a freshly stamped system instruction."""
-        self._promise_nudges = 0  # fresh user turn, fresh correction budget
         if self._llm is None:
             return None
         return LLMUpdateSettingsFrame(
@@ -589,9 +590,6 @@ class VoiceSession:
 
     async def _resolve_delegation(self, text: str) -> tuple[str, str] | None:
         """Route one utterance through the intent router; record the decision."""
-        followed_up = self._consume_promise_follow_up(text)
-        if followed_up is not None:
-            return followed_up
         self._last_user_text = text.strip()
         decision = await self._router.route(text, self._default_agent_backend)
         self._record_routing(decision)
@@ -599,38 +597,6 @@ class VoiceSession:
             return None
         self._force_confirm = decision.action == intent_router.ACTION_CONFIRM
         return decision.agent, decision.task
-
-    def _consume_promise_follow_up(self, text: str) -> tuple[str, str] | None:
-        """Dispatch the promised-but-unsent task when the user approves it.
-
-        The persona sometimes promises agent work without dispatching; the
-        request is remembered in ``_unfulfilled_promise``. A bare approval
-        ("okay, do it") then refers to that promise -- a fact no single-
-        utterance classifier can recover -- so resolve it here, for free.
-        """
-        if not self._unfulfilled_promise or self._pending_confirmations:
-            return None
-        reply = voice_commands.classify_confirmation_reply(text)
-        if reply is None:
-            return None
-        task, self._unfulfilled_promise = self._unfulfilled_promise, ""
-        if reply == "deny":
-            return None
-        self._record_routing(
-            intent_router.RoutingDecision(
-                text=text,
-                action=intent_router.ACTION_DISPATCH,
-                intent="agent_task",
-                category="other_action",
-                requirement="required",
-                confidence=1.0,
-                task=task,
-                agent=self._default_agent_backend,
-                reason="user approved the task the persona had promised",
-                source="follow_up",
-            )
-        )
-        return self._default_agent_backend, task
 
     def _record_routing(self, decision: intent_router.RoutingDecision) -> None:
         """Log, emit, and retain one routing decision for inspection."""
@@ -714,29 +680,27 @@ class VoiceSession:
 
         The persona sometimes narrates "I shall summon the agent" without the
         ``[[delegate: ...]]`` marker -- nothing dispatches and the user is
-        misled. Inject one correction turn so the model either emits the
-        marker for real or walks the claim back. Skipped when the reply
-        legitimately talks about the agent: a marker did dispatch, the turn
-        answers an injected ack/update, work is genuinely in flight, or a
-        correction was already spent on this user turn.
+        misled. Convert the original request into a real pending confirmation
+        without trusting a second LLM response to emit the marker. Skipped when
+        the reply legitimately talks about the agent: a marker did dispatch,
+        the turn answers an injected ack/update, or work is genuinely in flight.
         """
         ack_turn, self._agent_ack_turn = self._agent_ack_turn, False
         if dispatched:
-            self._unfulfilled_promise = ""
             return
         if ack_turn or self._pending_confirmations or self._bridge.has_active():
             return
         if not looks_like_delegation_promise(text):
             return
-        self._unfulfilled_promise = self._last_user_text
-        if self._promise_nudges >= 1:
-            logger.warning(f"LLM again promised agent work without a marker: {text!r}")
+        request = self._last_user_text.strip()
+        if not request:
+            logger.warning(f"LLM promised agent work without a request to dispatch: {text!r}")
             return
-        self._promise_nudges += 1
-        logger.warning(f"LLM promised agent work without a delegate marker; correcting: {text!r}")
-        request = self._last_user_text or "the user's latest request"
-        prompt = cfg.DELEGATION_UNSENT_PROMPT.format(request=request)
-        self._spawn(self._inject_and_run(prompt), name="delegate-correction")
+        logger.warning(f"LLM promised agent work without a marker; holding real task: {request!r}")
+        self._force_confirm = True
+        ack, held = self._delegate_ack_ex(self._default_agent_backend, request)
+        if held:
+            self._spawn(self._inject_and_run(ack), name="markerless-promise-confirm")
 
     def _maybe_consume_confirmation(self, text: str) -> str | None:
         """If a job is pending and ``text`` is a yes/no, resolve it. Else None."""

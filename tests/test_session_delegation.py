@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from pipecat.frames.frames import TTSSpeakFrame
 from remote_agent_protocol import agent_bridge, personas, session, session_processors
@@ -44,7 +45,7 @@ class SessionDelegationTests(unittest.TestCase):
 
         self.assertEqual(parsed, ("code-puppy", "add tests to the repo"))
 
-    def test_markerless_promise_is_remembered_until_a_real_dispatch(self):
+    def test_markerless_promise_becomes_a_real_confirmation(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
         spawned = []
 
@@ -57,27 +58,28 @@ class SessionDelegationTests(unittest.TestCase):
 
         voice_session._on_llm_response("I shall summon the Bat Computer immediately.", False)
 
-        self.assertEqual(voice_session._unfulfilled_promise, "get the Bentonville forecast")
-        self.assertEqual(spawned, ["delegate-correction"])
-
-        voice_session._on_llm_response("Sending it now.", True)
-        self.assertEqual(voice_session._unfulfilled_promise, "")
-
-    def test_approval_dispatches_remembered_promise(self):
-        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
-        voice_session._unfulfilled_promise = "get the Bentonville forecast"
-        voice_session._record_routing = lambda _decision: None
-
-        parsed = voice_session._consume_promise_follow_up("okay, do it")
-
         self.assertEqual(
-            parsed,
-            (voice_session._default_agent_backend, "get the Bentonville forecast"),
+            list(voice_session._pending_confirmations.values()),
+            [(voice_session._default_agent_backend, "get the Bentonville forecast", None)],
         )
-        self.assertEqual(voice_session._unfulfilled_promise, "")
+        self.assertEqual(spawned, ["markerless-promise-confirm"])
 
 
 class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_background_task_failures_are_logged(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+
+        async def fail():
+            raise RuntimeError("boom")
+
+        with patch.object(session.logger, "error") as logged:
+            voice_session._spawn(fail(), name="broken-task")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        logged.assert_called_once()
+        self.assertIn("broken-task", logged.call_args.args[0])
+
     async def test_quota_failure_is_remembered_for_spoken_recovery(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
         worker = RecordingWorker()

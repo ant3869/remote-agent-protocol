@@ -15,8 +15,8 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - Tiered intent routing keeps explicit commands, acknowledgments, and keyword
   matches on a zero-model-call path, using the resident `llama3.2:1b` model
   only for ambiguous requests with a 1.5-second fallback budget.
-- Markerless agent promises are corrected and retained so a follow-up such as
-  "okay, do it" dispatches the request the assistant previously promised.
+- Markerless agent-promise detection prevents claimed-but-unsent work from
+  disappearing as an ordinary chat reply.
 - Vague capability references ("there's a package that does X, I forgot the
   name, make sure we have it") are detected deterministically and shipped to
   the agent verbatim as an identify-then-install task held for spoken
@@ -28,8 +28,20 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   silent modifications to this application's own working tree -- flagged in
   the job history and announced out loud.
 
+### Changed
+
+- `env.example` now documents only Remote Agent Protocol settings, with every
+  optional override disabled by default; `OLLAMA_HOST` consistently configures
+  chat, memory, intent routing, model discovery, and health checks.
+
 ### Fixed
 
+- Capability audits such as checking for missing skills now route
+  deterministically in command and question form; classifier warmup gets a
+  cold-start budget without increasing live-turn latency.
+- Markerless promises now create a real pending confirmation instead of asking
+  the LLM to correct itself, and background-task failures are logged rather
+  than silently discarded.
 - Agent CLIs that echo status-protocol examples or print terminal rate-limit
   errors no longer report false successful completion.
 - Runtime logs and persisted agent jobs now carry full ISO timestamps, and
@@ -37,6 +49,9 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - Provider quota/rate/capacity failures are classified from streaming output;
   fatal quota exhaustion is announced immediately and supports spoken OpenAI
   model switching plus an explicit one-shot retry for CodePuppy and Hermes.
+- "Install" (not just "uninstall") is treated as a destructive task word, so a
+  spoken request that ends up running `pip install` from a third-party source
+  now holds for confirmation like any other system-mutating action.
 
 ## [1.1.0] - 2026-07-04
 

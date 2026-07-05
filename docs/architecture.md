@@ -56,8 +56,9 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
 
 - Voice and typed input use the same session and routing path.
 - Delegation happens in code before the LLM sees the request. Each routing
-  decision is logged; markerless promises are corrected and remembered so a
-  follow-up approval can dispatch the original request.
+  decision is logged; capability-state audits bypass the classifier, and a
+  markerless promise creates a real pending confirmation for the original
+  request instead of relying on another LLM response.
 - Agent work is asynchronous and streams to a dedicated console.
 - STT, TTS, personas, model choice, wake word, memory, agent completion
   announcements, and audio devices are independently configurable (most of it
@@ -90,7 +91,7 @@ Values must be JSON arrays of process arguments; shell command strings are
 rejected. `AGENT_MACHINES_JSON` supplies the machine labels shown in the UI.
 
 ```dotenv
-AGENT_BACKENDS_JSON={"openclaw":["remote-agent","laptop","openclaw","{task}"]}
+AGENT_BACKENDS_JSON={"openclaw":["trusted-launcher","openclaw","{task}"]}
 AGENT_MACHINES_JSON={"openclaw":"Laptop"}
 ```
 

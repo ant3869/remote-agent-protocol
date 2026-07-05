@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from dataclasses import asdict
+from unittest.mock import AsyncMock, patch
 
 from remote_agent_protocol import intent_router
 
@@ -153,6 +154,28 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, "dispatch")
         self.assertEqual(classify.calls, [])
 
+    async def test_capability_audit_short_circuits_the_classifier(self):
+        classify = FakeClassify(exc=TimeoutError())
+        decision = await self.route(
+            classify,
+            "check whether there are any useful skills we don't have installed",
+        )
+
+        self.assertEqual(decision.source, "heuristic")
+        self.assertEqual(decision.action, "dispatch")
+        self.assertEqual(classify.calls, [])
+
+    async def test_capability_audit_question_short_circuits_the_classifier(self):
+        classify = FakeClassify(exc=TimeoutError())
+        decision = await self.route(
+            classify,
+            "are there any useful skills we don't have installed?",
+        )
+
+        self.assertEqual(decision.source, "heuristic")
+        self.assertEqual(decision.action, "dispatch")
+        self.assertEqual(classify.calls, [])
+
     async def test_keyword_match_never_pays_for_classifier_error(self):
         classify = FakeClassify(exc=RuntimeError("ollama down"))
         decision = await self.route(classify, "check the news for anything about AI")
@@ -204,6 +227,13 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         await make_router(classify).warmup()
 
         self.assertEqual(classify.calls, ["hello"])
+
+    async def test_default_warmup_has_a_cold_start_budget(self):
+        classify = AsyncMock(return_value=verdict(intent="chat", category="none", task=""))
+        with patch.object(intent_router, "classify_with_ollama", classify):
+            await intent_router.IntentRouter(timeout_secs=0.05).warmup()
+
+        self.assertEqual(classify.await_args.kwargs["timeout_secs"], 30.0)
 
     async def test_decision_is_fully_serializable_for_events(self):
         classify = FakeClassify(result=verdict())

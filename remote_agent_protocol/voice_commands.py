@@ -118,6 +118,28 @@ _PAST_QUESTION_STARTS = ("did", "was", "were", "has", "had", "have", "does", "do
 # "repositories"/"files"/"downloads" all land. (Lesson learned the hard way:
 # "Find trending GitHub repositories" sailed straight past the old list and
 # Jess INVENTED five repos. See gui_boot.log 18:29. Never again.)
+# Nouns that mean an installable/enablable capability, not an end task.
+_CAPABILITY_NOUNS = (
+    "skill",
+    "package",
+    "plugin",
+    "plug-in",
+    "tool",
+    "library",
+    "extension",
+    "addon",
+    "add-on",
+    "module",
+    "dependency",
+    "mcp",
+    "cli",
+    "utility",
+    "app",
+    "application",
+    "program",
+)
+_CAPABILITY_STATE_KEYWORDS = ("installed", "uninstalled", "missing", "enabled", "disabled")
+
 _TASK_KEYWORDS = (
     "file",
     "folder",
@@ -142,9 +164,7 @@ _TASK_KEYWORDS = (
     "git",
     "code",
     "script",
-    "app",
-    "application",
-    "program",
+    *_CAPABILITY_NOUNS,
     "computer",
     "pc",
     "system",
@@ -324,6 +344,11 @@ def parse_implicit_task(text: str) -> str | None:
         if w.endswith("s"):
             words.add(w[:-1])  # naive singular -- catches files/repos/etc.
 
+    # Current machine capability state is real-world data even when phrased as
+    # a question ("are any useful skills missing?"). It never belongs to chat.
+    if words & set(_CAPABILITY_NOUNS) and words & set(_CAPABILITY_STATE_KEYWORDS):
+        return lowered
+
     if (
         first not in _PAST_QUESTION_STARTS
         and words & set(_LIVE_DATA_KEYWORDS)
@@ -349,27 +374,6 @@ def parse_implicit_task(text: str) -> str | None:
 # editing this repo for five minutes, jess_runtime.log 2026-07-05 12:35.
 # Never again.)
 # ---------------------------------------------------------------------------
-
-# Nouns that mean "an installable/enablable capability", not an end task.
-_CAPABILITY_NOUNS = (
-    "skill",
-    "package",
-    "plugin",
-    "plug-in",
-    "tool",
-    "library",
-    "extension",
-    "addon",
-    "add-on",
-    "module",
-    "dependency",
-    "mcp",
-    "cli",
-    "utility",
-    "app",
-    "application",
-    "program",
-)
 
 # Phrases that signal the user cannot produce the exact name.
 _NAME_UNCERTAINTY_PHRASES = (
