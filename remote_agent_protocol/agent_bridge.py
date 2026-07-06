@@ -341,25 +341,22 @@ def result_detail(job: AgentJob) -> str:
     return body if body and body != job.summary else ""
 
 
-_TASK_LABEL_MAX_CHARS = 45
+_TASK_LABEL_MAX_CHARS = 48
 
 
 def task_label(task: str) -> str:
-    """A short, speakable reference to a task -- never the full verbatim sentence.
+    """A short, clean spoken reference to a task, or ``""`` if there isn't one.
 
     Status updates are spoken repeatedly (start, still-working, finish); reading
-    a long user phrasing aloud each time is grating. Reduce it to the leading
-    clause within a small budget so updates stay concise while still identifying
-    which task they refer to.
+    a long user phrasing aloud each time is grating. But *truncating* a long
+    sentence produces dangling fragments ("...people who put"), which is worse.
+    So we only return the task when it is already short and complete; otherwise
+    we return ``""`` and the caller falls back to a generic reference ("it").
     """
     text = " ".join((task or "").split())
-    if not text:
-        return "the task"
-    clause = re.split(r"[,;.]", text, maxsplit=1)[0].strip() or text
-    if len(clause) <= _TASK_LABEL_MAX_CHARS:
-        return clause
-    clipped = clause[:_TASK_LABEL_MAX_CHARS].rsplit(" ", 1)[0].strip()
-    return clipped or clause[:_TASK_LABEL_MAX_CHARS].strip()
+    if text and len(text) <= _TASK_LABEL_MAX_CHARS:
+        return text
+    return ""
 
 
 def announcement(job: AgentJob) -> str:
@@ -374,19 +371,22 @@ def announcement(job: AgentJob) -> str:
         joined = " ".join(questions)
         return f"Agent '{job.agent}' needs your input: {joined}{tamper}"
     summary = job.summary or summarize_output(job.lines)
+    # A clean short reference when the task is brief, else a generic one -- never
+    # a truncated fragment of a long user sentence.
+    ref = task_label(job.task) or "the task"
     if job.status == STATUS_DONE:
         if not (job.result or job.summary or job.lines):
             return (
-                f"Agent '{job.agent}' finished '{task_label(job.task)}' but returned no "
-                f"result to relay -- re-run it to capture the output.{tamper}"
+                f"Agent '{job.agent}' finished {ref} but returned no result to relay -- "
+                f"re-run it to capture the output.{tamper}"
             )
         # Lead with the result summary rather than reading the (often long) task
         # back verbatim; the full result is placed in the LLM context separately.
         if summary:
             return f"{job.agent} finished: {summary}{tamper}"
-        return f"{job.agent} finished {task_label(job.task)}.{tamper}"
+        return f"{job.agent} finished {ref}.{tamper}"
     if job.status == STATUS_CANCELLED:
-        return f"{job.agent} cancelled {task_label(job.task)}.{tamper}"
+        return f"{job.agent} cancelled {ref}.{tamper}"
     if job.failure_kind == "quota":
         return (
             f"Agent '{job.agent}' failed because its current model or provider is out of "
@@ -397,7 +397,7 @@ def announcement(job: AgentJob) -> str:
             f"Agent '{job.agent}' failed because its provider is rate-limited or at capacity. "
             f"You can say 'switch {job.agent} to OpenAI'.{tamper}"
         )
-    return f"{job.agent} FAILED {task_label(job.task)}. Last output: {summary}{tamper}"
+    return f"{job.agent} FAILED {ref}. Last output: {summary}{tamper}"
 
 
 class AgentBridge:

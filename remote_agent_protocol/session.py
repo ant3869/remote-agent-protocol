@@ -1010,7 +1010,8 @@ class VoiceSession:
 
         agent = event.get("agent", "Agent")
         if event.get("event") == "started" and event.get("announce_start"):
-            text = f"{agent} started on {agent_bridge.task_label(event.get('task', ''))}."
+            label = agent_bridge.task_label(event.get("task", ""))
+            text = f"{agent} started on {label}." if label else f"{agent} is on it."
             self._spawn(
                 self._worker.queue_frames([TTSSpeakFrame(text=text, append_to_context=True)]),
                 name=f"agent-start-{event.get('job_id', '')}",
@@ -1029,7 +1030,9 @@ class VoiceSession:
             text = f"{agent} completed {step}."
             urgent = False
         elif state == agent_bridge.STATE_IN_PROGRESS:
-            text = f"{agent} is still working on {agent_bridge.task_label(event.get('task', ''))}."
+            label = agent_bridge.task_label(event.get("task", ""))
+            suffix = label if label else "it"
+            text = f"{agent} is still working on {suffix}."
             urgent = False
         else:
             return

@@ -139,23 +139,39 @@ class PureHelperTests(unittest.TestCase):
         job.lines = ["ERROR: simulated"]
         self.assertIn("FAILED", agent_bridge.announcement(job))
 
-    def test_task_label_shortens_long_task(self):
+    def test_task_label_returns_empty_for_long_or_empty_task(self):
+        # A long task cannot be shortened into a clean reference without producing
+        # a dangling fragment, so we return "" and callers say "it" instead.
         long_task = (
-            "check my emails for the last, check my last 10 emails to see if "
-            "there's anything important"
+            "look for in bentonville people who put together furniture that you "
+            "bought from another store like out of the box"
         )
-        label = agent_bridge.task_label(long_task)
-        self.assertLessEqual(len(label), 45)
-        self.assertNotIn("important", label)  # trailing rambling clause dropped
-        self.assertTrue(label)
+        self.assertEqual(agent_bridge.task_label(long_task), "")
+        self.assertEqual(agent_bridge.task_label(""), "")
 
-    def test_task_label_keeps_short_task_and_handles_empty(self):
+    def test_task_label_keeps_short_complete_task(self):
         self.assertEqual(agent_bridge.task_label("open the steam app"), "open the steam app")
-        self.assertEqual(agent_bridge.task_label(""), "the task")
 
-    def test_finished_announcement_avoids_verbatim_long_task(self):
-        # The spoken completion must not read the whole (long) task back aloud;
-        # it leads with the result summary instead.
+    def test_status_announcements_never_emit_a_task_fragment(self):
+        # Regression: truncating a long task produced nonsense like
+        # "...people who put." Long tasks must fall back to a generic reference.
+        long_task = (
+            "look for in bentonville people who put together furniture that you "
+            "bought from another store like out of the box"
+        )
+        for status in (
+            agent_bridge.STATUS_DONE,
+            agent_bridge.STATUS_CANCELLED,
+            agent_bridge.STATUS_FAILED,
+        ):
+            job = agent_bridge.AgentJob(job_id="j", agent="hermes-yolo", task=long_task)
+            job.status = status
+            text = agent_bridge.announcement(job)
+            self.assertNotIn("people who put", text)
+            self.assertNotIn(long_task, text)
+
+    def test_finished_announcement_leads_with_summary(self):
+        # The spoken completion leads with the result summary, not the task.
         long_task = (
             "please find my usps validation code buried somewhere in my very "
             "long inbox from last week if it even exists at all"
