@@ -33,6 +33,7 @@ def job_to_row(job: Any) -> dict[str, Any]:
         "step_total": job.step_total,
         "last_completed_step": job.last_completed_step,
         "summary": job.summary,
+        "result": getattr(job, "result", ""),
         "started_at": job.started_at,
         "finished_at": job.finished_at,
         "failure_kind": job.failure_kind,

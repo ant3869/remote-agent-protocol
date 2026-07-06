@@ -611,12 +611,19 @@ class VoiceGUI:
         agent = evt.get("agent", "?")
         machine = evt.get("machine", "local")
         task = evt.get("task", "")
+        reason = evt.get("reason", "")
+        transcript = evt.get("transcript", "")
         queued = (
             f"  (+{len(self._pending_confirms) - 1} more)"
             if len(self._pending_confirms) > 1
             else ""
         )
-        self.confirm_text.configure(text=f"Run on {machine}/{agent}  →  {task}{queued}")
+        lines = [f"Run on {machine}/{agent}  →  {task}{queued}"]
+        if reason:
+            lines.append(f"Why: {reason}")
+        if transcript:
+            lines.append(f'Heard: "{transcript}"')
+        self.confirm_text.configure(text="\n".join(lines))
         self.confirm_bar.pack(fill=X, pady=(0, theme.GAP), before=self.transcript_card)
 
     def _hide_confirm(self) -> None:
@@ -678,6 +685,11 @@ class VoiceGUI:
             self.tts_pill.set(evt.get("label", "TTS ?"), "ok" if ok else "danger")
         elif kind == "wake":
             self._update_wake_chip(evt)
+        elif kind == "lifecycle_ws":
+            if evt.get("state") == "degraded":
+                self._append_sys(
+                    f"-- lifecycle WebSocket unavailable: {evt.get('error', 'bind failed')} --"
+                )
         elif kind == "sys":
             self._append_sys(evt.get("text", ""))
         elif kind == "memory":

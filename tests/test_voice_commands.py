@@ -100,6 +100,44 @@ class ParseDelegationTests(unittest.TestCase):
     def test_empty_task_does_not_trigger(self):
         self.assertIsNone(parse("ask hermes to"))
 
+    def test_directly_addressed_agent_command(self):
+        self.assertEqual(
+            parse("Code Puppy, write unit tests for the router"),
+            ("code-puppy", "write unit tests for the router"),
+        )
+
+    def test_direct_agent_status_statement_is_not_a_command(self):
+        self.assertIsNone(parse("Hermes is still working on the report"))
+        self.assertIsNone(parse("Hermes, are you still working on the report?"))
+
+    def test_explicit_command_corpus_exceeds_95_percent_accuracy(self):
+        commands = [
+            "ask hermes to check the forecast",
+            "tell hermes to research WebRTC",
+            "have hermes summarize the report",
+            "get hermes to inspect the logs",
+            "please ask hermes to find the issue",
+            "Jess, tell hermes to review the changes",
+            "can you have hermes write the notes",
+            "could you get hermes to compare the files",
+            "ask code puppy to add unit tests",
+            "tell code puppy to fix the parser",
+            "have puppy refactor the module",
+            "get puppy to run the checks",
+            "Code Puppy, write a Python script",
+            "Code Puppy, create a regression test",
+            "Hermes, research the current API",
+            "Hermes, check the installed version",
+            "Mock, run a smoke test",
+            "The mock agent, write a status line",
+            "please tell hermes yolo to install the package",
+            "Hermes yolo, remove the temporary file",
+        ]
+
+        recognized = sum(parse(command) is not None for command in commands)
+
+        self.assertGreater(recognized / len(commands), 0.95)
+
 
 class ParseImplicitTaskTests(unittest.TestCase):
     def parse(self, text: str):
@@ -211,6 +249,34 @@ class ParseImplicitTaskTests(unittest.TestCase):
     def test_browser_word_does_not_trigger_browse_verb(self):
         self.assertIsNone(self.parse("my browser is acting weird lately"))
 
+    def test_future_self_statement_does_not_delegate(self):
+        self.assertIsNone(self.parse("I'm going to write some code today"))
+
+    # -- regression: jess_runtime.log 2026-07-06 01:57 -- the persona answered
+    # -- "do you have access to my email?" from its own guesswork -----------
+    def test_do_you_have_access_to_my_email_delegates(self):
+        self.assertIsNotNone(self.parse("do you have access to my email?"))
+
+    def test_have_you_got_access_delegates(self):
+        self.assertIsNotNone(self.parse("have you got access to my calendar?"))
+
+    def test_can_you_access_my_files_delegates(self):
+        self.assertIsNotNone(self.parse("can you access my files on this computer?"))
+
+    def test_accessing_question_delegates(self):
+        self.assertIsNotNone(self.parse("are you accessing my microphone right now?"))
+
+
+class ParseTaskCorrectionTests(unittest.TestCase):
+    def test_correction_returns_the_instruction(self):
+        self.assertEqual(
+            voice_commands.parse_task_correction("Wait, actually use httpx instead"),
+            "actually use httpx instead",
+        )
+
+    def test_plain_disagreement_is_not_a_task_correction(self):
+        self.assertIsNone(voice_commands.parse_task_correction("No, I don't think so"))
+
 
 class ParseCapabilityRequestTests(unittest.TestCase):
     def parse(self, text: str):
@@ -268,19 +334,21 @@ class ParseCapabilityRequestTests(unittest.TestCase):
 
 
 class RequiresConfirmationTests(unittest.TestCase):
-    ELEVATED = ("yolo",)
     DESTRUCTIVE = ("delete", "remove", "format", "uninstall")
 
     def req(self, backend, task):
         return voice_commands.requires_confirmation(
-            backend, task, elevated_markers=self.ELEVATED, destructive_words=self.DESTRUCTIVE
+            backend, task, destructive_words=self.DESTRUCTIVE
         )
 
-    def test_elevated_backend_always_confirms(self):
-        self.assertTrue(self.req("hermes-yolo", "say hi"))
+    def test_elevated_backend_alone_does_not_confirm(self):
+        # Picking an elevated backend (e.g. hermes-yolo) is itself the risk
+        # acknowledgment; it no longer forces confirmation on its own.
+        self.assertFalse(self.req("hermes-yolo", "say hi"))
 
     def test_destructive_task_confirms_on_any_backend(self):
         self.assertTrue(self.req("hermes", "delete the old files"))
+        self.assertTrue(self.req("hermes-yolo", "delete the old files"))
 
     def test_plain_task_on_plain_backend_does_not_confirm(self):
         self.assertFalse(self.req("hermes", "search the web for cats"))
@@ -318,6 +386,37 @@ class ClassifyConfirmationReplyTests(unittest.TestCase):
 
     def test_unrelated_reply_is_none(self):
         self.assertIsNone(self.c("what will it change exactly?"))
+
+
+class LooksLikeSttNoiseTests(unittest.TestCase):
+    """Whisper (and similar STT) hallucinate stock captioning phrases out of
+    silence, room noise, or a clipped/interrupted turn. These should never be
+    treated as a real request."""
+
+    def test_known_hallucination_phrases_are_noise(self):
+        for phrase in (
+            "thank you for watching",
+            "Thanks for watching!",
+            "please subscribe",
+            "like and subscribe",
+            "see you in the next video",
+            "bye bye",
+        ):
+            self.assertTrue(voice_commands.looks_like_stt_noise(phrase), phrase)
+
+    def test_empty_or_punctuation_only_text_is_noise(self):
+        self.assertTrue(voice_commands.looks_like_stt_noise(""))
+        self.assertTrue(voice_commands.looks_like_stt_noise("...!?"))
+
+    def test_real_requests_are_not_noise(self):
+        for phrase in (
+            "check the weather for tomorrow",
+            "look up the latest news on climate change",
+            "organize my downloads folder",
+            "delete the files in my downloads folder",
+            "thanks for watching that show with me",
+        ):
+            self.assertFalse(voice_commands.looks_like_stt_noise(phrase), phrase)
 
 
 if __name__ == "__main__":

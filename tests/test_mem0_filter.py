@@ -59,6 +59,29 @@ class Mem0FilterTests(unittest.TestCase):
 
         self.assertEqual([m["content"] for m in filtered], ["I'm 40.", "Call me Ant."])
 
+    def test_keeps_facts_behind_leading_filler(self):
+        # Casual/STT phrasing buries the marker behind a discourse word; the
+        # fact must still be captured rather than silently dropped.
+        messages = [
+            {"role": "user", "content": "Well, my dog is named Pixel."},
+            {"role": "user", "content": "So I have two kids."},
+            {"role": "user", "content": "Actually, I've got a peanut allergy."},
+        ]
+
+        filtered = mem0_setup.filter_messages_for_storage(messages)
+
+        self.assertEqual(len(filtered), 3)
+
+    def test_ignores_the_word_code_in_a_non_fact(self):
+        # Regression companion to the router fix: "validation code" is not a
+        # durable personal fact and must not be stored.
+        messages = [
+            {"role": "user", "content": "find my validation code in an email from usps"},
+            {"role": "user", "content": "some code thing happened"},
+        ]
+
+        self.assertEqual(mem0_setup.filter_messages_for_storage(messages), [])
+
 
 if __name__ == "__main__":
     unittest.main()

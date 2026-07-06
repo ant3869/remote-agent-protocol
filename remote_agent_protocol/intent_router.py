@@ -13,27 +13,35 @@ paths, not a toll on every turn:
    Deterministic, free, always wins.
 2. **gate** -- pure acknowledgments ("thank you", "okay cool") are chat by
    construction (``voice_commands.is_smalltalk``); no classifier call.
-3. **capability** -- vague references to a named-but-forgotten package/skill/
+3. **noise** -- likely STT/VAD hallucination: a known stock phrase these
+   models recite out of silence or room noise, or filler-stripping leaving no
+   words at all (``voice_commands.looks_like_stt_noise``). Never a real
+   request, so it never reaches a parser or the classifier.
+4. **capability** -- vague references to a named-but-forgotten package/skill/
    tool (``voice_commands.parse_capability_request``). The one class of
    request a task rewrite reliably destroys, so the utterance ships verbatim
    inside an identify-then-install task, held for spoken confirmation.
-4. **heuristic** -- the keyword net (``voice_commands.parse_implicit_task``).
+5. **heuristic** -- the keyword net (``voice_commands.parse_implicit_task``).
    High precision, free; when it fires, dispatch immediately.
-5. **semantic** -- the LLM intent classifier in this module, when enabled.
+6. **semantic** -- the LLM intent classifier in this module, when enabled.
    Only utterances that reach this tier pay for it; on timeout or error the
    turn degrades to chat (the free tiers above have already had their say).
+   A classifier verdict is further required to be *grounded*: its task/reason
+   must share at least one real word with the utterance, or the decision is
+   held for confirmation rather than trusted outright (see ``_grounding_gap``).
 
-Downstream of all four, the persona's ``[[delegate: ...]]`` marker and the
+Downstream of all tiers, the persona's ``[[delegate: ...]]`` marker and the
 broken-promise correction (session_processors) remain the last line of defense.
 
 Every ``route()`` call returns a :class:`RoutingDecision` recording what was
-decided, by which tier, with what confidence, and why. The session logs it,
-emits it to the GUI as a ``"routing"`` event, and keeps it in a diagnostics
-ring buffer.
+decided, by which tier, with what confidence and risk, and why. The session
+logs it, emits it to the GUI as a ``"routing"`` event, and keeps it in a
+diagnostics ring buffer.
 """
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -54,6 +62,15 @@ CATEGORIES = READ_ONLY_CATEGORIES + MUTATING_CATEGORIES
 ACTION_DISPATCH = "dispatch"
 ACTION_CONFIRM = "confirm"
 ACTION_NONE = "none"
+
+# Risk classification -- independent of action, so logs and the GUI can always
+# explain WHY a decision needed confirming, even when the reason isn't a
+# destructive verb. Precedence when several apply: destructive first (it's
+# the one a wrong guess can't undo), then low_grounding, then ambiguous.
+RISK_SAFE = "safe"
+RISK_DESTRUCTIVE = "destructive"
+RISK_LOW_GROUNDING = "low_grounding"
+RISK_AMBIGUOUS = "ambiguous"
 
 _CLASSIFIER_SYSTEM = """You route utterances for a voice assistant. The assistant persona can only \
 talk: it has NO internet, NO files, NO apps, NO sensors, and its knowledge is \
@@ -90,7 +107,15 @@ description and their uncertainty; NEVER flatten it into performing the end \
 task itself.
 
 confidence: 0.0-1.0 that intent is correct.
-reason: one short sentence.
+reason: one short sentence, using only words present in the utterance or its
+plain meaning -- never invent a topic the utterance didn't raise.
+
+These examples show the PATTERN, not text to reuse. Never copy an example's
+task/confidence/reason for a different utterance -- if what you're given
+doesn't clearly match one, write your own answer grounded in what was
+actually said. If the utterance is silence, noise, a stray filler word, or
+otherwise unintelligible, that is chat with confidence 0.1 or lower -- never
+invent a task to fill the gap.
 
 Examples:
 "I wonder if I'll need an umbrella tomorrow" -> {"intent":"agent_task","category":"live_information","task":"Get tomorrow's rain forecast for the user's location","confidence":0.9,"reason":"Needs live weather data"}
@@ -98,6 +123,7 @@ Examples:
 "tell me a story about a dragon" -> {"intent":"chat","category":"none","task":"","confidence":0.95,"reason":"Creative conversation"}
 "did you finish that report thing" -> {"intent":"chat","category":"none","task":"","confidence":0.7,"reason":"Asks about prior work, not a new task"}
 "there's some plugin that transcribes podcasts, no clue what it's called, can you set it up" -> {"intent":"agent_task","category":"system_control","task":"Identify the plugin the user means -- one that transcribes podcasts, exact name unknown to them -- check whether it is installed, and set it up if missing","confidence":0.85,"reason":"Install a capability described but not named"}
+"um, uh, static, static, nothing really" -> {"intent":"chat","category":"none","task":"","confidence":0.1,"reason":"Unintelligible or noise-like audio, no discernible request"}
 Respond with JSON only."""
 
 # Ollama structured output: constraining generation to this schema guarantees
@@ -115,6 +141,203 @@ _RESPONSE_SCHEMA = {
 }
 
 _WARMUP_TIMEOUT_SECS = 30.0
+_CODING_TASK_RE = re.compile(
+    # Deliberately excludes the bare word "code": "validation code", "promo
+    # code", "zip/area code" are not coding tasks and must not steal a job from
+    # the default agent. Match real software-engineering signal instead.
+    r"\b(?:bug|codebase|source code|code review|coding|module|python|"
+    r"javascript|typescript|refactor|unit tests?|test suite|api client|"
+    r"pull request|merge conflict|stack trace|compile|repo(?:sitory)?)\b",
+    re.IGNORECASE,
+)
+
+# Mirrors the "Examples:" block in _CLASSIFIER_SYSTEM -- kept as data (not
+# parsed from the prompt string) so a leaked example can be recognized
+# programmatically. See _example_echo: jess_runtime.log 2026-07-05 12:57 and
+# 2026-07-06 01:02 both show the small local classifier reciting one of these
+# completions verbatim (exact task/confidence/reason) for utterances that had
+# nothing to do with weather or downloads -- its fallback when an utterance
+# gives it too weak a signal to classify (often a VAD/STT misfire on noise or
+# silence) is to regurgitate a memorized example instead of a low-confidence
+# verdict.
+_EXAMPLES: tuple[tuple[str, dict], ...] = (
+    (
+        "I wonder if I'll need an umbrella tomorrow",
+        {
+            "intent": "agent_task",
+            "category": "live_information",
+            "task": "Get tomorrow's rain forecast for the user's location",
+            "confidence": 0.9,
+            "reason": "Needs live weather data",
+        },
+    ),
+    (
+        "you know how files pile up in downloads... can something be done about that",
+        {
+            "intent": "agent_task",
+            "category": "files_or_apps",
+            "task": "Organize and clean up the user's downloads folder",
+            "confidence": 0.8,
+            "reason": "Describes a file cleanup goal indirectly",
+        },
+    ),
+    (
+        "tell me a story about a dragon",
+        {
+            "intent": "chat",
+            "category": "none",
+            "task": "",
+            "confidence": 0.95,
+            "reason": "Creative conversation",
+        },
+    ),
+    (
+        "did you finish that report thing",
+        {
+            "intent": "chat",
+            "category": "none",
+            "task": "",
+            "confidence": 0.7,
+            "reason": "Asks about prior work, not a new task",
+        },
+    ),
+    (
+        "there's some plugin that transcribes podcasts, no clue what it's "
+        "called, can you set it up",
+        {
+            "intent": "agent_task",
+            "category": "system_control",
+            "task": (
+                "Identify the plugin the user means -- one that transcribes "
+                "podcasts, exact name unknown to them -- check whether it is "
+                "installed, and set it up if missing"
+            ),
+            "confidence": 0.85,
+            "reason": "Install a capability described but not named",
+        },
+    ),
+    (
+        "um, uh, static, static, nothing really",
+        {
+            "intent": "chat",
+            "category": "none",
+            "task": "",
+            "confidence": 0.1,
+            "reason": "Unintelligible or noise-like audio, no discernible request",
+        },
+    ),
+)
+
+# Common short words filtered out of the grounding check below so they can't
+# create a false "this utterance resembles the example" match on their own.
+_STOPWORDS = {
+    "that",
+    "this",
+    "with",
+    "from",
+    "have",
+    "there",
+    "about",
+    "what",
+    "when",
+    "where",
+    "does",
+    "user",
+    "users",
+    "your",
+    "their",
+    "been",
+    "just",
+    "want",
+    "wants",
+    "need",
+    "needs",
+    "make",
+    "sure",
+    "tell",
+    "real",
+    "world",
+    "please",
+    "could",
+    "would",
+    "should",
+    "into",
+    "some",
+    "computer",
+    "agent",
+    "task",
+    "action",
+}
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 4 and w not in _STOPWORDS
+    }
+
+
+def _example_echo(verdict: dict, text: str) -> str | None:
+    """Detect a few-shot example's completion recited for an unrelated utterance.
+
+    Matches on an exact ``task`` or ``reason`` string (the model doesn't
+    partially misremember an example, it reproduces a whole field verbatim),
+    then checks whether the live utterance shares any real word with the
+    example's OWN trigger phrase. If it does, the model is plausibly
+    classifying a genuinely similar request and the verdict is kept. If it
+    doesn't, the completion has nothing to do with what was said -- return
+    the leaked example's utterance so the caller can discard the verdict.
+    """
+    incoming_words = _content_words(text)
+    for example_text, example_verdict in _EXAMPLES:
+        same_task = bool(verdict["task"]) and verdict["task"] == example_verdict["task"]
+        same_reason = bool(verdict["reason"]) and verdict["reason"] == example_verdict["reason"]
+        if not (same_task or same_reason):
+            continue
+        if incoming_words & _content_words(example_text):
+            continue
+        return example_text
+    return None
+
+
+def _grounding_gap(task: str, reason: str, text: str) -> str | None:
+    """Detect a classifier task/reason with no real connection to the utterance.
+
+    A weaker, general-purpose companion to :func:`_example_echo`: even when
+    the model isn't reciting a memorized example verbatim, it can still
+    invent a task unrelated to what was actually said (a noisy, garbled, or
+    ambiguous transcript is the usual trigger). Only fires when the task or
+    reason actually contains a content word to compare against -- a verdict
+    too terse to judge (e.g. a bare "do it") gets the benefit of the doubt
+    rather than a false positive, since there's nothing there to contradict
+    the utterance.
+    """
+    verdict_words = _content_words(task) | _content_words(reason)
+    if not verdict_words:
+        return None
+    if verdict_words & _content_words(text):
+        return None
+    return "classifier task/reason shares no word with the transcript"
+
+
+def _classify_risk(agent: str, task: str, *, grounded: bool, confident: bool) -> str:
+    """Classify WHY a decision might need a human in the loop, for logs/GUI.
+
+    Destructive outranks the rest -- a wrong destructive guess is the one that
+    can't be undone by asking again. Grounding comes next: an ungrounded task
+    is suspect regardless of how confidently it was stated. Only after both
+    are clear does plain confidence ambiguity matter.
+    """
+    if voice_commands.requires_confirmation(
+        agent,
+        task,
+        destructive_words=cfg.AGENT_DESTRUCTIVE_WORDS,
+    ):
+        return RISK_DESTRUCTIVE
+    if not grounded:
+        return RISK_LOW_GROUNDING
+    if not confident:
+        return RISK_AMBIGUOUS
+    return RISK_SAFE
 
 
 @dataclass
@@ -130,8 +353,10 @@ class RoutingDecision:
     task: str = ""
     agent: str = ""
     reason: str = ""
-    source: str = "none"  # explicit | classifier | heuristic | none
-    fallback: str = ""  # "" | disabled | timeout | error | invalid
+    source: str = "none"  # explicit | gate | noise | capability | heuristic | classifier | none
+    fallback: str = ""  # "" | disabled | timeout | error | invalid | noise
+    grounded: bool = True  # False when a classifier task/reason doesn't match the transcript
+    risk: str = RISK_SAFE  # safe | destructive | low_grounding | ambiguous
     elapsed_ms: int = field(default=0)
 
 
@@ -194,6 +419,17 @@ def _clean_task(task: str, utterance: str) -> str:
     if not stripped or stripped.lower() in placeholders:
         return utterance
     return task
+
+
+def _select_backend(task: str, default_backend: str, category: str) -> str:
+    """Prefer the configured coding agent for concrete codebase work."""
+    if (
+        category in {"files_or_apps", "other_action"}
+        and "code-puppy" in cfg.AGENT_BACKENDS
+        and _CODING_TASK_RE.search(task)
+    ):
+        return "code-puppy"
+    return default_backend
 
 
 class IntentRouter:
@@ -287,6 +523,7 @@ class IntentRouter:
                 agent=backend,
                 reason="user addressed the agent by name",
                 source="explicit",
+                risk=_classify_risk(backend, task, grounded=True, confident=True),
             )
 
         # Tier 2: pure acknowledgments are chat by construction -- the most
@@ -299,7 +536,20 @@ class IntentRouter:
                 source="gate",
             )
 
-        # Tier 3: a vague reference to a named capability ("there's a package
+        # Tier 3: likely STT/VAD noise -- a stock hallucinated phrase these
+        # models recite out of silence/room noise, or a clipped/interrupted
+        # turn that left no real words at all. Never a real request, so it's
+        # rejected before it can reach a parser or the classifier budget.
+        if voice_commands.looks_like_stt_noise(text):
+            logger.info(f"Routing[noise] rejecting likely STT/VAD hallucination: {text!r}")
+            return RoutingDecision(
+                text=text,
+                reason="looks like STT/VAD noise or hallucination, not a real request",
+                source="noise",
+                fallback="noise",
+            )
+
+        # Tier 4: a vague reference to a named capability ("there's a package
         # for X, I forgot the name, make sure we have it"). Any rewrite loses
         # the point -- the user means a specific installable thing -- so the
         # utterance ships verbatim inside an identify-then-install task.
@@ -309,6 +559,7 @@ class IntentRouter:
         # yes.
         described = voice_commands.parse_capability_request(text)
         if described is not None:
+            capability_task = cfg.VAGUE_CAPABILITY_TASK_TEMPLATE.format(utterance=described)
             return RoutingDecision(
                 text=text,
                 action=ACTION_CONFIRM,
@@ -316,16 +567,20 @@ class IntentRouter:
                 category="system_control",
                 requirement="required",
                 confidence=0.9,
-                task=cfg.VAGUE_CAPABILITY_TASK_TEMPLATE.format(utterance=described),
+                task=capability_task,
                 agent=default_backend,
                 reason="user described a package/skill/tool without its exact name",
                 source="capability",
+                risk=_classify_risk(
+                    default_backend, capability_task, grounded=True, confident=True
+                ),
             )
 
-        # Tier 4: the keyword net -- free and high-precision; when it fires,
+        # Tier 5: the keyword net -- free and high-precision; when it fires,
         # dispatch without spending the classifier budget.
         task = voice_commands.parse_implicit_task(text) if self._auto_delegate else None
         if task is not None:
+            agent = _select_backend(task, default_backend, "other_action")
             return RoutingDecision(
                 text=text,
                 action=ACTION_DISPATCH,
@@ -334,12 +589,13 @@ class IntentRouter:
                 requirement="required",
                 confidence=0.9,
                 task=task,
-                agent=default_backend,
+                agent=agent,
                 reason="keyword net matched a real-world request",
                 source="heuristic",
+                risk=_classify_risk(agent, task, grounded=True, confident=True),
             )
 
-        # Tier 5: semantic classification -- only for utterances the free
+        # Tier 6: semantic classification -- only for utterances the free
         # tiers above could not place.
         verdict: dict | None = None
         fallback = ""
@@ -352,6 +608,15 @@ class IntentRouter:
                 if verdict is None:
                     fallback = "invalid"
                     logger.warning(f"Intent classifier returned unusable verdict: {raw!r}")
+                else:
+                    leaked = _example_echo(verdict, text)
+                    if leaked is not None:
+                        fallback = "invalid"
+                        logger.warning(
+                            f"Intent classifier echoed the {leaked!r} example verbatim for "
+                            f"unrelated utterance {text!r}; discarding verdict {verdict!r}"
+                        )
+                        verdict = None
             except TimeoutError:
                 fallback = "timeout"
                 logger.warning(f"Intent classifier timed out after {self._timeout:.1f}s")
@@ -366,20 +631,35 @@ class IntentRouter:
         ):
             confident = verdict["confidence"] >= self._dispatch_conf
             read_only = verdict["category"] in READ_ONLY_CATEGORIES
+            task = _clean_task(verdict["task"], text)
+            agent = _select_backend(task, default_backend, verdict["category"])
+            ungrounded = _grounding_gap(task, verdict["reason"], text)
+            grounded = ungrounded is None
+            reason = verdict["reason"] or "classifier judged this a real-world task"
+            if not grounded:
+                logger.warning(
+                    f"Intent classifier proposed an ungrounded task for {text!r}: "
+                    f"{task!r} ({ungrounded}); holding for confirmation"
+                )
+                reason = f"{reason} -- held: {ungrounded}"
             return RoutingDecision(
                 text=text,
                 # In the uncertain band: lookups are harmless so dispatch
-                # anyway; anything that could change state asks first.
-                action=ACTION_DISPATCH if confident or read_only else ACTION_CONFIRM,
+                # anyway; anything that could change state asks first. An
+                # ungrounded task never auto-dispatches, however confident or
+                # read-only the classifier claims to be.
+                action=ACTION_DISPATCH if grounded and (confident or read_only) else ACTION_CONFIRM,
                 intent="agent_task",
                 category=verdict["category"],
-                requirement="required" if confident else "optional",
+                requirement="required" if (confident and grounded) else "optional",
                 confidence=verdict["confidence"],
-                task=_clean_task(verdict["task"], text),
-                agent=default_backend,
-                reason=verdict["reason"] or "classifier judged this a real-world task",
+                task=task,
+                agent=agent,
+                reason=reason,
                 source="classifier",
                 fallback=fallback,
+                grounded=grounded,
+                risk=_classify_risk(agent, task, grounded=grounded, confident=confident),
             )
 
         # Chat: nothing dispatches; the marker + promise guard still watch.

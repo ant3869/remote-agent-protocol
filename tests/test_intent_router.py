@@ -154,6 +154,41 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, "dispatch")
         self.assertEqual(classify.calls, [])
 
+    async def test_coding_keyword_task_selects_code_puppy(self):
+        classify = FakeClassify(result=verdict(intent="chat", category="none", task=""))
+
+        decision = await make_router(classify, auto_delegate=True).route(
+            "write unit tests for this repository", "hermes"
+        )
+
+        self.assertEqual(decision.source, "heuristic")
+        self.assertEqual(decision.agent, "code-puppy")
+
+    async def test_word_code_in_non_coding_task_keeps_default_agent(self):
+        # "validation code" / "promo code" must not steal the job from the
+        # default agent just because the word "code" appears.
+        classify = FakeClassify(result=verdict(intent="chat", category="none", task=""))
+
+        decision = await make_router(classify, auto_delegate=True).route(
+            "find my validation code in an email from usps", "hermes-yolo"
+        )
+
+        self.assertEqual(decision.agent, "hermes-yolo")
+
+    async def test_classifier_coding_task_selects_code_puppy(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="files_or_apps",
+                task="Refactor the Python module",
+                conf=0.9,
+            )
+        )
+
+        decision = await make_router(classify).route("this module could use a cleanup", "hermes")
+
+        self.assertEqual(decision.source, "classifier")
+        self.assertEqual(decision.agent, "code-puppy")
+
     async def test_capability_audit_short_circuits_the_classifier(self):
         classify = FakeClassify(exc=TimeoutError())
         decision = await self.route(
@@ -255,6 +290,263 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
             "elapsed_ms",
         ):
             self.assertIn(key, row)
+
+
+class ExampleEchoRegressionTests(unittest.IsolatedAsyncioTestCase):
+    """jess_runtime.log 2026-07-05 12:57 and 2026-07-06 01:02: the classifier
+    recited a few-shot example's completion verbatim for an utterance that had
+    nothing to do with it -- "delete the YouTube parse code" got dispatched as
+    a weather lookup, and a garbled turn got dispatched as "Organize and clean
+    up the user's downloads folder". Neither utterance shared a single word
+    with the example that was echoed.
+    """
+
+    async def route(self, classify, text, **kwargs):
+        return await make_router(classify, **kwargs).route(text, "code-puppy")
+
+    async def test_verbatim_weather_example_rejected_for_unrelated_utterance(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="live_information",
+                task="Get tomorrow's rain forecast for the user's location",
+                conf=0.9,
+                reason="Needs live weather data",
+            )
+        )
+        decision = await self.route(
+            classify,
+            "have the bad computer delete the parse youtube request code left in the working tree",
+        )
+
+        self.assertEqual(decision.fallback, "invalid")
+        self.assertEqual(decision.action, "none")
+
+    async def test_verbatim_downloads_example_rejected_for_unrelated_utterance(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="files_or_apps",
+                task="Organize and clean up the user's downloads folder",
+                conf=0.8,
+                reason="Describes a file cleanup goal indirectly",
+            )
+        )
+        decision = await self.route(classify, "why did you do that and why")
+
+        self.assertEqual(decision.fallback, "invalid")
+        self.assertEqual(decision.action, "none")
+
+    async def test_leaked_reason_alone_is_rejected_even_with_a_different_task(self):
+        # 2026-07-06 01:02: task text differed from the example, but "reason"
+        # still leaked the umbrella example's exact string verbatim.
+        classify = FakeClassify(
+            result=verdict(
+                category="web_research",
+                task="Look up the latest news on climate change in the last hour",
+                conf=0.9,
+                reason="Needs live weather data",
+            )
+        )
+        decision = await self.route(classify, "why did you do that and why")
+
+        self.assertEqual(decision.fallback, "invalid")
+        self.assertEqual(decision.action, "none")
+
+    async def test_genuine_weather_request_matching_the_example_still_dispatches(self):
+        # The exact same verdict is legitimate when the utterance actually is
+        # about weather/tomorrow -- only the unrelated case should be rejected.
+        classify = FakeClassify(
+            result=verdict(
+                category="live_information",
+                task="Get tomorrow's rain forecast for the user's location",
+                conf=0.9,
+                reason="Needs live weather data",
+            )
+        )
+        decision = await self.route(classify, "will I need an umbrella tomorrow?")
+
+        self.assertEqual(decision.source, "classifier")
+        self.assertEqual(decision.action, "dispatch")
+        self.assertEqual(decision.fallback, "")
+
+
+class SttNoiseTierTests(unittest.IsolatedAsyncioTestCase):
+    """Item 1: STT/VAD hallucinations must never reach the classifier or dispatch."""
+
+    async def route(self, classify, text, **kwargs):
+        return await make_router(classify, **kwargs).route(text, "code-puppy")
+
+    async def test_hallucinated_outro_never_pays_for_the_classifier(self):
+        classify = FakeClassify(
+            result=verdict(category="system_control", task="Enable video watching", conf=0.9)
+        )
+        decision = await self.route(classify, "thank you for watching")
+
+        self.assertEqual(decision.source, "noise")
+        self.assertEqual(decision.action, "none")
+        self.assertEqual(decision.fallback, "noise")
+        self.assertEqual(classify.calls, [])
+
+    async def test_content_free_utterance_is_noise(self):
+        classify = FakeClassify(result=verdict())
+        decision = await self.route(classify, "...")
+
+        self.assertEqual(decision.source, "noise")
+        self.assertEqual(decision.action, "none")
+        self.assertEqual(classify.calls, [])
+
+
+class GroundingGapTests(unittest.IsolatedAsyncioTestCase):
+    """Item 2: a general grounding guard, not just exact example echoes -- a
+    classifier task/reason that shares no real word with the transcript must
+    never auto-dispatch, even at high confidence and even without reciting a
+    memorized example verbatim."""
+
+    async def route(self, classify, text, **kwargs):
+        return await make_router(classify, **kwargs).route(text, "code-puppy")
+
+    async def test_high_confidence_unrelated_task_is_held_not_dispatched(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="files_or_apps",
+                task="Reorganize the photo archive by date",
+                conf=0.95,
+                reason="User wants their photo library sorted",
+            )
+        )
+        decision = await self.route(classify, "why did the music stop playing")
+
+        self.assertEqual(decision.action, "confirm")
+        self.assertFalse(decision.grounded)
+        self.assertEqual(decision.risk, intent_router.RISK_LOW_GROUNDING)
+
+    async def test_high_confidence_readonly_unrelated_task_still_holds(self):
+        # Read-only categories normally auto-dispatch in the uncertain band and
+        # even more so when confident -- grounding must override that.
+        classify = FakeClassify(
+            result=verdict(
+                category="live_information",
+                task="Get the football score for the user's team",
+                conf=0.95,
+                reason="User wants a sports update",
+            )
+        )
+        decision = await self.route(classify, "what a weird noise that was")
+
+        self.assertEqual(decision.action, "confirm")
+        self.assertFalse(decision.grounded)
+
+    async def test_grounded_task_with_sparse_verdict_text_still_dispatches(self):
+        # Guards against false positives: a terse/placeholder-ish task+reason
+        # (nothing to compare) must not be treated as ungrounded.
+        classify = FakeClassify(result=verdict(conf=0.6))
+        decision = await self.route(classify, "hmm what's happening out there")
+
+        self.assertEqual(decision.action, "dispatch")
+        self.assertTrue(decision.grounded)
+
+
+class RiskClassificationTests(unittest.IsolatedAsyncioTestCase):
+    """Item 7: every decision carries a risk classification independent of
+    plain dispatch/confirm, so logs/GUI can explain WHY confirmation is (or
+    isn't) required."""
+
+    async def route(self, classify, text, **kwargs):
+        return await make_router(classify, **kwargs).route(text, "hermes")
+
+    async def test_destructive_classifier_task_is_flagged_destructive(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="files_or_apps",
+                task="Delete the files in the downloads folder",
+                conf=0.95,
+                reason="User asked to delete their downloads",
+            )
+        )
+        decision = await self.route(classify, "delete the files in my downloads folder")
+
+        self.assertEqual(decision.risk, intent_router.RISK_DESTRUCTIVE)
+
+    async def test_confident_grounded_safe_task_is_safe(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="live_information",
+                task="Get tomorrow's weather forecast",
+                conf=0.95,
+                reason="User asked about tomorrow's weather",
+            )
+        )
+        decision = await self.route(classify, "what's the weather like tomorrow")
+
+        self.assertEqual(decision.risk, intent_router.RISK_SAFE)
+        self.assertEqual(decision.action, "dispatch")
+
+    async def test_ambiguous_but_grounded_mutating_task_is_ambiguous(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="files_or_apps",
+                task="Organize the downloads folder",
+                conf=0.6,
+                reason="User wants downloads organized",
+            )
+        )
+        decision = await self.route(classify, "can you do something about my downloads folder")
+
+        self.assertEqual(decision.risk, intent_router.RISK_AMBIGUOUS)
+        self.assertEqual(decision.action, "confirm")
+
+    async def test_explicit_destructive_delegation_is_flagged_destructive(self):
+        classify = FakeClassify(result=verdict())
+        decision = await self.route(classify, "tell hermes to delete the old logs")
+
+        self.assertEqual(decision.source, "explicit")
+        self.assertEqual(decision.risk, intent_router.RISK_DESTRUCTIVE)
+
+
+class ValidBehaviorRegressionTests(unittest.IsolatedAsyncioTestCase):
+    """Item 3: hardening must not break legitimate requests."""
+
+    async def route(self, classify, text, **kwargs):
+        return await make_router(classify, **kwargs).route(text, "hermes")
+
+    async def test_weather_request_dispatches(self):
+        classify = FakeClassify(result=verdict())
+        decision = await self.route(classify, "check the weather for me")
+
+        self.assertEqual(decision.action, "dispatch")
+
+    async def test_climate_news_lookup_dispatches_via_classifier(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="web_research",
+                task="Look up the latest news on climate change",
+                conf=0.9,
+                reason="User asked for climate change news",
+            )
+        )
+        decision = await self.route(classify, "what's new with climate change lately")
+
+        self.assertEqual(decision.action, "dispatch")
+        self.assertTrue(decision.grounded)
+
+    async def test_organize_downloads_dispatches(self):
+        classify = FakeClassify(result=verdict())
+        decision = await self.route(classify, "organize my downloads folder")
+
+        self.assertEqual(decision.action, "dispatch")
+        self.assertEqual(decision.risk, intent_router.RISK_SAFE)
+
+    async def test_delete_downloads_is_flagged_destructive_for_the_session_gate(self):
+        # The heuristic tier itself always reports "dispatch" (it's the free,
+        # high-precision net); the actual hold-for-confirmation on destructive
+        # tasks happens downstream in session._delegate_ack_ex, which checks
+        # voice_commands.requires_confirmation on every dispatch regardless of
+        # tier. The router's job here is only to make the risk visible.
+        classify = FakeClassify(result=verdict())
+        decision = await self.route(classify, "delete the files in my downloads folder")
+
+        self.assertEqual(decision.action, "dispatch")
+        self.assertEqual(decision.source, "heuristic")
+        self.assertEqual(decision.risk, intent_router.RISK_DESTRUCTIVE)
 
 
 class VerdictNormalizationTests(unittest.TestCase):

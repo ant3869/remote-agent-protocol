@@ -33,6 +33,11 @@ class FakeDetector:
         self.resets += 1
 
 
+class MultiFakeDetector(FakeDetector):
+    def predict(self, chunk):
+        return self.scores.pop(0) if self.scores else {}
+
+
 class WakeWordConfigTests(unittest.TestCase):
     def test_wake_word_disabled_by_default_config(self):
         self.assertFalse(config.WAKE_WORD_ENABLED)
@@ -76,6 +81,29 @@ class WakeWordConfigTests(unittest.TestCase):
         self.assertTrue(status.ready)
         self.assertIn("mic gated", status.message)
         self.assertNotIn("preview", status.message)
+
+    def test_local_models_map_to_matching_personas_and_skip_missing_models(self):
+        targets = wake_word.resolve_targets(
+            {"hey_jarvis": "Jarvis", "hey_jess": "Jess"},
+            available_models={"hey_jarvis"},
+            persona_names={"Jess", "Jarvis"},
+            threshold=0.5,
+        )
+
+        self.assertEqual(
+            targets,
+            (wake_word.WakeWordTarget("hey_jarvis", "Jarvis", 0.5),),
+        )
+
+    def test_discovery_matches_model_name_to_persona(self):
+        targets = wake_word.resolve_targets(
+            {},
+            available_models={"hey_jarvis"},
+            persona_names={"Jess", "Jarvis"},
+            threshold=0.5,
+        )
+
+        self.assertEqual(targets[0].persona, "Jarvis")
 
 
 class WakeWordGateTests(unittest.IsolatedAsyncioTestCase):
@@ -207,6 +235,107 @@ class WakeWordGateTests(unittest.IsolatedAsyncioTestCase):
             frames_to_send=[audio_frame(rate=8000)],
             expected_down_frames=[InputAudioRawFrame],
         )
+
+    async def test_highest_confidence_wake_switches_persona_before_audio_passes(self):
+        order = []
+        settings = wake_word.WakeWordSettings(
+            enabled=True,
+            targets=(
+                wake_word.WakeWordTarget("hey_jarvis", "Jarvis", 0.5),
+                wake_word.WakeWordTarget("hey_jess", "Jess", 0.5),
+            ),
+        )
+        detector = MultiFakeDetector(scores=[{"hey_jarvis": 0.7, "hey_jess": 0.9}, {}])
+
+        async def switch(persona):
+            order.append(("switch", persona))
+
+        gate = wake_word.WakeWordGate(
+            settings,
+            detector_factory=lambda _s: detector,
+            on_persona=switch,
+            on_event=lambda event: order.append((event["state"], event.get("persona"))),
+        )
+
+        await run_test(
+            gate,
+            frames_to_send=[audio_frame(), audio_frame()],
+            expected_down_frames=[InputAudioRawFrame],
+        )
+
+        self.assertLess(order.index(("switch", "Jess")), order.index(("awake", "Jess")))
+
+    async def test_equal_scores_choose_configuration_order(self):
+        selected = []
+        settings = wake_word.WakeWordSettings(
+            enabled=True,
+            targets=(
+                wake_word.WakeWordTarget("hey_jarvis", "Jarvis", 0.5),
+                wake_word.WakeWordTarget("hey_jess", "Jess", 0.5),
+            ),
+        )
+        gate = wake_word.WakeWordGate(
+            settings,
+            detector_factory=lambda _s: MultiFakeDetector(
+                scores=[{"hey_jarvis": 0.8, "hey_jess": 0.8}]
+            ),
+            on_persona=lambda persona: selected.append(persona),
+        )
+
+        await run_test(gate, frames_to_send=[audio_frame()], expected_down_frames=[])
+
+        self.assertEqual(selected, ["Jarvis"])
+
+    async def test_failed_persona_switch_keeps_gate_armed(self):
+        events = []
+        settings = wake_word.WakeWordSettings(
+            enabled=True,
+            targets=(wake_word.WakeWordTarget("hey_jarvis", "Jarvis", 0.5),),
+        )
+
+        async def fail(_persona):
+            raise RuntimeError("voice unavailable")
+
+        gate = wake_word.WakeWordGate(
+            settings,
+            detector_factory=lambda _s: MultiFakeDetector(scores=[{"hey_jarvis": 0.9}, {}]),
+            on_persona=fail,
+            on_event=events.append,
+        )
+
+        await run_test(
+            gate,
+            frames_to_send=[audio_frame(), audio_frame()],
+            expected_down_frames=[],
+        )
+
+        self.assertFalse(gate.awake)
+        self.assertIn("switch_failed", [event["state"] for event in events])
+
+    async def test_different_wake_word_switches_during_open_window(self):
+        selected = []
+        settings = wake_word.WakeWordSettings(
+            enabled=True,
+            targets=(
+                wake_word.WakeWordTarget("hey_jarvis", "Jarvis", 0.5),
+                wake_word.WakeWordTarget("hey_jess", "Jess", 0.5),
+            ),
+        )
+        gate = wake_word.WakeWordGate(
+            settings,
+            detector_factory=lambda _s: MultiFakeDetector(
+                scores=[{"hey_jarvis": 0.9}, {"hey_jess": 0.9}, {}]
+            ),
+            on_persona=lambda persona: selected.append(persona),
+        )
+
+        await run_test(
+            gate,
+            frames_to_send=[audio_frame(), audio_frame(), audio_frame()],
+            expected_down_frames=[InputAudioRawFrame],
+        )
+
+        self.assertEqual(selected, ["Jarvis", "Jess"])
 
 
 if __name__ == "__main__":

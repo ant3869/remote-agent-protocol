@@ -8,6 +8,39 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.3.0] - 2026-07-06
+
+### Added
+
+- Multi-model wake-word persona routing discovers installed openwakeword
+  models, selects the highest-confidence trigger, and applies persona/voice
+  settings before releasing command audio to STT.
+- A loopback-only, versioned lifecycle WebSocket at
+  `ws://127.0.0.1:8765/events` broadcasts allowlisted agent metadata to local
+  dashboards without exposing raw output or backpressuring voice.
+
+### Changed
+
+- Directly addressed agent commands now route deterministically. Delegated
+  prompts include bounded untrusted conversation context, and rapid corrections
+  cancel-and-replace the newest pending or active task without overlapping
+  subprocess launches. Concrete coding tasks prefer Code Puppy when configured.
+- Long-term memory now captures facts stated casually -- phrasings with a
+  leading filler word ("well, my...") or a contraction ("I've got...") that a
+  stricter prefix filter previously dropped.
+
+### Fixed
+
+- Delegated conversation context remains private to the agent execution prompt
+  instead of leaking into lifecycle events, history, UI labels, or spoken progress.
+- Completed delegated tasks now relay their actual result -- both spoken and into
+  the assistant's context -- so a follow-up like "what were they?" is answered
+  from the result instead of restating the original request.
+- Requests that merely contain the word "code" (for example "find my validation
+  code in an email") no longer get misrouted to the coding agent.
+- The Agents panel live-output pane refreshes while a job runs and surfaces the
+  final result on completion, so a long-running task no longer appears frozen.
+
 ## [1.2.0] - 2026-07-05
 
 ### Added

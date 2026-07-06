@@ -19,9 +19,16 @@ real-time audio pipeline.
   waiting / blocked / completed / failed), and are announced out loud.
 - Destructive or elevated delegations are held for spoken or clicked
   confirmation before they run.
-- Optional wake-word gate (`WAKE_WORD_ENABLED=true` in `.env`): the mic stays
-  closed until you say the wake phrase (default "hey jarvis", fully local via
-  openwakeword), and re-opens after each reply for natural follow-ups.
+- Rapid corrections such as “wait, actually use httpx” cancel and replace the
+  newest agent job; delegated prompts carry a bounded, explicitly untrusted
+  conversation snapshot so contextual references survive the handoff.
+- Optional multi-wake persona routing (`WAKE_WORD_ENABLED=true` in `.env`):
+  locally installed openwakeword models are matched to personas, the
+  highest-confidence trigger wins, and persona/model/voice settings are queued
+  before command audio reaches STT. Missing secondary models are skipped.
+- External dashboards can subscribe to future agent lifecycle events at
+  `ws://127.0.0.1:8765/events`. The v1 stream is loopback-only and excludes raw
+  agent output; see [the lifecycle API](docs/lifecycle-websocket.md).
 - Transcript memory plus semantic (mem0 + Qdrant) memory, both 100% local.
 - `Ctrl+L` focuses typed input, `Ctrl+M` toggles the microphone, and `Ctrl+K`
   opens the agent task console. The EXPORT button writes a diagnostics bundle.

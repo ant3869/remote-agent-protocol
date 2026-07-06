@@ -122,6 +122,12 @@ WAKE_WORD_ENGINE = _env("WAKE_WORD_ENGINE", "openwakeword")
 WAKE_WORD_MODEL = _env("WAKE_WORD_MODEL", "hey_jarvis")
 WAKE_WORD_THRESHOLD = float(_env("WAKE_WORD_THRESHOLD", "0.5"))
 WAKE_WORD_ACTIVE_WINDOW_SECS = float(_env("WAKE_WORD_ACTIVE_WINDOW_SECS", "12"))
+# Optional model -> persona overrides. When empty, locally installed wake
+# models are matched to persona names (for example hey_jarvis -> Jarvis).
+WAKE_WORD_PERSONAS = _parse_string_map(
+    _env("WAKE_WORD_PERSONAS_JSON", ""), "WAKE_WORD_PERSONAS_JSON"
+)
+WAKE_WORD_SWITCH_TIMEOUT_SECS = float(_env("WAKE_WORD_SWITCH_TIMEOUT_SECS", "0.5"))
 
 # ---------------------------------------------------------------------------
 # STT (speech-to-text) -- how she hears you
@@ -368,6 +374,15 @@ AGENT_MACHINES = {
 }
 AGENT_ANNOUNCE = True
 
+# Read-only lifecycle stream for local dashboards. The host is intentionally
+# fixed to loopback; exposing job metadata on the LAN requires an authenticated
+# protocol and is outside v1.
+LIFECYCLE_WS_ENABLED = _env_bool("LIFECYCLE_WS_ENABLED", True)
+LIFECYCLE_WS_HOST = "127.0.0.1"
+LIFECYCLE_WS_PORT = int(_env("LIFECYCLE_WS_PORT", "8765"))
+LIFECYCLE_WS_PATH = "/events"
+LIFECYCLE_WS_QUEUE_SIZE = int(_env("LIFECYCLE_WS_QUEUE_SIZE", "64"))
+
 # How long a delegated job may run before it's force-stopped, in seconds. Five
 # minutes covers normal lookups while preventing a silent backend from hanging
 # forever; set 0 only for deliberately unbounded interactive work.
@@ -415,14 +430,12 @@ AGENT_HISTORY_MAX = int(_env("AGENT_HISTORY_MAX", "100"))
 
 # Confirmation gate -- auto-parsed delegations (from natural-language voice or
 # typed chat) can trigger real filesystem/web/shell actions. Before dispatching
-# an *elevated* backend or a *destructive* task, Jess holds the job and asks the
-# user to confirm (spoken "yes"/"confirm", or the GUI Approve button). Manual,
-# deliberate dispatch (the Delegate button, the Agents panel) is never gated --
-# the click already IS the confirmation.
+# a *destructive* task, Jess holds the job and asks the user to confirm (spoken
+# "yes"/"confirm", or the GUI Approve button). Picking an elevated backend (e.g.
+# "hermes-yolo") is not itself a trigger -- selecting it already is the risk
+# acknowledgment. Manual, deliberate dispatch (the Delegate button, the Agents
+# panel) is never gated -- the click already IS the confirmation.
 AGENT_CONFIRM_ENABLED = _env_bool("AGENT_CONFIRM_ENABLED", True)
-# Backends whose name contains any of these tokens are treated as elevated
-# (they auto-approve tool calls / shell / file writes) and always need confirming.
-AGENT_ELEVATED_MARKERS = ("yolo",)
 # Task text containing any of these verbs is treated as destructive and needs
 # confirming regardless of which backend it targets.
 AGENT_DESTRUCTIVE_WORDS = (

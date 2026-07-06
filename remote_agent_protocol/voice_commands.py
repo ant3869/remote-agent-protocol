@@ -114,6 +114,16 @@ _LIVE_REQUEST_WORDS = (
 )
 _PAST_QUESTION_STARTS = ("did", "was", "were", "has", "had", "have", "does", "do", "am")
 
+# The persona has no access to anything -- no internet, no files, no accounts
+# -- so any question about access ("do you have access to my email?") can
+# only be answered by the tool agent checking real state, never by the
+# model guessing. Unlike the live-data tier, this ignores _PAST_QUESTION_STARTS
+# entirely: "do you have access..." and "have you got access..." both open
+# with words in that list, but neither is asking about history.
+# (jess_runtime.log 2026-07-06 01:57 -- answered from the model's own head
+# instead of checking. Never again.)
+_ACCESS_WORDS = ("access", "accessing", "accessed", "accesses")
+
 # Singular forms only -- matching strips a trailing "s" from each word, so
 # "repositories"/"files"/"downloads" all land. (Lesson learned the hard way:
 # "Find trending GitHub repositories" sailed straight past the old list and
@@ -228,6 +238,22 @@ def parse_delegation(
     """
     lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
 
+    # Direct address is common in speech ("Code Puppy, write the tests"). The
+    # comma is deliberate: without it, status chatter such as "Hermes is still
+    # working" would become an accidental command.
+    for alias in sorted(aliases, key=len, reverse=True):
+        prefix = f"{alias},"
+        if not lowered.startswith(prefix):
+            continue
+        backend = aliases[alias]
+        task = lowered[len(prefix) :].strip(_TRAILING_PUNCTUATION)
+        first = task.split(" ", 1)[0]
+        if first in {"am", "are", "did", "do", "does", "have", "is", "was", "were"}:
+            return None
+        if backend in backends and task:
+            return backend, task
+        return None
+
     verb = next((v for v in _VERBS if lowered.startswith(v + " ")), None)
     if verb is None:
         return None
@@ -290,6 +316,29 @@ def is_retry_request(text: str) -> bool:
     )
 
 
+def parse_task_correction(text: str) -> str | None:
+    """Return a correction aimed at the newest pending or active agent task."""
+    lowered = text.strip().lower().rstrip(_TRAILING_PUNCTUATION)
+    prefixes = ("wait", "actually", "instead", "no")
+    prefix = next(
+        (
+            item
+            for item in prefixes
+            if lowered == item or lowered.startswith((item + " ", item + ","))
+        ),
+        None,
+    )
+    if prefix is None:
+        return None
+    correction = lowered[len(prefix) :].lstrip(", ")
+    if prefix == "no" and correction.startswith(("i don't", "i dont", "that's", "thats")):
+        return None
+    directive_words = ("use", "do", "make", "change", "switch", "instead", "don't", "do not")
+    if not correction or not any(word in correction for word in directive_words):
+        return None
+    return correction
+
+
 # First words that mean "question / statement about the past", never a command.
 # Checked AFTER filler-stripping, so "can you find..." still delegates while
 # "did you find..." stays chat.
@@ -337,6 +386,11 @@ def parse_implicit_task(text: str) -> str | None:
         return None
     first = lowered.split(" ", 1)[0]
 
+    # A statement about the user's own future work isn't an instruction to an
+    # agent, even when it contains action/task keywords.
+    if first in {"i", "i'm", "im"} and "going to" in lowered:
+        return None
+
     padded = f" {lowered.replace(',', ' ').replace('.', ' ')} "
     words: set[str] = set()
     for w in padded.split():
@@ -347,6 +401,9 @@ def parse_implicit_task(text: str) -> str | None:
     # Current machine capability state is real-world data even when phrased as
     # a question ("are any useful skills missing?"). It never belongs to chat.
     if words & set(_CAPABILITY_NOUNS) and words & set(_CAPABILITY_STATE_KEYWORDS):
+        return lowered
+
+    if words & set(_ACCESS_WORDS):
         return lowered
 
     if (
@@ -495,27 +552,65 @@ def is_smalltalk(text: str) -> bool:
     return 0 < len(words) <= 3 and all(word in _SMALLTALK_WORDS for word in words)
 
 
+# Stock phrases Whisper (and similar STT models) are known to hallucinate out
+# of silence, room noise, or a clipped/interrupted turn -- captioning-corpus
+# artifacts (video outros, subscribe prompts) rather than anything the user
+# said. Matched against the FULL utterance (after filler-stripping), never a
+# substring, so a genuine "thanks for watching that show with me" is untouched.
+_STT_HALLUCINATION_PHRASES = {
+    "thank you",
+    "thank you for watching",
+    "thanks for watching",
+    "thank you so much for watching",
+    "please subscribe",
+    "subscribe",  # "please subscribe" minus the stripped "please" filler
+    "don't forget to subscribe",
+    "like and subscribe",
+    "subscribe to my channel",
+    "see you in the next video",
+    "see you next time",
+    "thanks for listening",
+    "bye bye",
+    "the end",
+    "you",
+}
+
+
+def looks_like_stt_noise(text: str) -> bool:
+    """True for a transcript that is very likely STT noise, not real speech.
+
+    Two independent signals, either of which means there was nothing to act
+    on: the whole utterance is one of a known set of hallucinated stock
+    phrases (STT models recite these out of silence/room noise instead of
+    returning nothing), or filler-stripping left no actual words at all (pure
+    punctuation/breath sounds). Checked before the utterance ever reaches the
+    intent classifier or any delegation parser -- there is no reading of
+    "nothing" that should become a task.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    if not lowered:
+        return True
+    if lowered in _STT_HALLUCINATION_PHRASES:
+        return True
+    return not _WORD_RE.findall(lowered)
+
+
 def requires_confirmation(
     backend: str,
     task: str,
     *,
-    elevated_markers: tuple[str, ...] = (),
     destructive_words: tuple[str, ...] = (),
 ) -> bool:
     """Whether an auto-parsed delegation must be confirmed before it runs.
 
-    Two independent triggers, either of which demands a human in the loop:
-      * an *elevated* backend (name contains an ``elevated_markers`` token, e.g.
-        ``hermes-yolo`` which auto-approves shell/file writes), or
-      * a *destructive* task (its text contains a ``destructive_words`` verb like
-        "delete"/"format"/"uninstall").
-
-    Deliberately conservative: a false "needs confirming" costs one spoken
-    sentence; a false "just do it" can wipe a folder.
+    Picking a backend IS the risk acknowledgment -- an elevated backend (e.g.
+    ``hermes-yolo``, which auto-approves its own shell/file writes) no longer
+    forces confirmation on top of that. The one remaining trigger is a
+    *destructive* task: its text contains a ``destructive_words`` verb like
+    "delete"/"format"/"uninstall", regardless of which backend runs it --
+    a false "needs confirming" costs one spoken sentence; a false "just do
+    it" can wipe a folder.
     """
-    lowered_backend = (backend or "").lower()
-    if any(marker in lowered_backend for marker in elevated_markers):
-        return True
     lowered_task = f" {(task or '').lower()} "
     return any(word.strip() and word in lowered_task for word in destructive_words)
 

@@ -28,6 +28,27 @@ class RecordingBridge:
         return "job-retry"
 
 
+class CorrectingBridge(RecordingBridge):
+    def __init__(self):
+        super().__init__()
+        self.corrections = []
+
+    def has_active(self):
+        return True
+
+    async def replace_latest(self, correction):
+        self.corrections.append(correction)
+        return "job-replacement"
+
+
+class RecordingLifecycleServer:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, event):
+        self.events.append(event)
+
+
 class SessionDelegationTests(unittest.TestCase):
     def test_implicit_delegation_uses_runtime_default_backend(self):
         parsed = session_processors.resolve_delegation(
@@ -66,6 +87,97 @@ class SessionDelegationTests(unittest.TestCase):
 
 
 class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_events_are_published_to_lifecycle_server_without_announcements(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        lifecycle = RecordingLifecycleServer()
+        voice_session._lifecycle_ws = lifecycle
+        event = {
+            "type": "agent_job",
+            "event": "started",
+            "job_id": "job-1",
+            "agent": "hermes",
+            "task": "research",
+        }
+
+        with patch.object(session.cfg, "AGENT_ANNOUNCE", False):
+            voice_session._on_agent_event(event)
+
+        self.assertEqual(lifecycle.events, [event])
+
+    async def test_wake_persona_is_applied_before_callback_returns(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        applied = []
+
+        async def apply(persona):
+            applied.append(persona.name)
+
+        voice_session._apply_persona = apply
+
+        await voice_session._apply_wake_persona("Jarvis")
+
+        self.assertEqual(voice_session._persona.name, "Jarvis")
+        self.assertEqual(applied, ["Jarvis"])
+
+    async def test_repeated_wake_persona_only_refreshes_the_window(self):
+        jarvis = personas.by_name("Jarvis")
+        voice_session = session.VoiceSession(jarvis)
+        applied = []
+
+        async def apply(persona):
+            applied.append(persona.name)
+
+        voice_session._apply_persona = apply
+
+        await voice_session._apply_wake_persona("Jarvis")
+
+        self.assertEqual(applied, [])
+
+    async def test_active_job_correction_is_cancelled_and_replaced(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        bridge = CorrectingBridge()
+        voice_session._bridge = bridge
+
+        prompt = await voice_session._maybe_handle_model_control("Wait, actually use httpx instead")
+
+        self.assertEqual(bridge.corrections, ["actually use httpx instead"])
+        self.assertIn("restarted", prompt.lower())
+
+    async def test_pending_job_correction_updates_confirmation_without_launch(self):
+        events = []
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA, events.append)
+        voice_session._pending_confirmations["confirm-1"] = (
+            "hermes",
+            "write the client",
+            None,
+        )
+
+        prompt = await voice_session._maybe_handle_model_control("Actually use httpx instead")
+
+        self.assertEqual(
+            voice_session._pending_confirmations["confirm-1"][1],
+            "write the client\n\nUser correction: use httpx instead",
+        )
+        self.assertEqual(events[-1]["type"], "agent_confirm")
+        self.assertIn("confirm", prompt.lower())
+
+    async def test_delegated_task_includes_bounded_untrusted_context(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+
+        class Context:
+            def get_messages(self):
+                return [
+                    {"role": "user", "content": "The target project is Atlas."},
+                    {"role": "assistant", "content": "Understood."},
+                ]
+
+        voice_session._context = Context()
+
+        task = voice_session._with_delegation_context("add unit tests")
+
+        self.assertTrue(task.startswith("add unit tests"))
+        self.assertIn("untrusted conversation context", task.lower())
+        self.assertIn("Atlas", task)
+
     async def test_background_task_failures_are_logged(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
 
@@ -154,6 +266,42 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(worker.frames), 1)
         self.assertIsInstance(worker.frames[0], TTSSpeakFrame)
+
+    async def test_destructive_confirmation_explains_why_and_shows_transcript(self):
+        events = []
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA, events.append)
+        voice_session._last_user_text = "delete the files in my downloads folder"
+
+        voice_session._delegate_ack("hermes", "delete the files in my downloads folder")
+
+        confirm_events = [e for e in events if e["type"] == "agent_confirm"]
+        self.assertEqual(len(confirm_events), 1)
+        self.assertIn("mutates the system", confirm_events[0]["reason"])
+        self.assertEqual(confirm_events[0]["transcript"], "delete the files in my downloads folder")
+
+    async def test_router_forced_confirmation_uses_the_routing_reason(self):
+        events = []
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA, events.append)
+        voice_session._last_user_text = "why did the music stop playing"
+        voice_session._force_confirm = True
+        voice_session._force_confirm_reason = "classifier task shares no word with the transcript"
+
+        voice_session._delegate_ack("hermes", "reorganize the photo archive")
+
+        confirm_events = [e for e in events if e["type"] == "agent_confirm"]
+        self.assertEqual(
+            confirm_events[0]["reason"], "classifier task shares no word with the transcript"
+        )
+
+    async def test_denied_task_is_flagged_if_proposed_again(self):
+        events = []
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA, events.append)
+        voice_session._remember_denial("hermes", "delete the files in my downloads folder")
+
+        voice_session._delegate_ack("hermes", "delete the files in my downloads folder")
+
+        confirm_events = [e for e in events if e["type"] == "agent_confirm"]
+        self.assertIn("denied", confirm_events[0]["reason"])
 
     async def test_manual_start_event_is_spoken(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)

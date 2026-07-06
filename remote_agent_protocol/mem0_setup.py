@@ -42,22 +42,66 @@ _DURABLE_USER_MARKERS = (
     "my ",
     "i am ",
     "i'm ",
+    "im ",
     "i live ",
     "i work ",
     "i use ",
     "i have ",
+    "i've ",
+    "ive ",
     "i like ",
     "i love ",
     "i hate ",
     "i prefer ",
     "i want ",
     "i need ",
+    "i go by ",
     "remember ",
     "remember that ",
     "call me ",
+    "you can call me ",
     "don't ",
     "do not ",
 )
+
+# Speech-to-text and casual phrasing bury the real marker behind filler ("well,
+# my name is..."). Peel these off the front before matching so genuine facts are
+# not dropped just for a leading discourse word.
+_LEADING_FILLER = (
+    "well",
+    "so",
+    "actually",
+    "okay",
+    "ok",
+    "yeah",
+    "yep",
+    "hey",
+    "oh",
+    "um",
+    "uh",
+    "like",
+    "just",
+)
+_FILLER_EDGE = " ,.-!?"
+
+
+def _strip_leading_filler(text: str) -> str:
+    """Drop leading discourse words (and their punctuation) before matching."""
+    changed = True
+    while changed:
+        changed = False
+        text = text.lstrip(_FILLER_EDGE)
+        for filler in _LEADING_FILLER:
+            # Whole-word only: strip "so my..." but never "some...".
+            if (
+                text.startswith(filler)
+                and len(text) > len(filler)
+                and not text[len(filler)].isalpha()
+            ):
+                text = text[len(filler) :]
+                changed = True
+                break
+    return text.lstrip(_FILLER_EDGE)
 
 _LOW_VALUE_USER_TEXT = {
     "lol",
@@ -98,7 +142,7 @@ def filter_messages_for_storage(messages: list[dict]) -> list[dict]:
         # A durable marker is the real signal -- don't also impose a length floor
         # that would silently drop short but genuine facts like "I'm 40" or
         # "call me Ant". The marker prefixes already require content after them.
-        if lower.startswith(_DURABLE_USER_MARKERS):
+        if _strip_leading_filler(lower.lstrip(" ,.-")).startswith(_DURABLE_USER_MARKERS):
             kept.append({"role": "user", "content": content})
     return kept
 

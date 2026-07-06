@@ -33,9 +33,21 @@ class ConfirmationGateTests(unittest.TestCase):
     def _types(self):
         return [e.get("type") for e in self.events]
 
-    def test_elevated_backend_is_held_not_dispatched(self):
-        ack = self.session._delegate_ack("hermes-yolo", "clean up downloads")
+    def test_elevated_backend_alone_dispatches_immediately(self):
+        # Picking hermes-yolo is itself the risk acknowledgment; a plain task
+        # runs right away instead of holding for confirmation.
+        async def scenario():
+            ack = self.session._delegate_ack("hermes-yolo", "clean up downloads")
+            await asyncio.sleep(0.01)  # let the spawned start() run
+            return ack
+
+        ack = asyncio.run(scenario())
         self.assertIn("hermes-yolo", ack)
+        self.assertEqual(self.session._pending_confirmations, {})
+        self.assertEqual(self.bridge.started, [("hermes-yolo", "clean up downloads", None)])
+
+    def test_destructive_task_on_elevated_backend_is_still_held(self):
+        self.session._delegate_ack("hermes-yolo", "delete the old files")
         self.assertEqual(len(self.session._pending_confirmations), 1)
         self.assertEqual(self.bridge.started, [])
         self.assertIn("agent_confirm", self._types())

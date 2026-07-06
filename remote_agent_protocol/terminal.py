@@ -19,7 +19,7 @@ Want the pretty control panel with live voice/persona switching instead?
 import asyncio
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import logging_setup, persona_config, personas
+from remote_agent_protocol import logging_setup, persona_config, personas, process_guard
 from remote_agent_protocol.session import VoiceSession
 
 # Readable, filtered logging (drops giant context dumps; see logging_setup.py).
@@ -39,4 +39,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    process_guard.close_previous_instance()
+    process_guard.write_lock()
+    try:
+        asyncio.run(main())
+    finally:
+        process_guard.release_lock()

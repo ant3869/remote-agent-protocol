@@ -103,6 +103,7 @@ class AgentsPanel:
                         "step_total",
                         "last_completed_step",
                         "summary",
+                        "result",
                     )
                 },
             }
@@ -271,10 +272,10 @@ class AgentsPanel:
         if job_id is None:
             return
         job = self._jobs[job_id]
-        summary = agent_bridge.summarize_output(job["lines"])
-        if summary:
+        spoken = job.get("result") or job.get("summary") or agent_bridge.summarize_output(job["lines"])
+        if spoken:
             self._session.announce_text(
-                f"Result of task '{job['task']}' on agent '{job['agent']}': {summary}"
+                f"Result of task '{job['task']}' on agent '{job['agent']}': {spoken}"
             )
 
     # -- event handling (called from the main GUI pump) --------------------------
@@ -300,6 +301,7 @@ class AgentsPanel:
             "step_total",
             "last_completed_step",
             "summary",
+            "result",
             "elapsed_secs",
         ):
             if field_name in evt:
@@ -322,6 +324,12 @@ class AgentsPanel:
         elif event == "progress" and evt.get("importance") in {"milestone", "attention"}:
             self._append_sys(f"{job['agent']}: {job.get('action', job.get('state', 'working'))}")
         self._refresh_list()
+        # Keep the detail pane live for the job in focus. Without this the status
+        # block freezes on its first render and a long-running job looks stuck,
+        # even as progress/finished events keep arriving. "output" already
+        # streams incrementally above, so only the status-only events re-render.
+        if event in {"started", "progress", "finished"} and self._selected_job_id() == job_id:
+            self._show_log()
 
     # -- rendering ---------------------------------------------------------------
 
@@ -374,7 +382,20 @@ class AgentsPanel:
             f"Last completed: {job.get('last_completed_step') or '—'}",
             "",
         ]
-        self.log.insert(END, "\n".join(details + job["lines"]) + "\n")
+        body = list(job["lines"])
+        # Agents that report only via status markers stream no raw output, so on
+        # completion surface the summary/result -- otherwise the pane just shows
+        # a frozen status block with no answer.
+        if job.get("status") in _TERMINAL:
+            summary = job.get("summary")
+            result = job.get("result")
+            if summary:
+                body.append(f"— {summary}")
+            if result and result != summary:
+                body.append("")
+                body.append("Result:")
+                body.append(result)
+        self.log.insert(END, "\n".join(details + body) + "\n")
         self.log.see(END)
         self.log.configure(state="disabled")
 

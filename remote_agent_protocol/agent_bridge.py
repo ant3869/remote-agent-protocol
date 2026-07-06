@@ -46,6 +46,7 @@ STATE_WAITING = "waiting"
 STATE_BLOCKED = "blocked"
 STATE_COMPLETED = "completed"
 STATE_FAILED = "failed"
+STATE_CANCELLED = "cancelled"
 
 _ACTIVE_STATUSES = {STATUS_RUNNING, STATUS_WAITING, STATUS_BLOCKED}
 _TERMINAL_STATES = {STATE_COMPLETED, STATE_FAILED}
@@ -58,7 +59,7 @@ _STATUS_STATES = {
     *_TERMINAL_STATES,
 }
 _STATUS_MARKER = "@@JESS_STATUS"
-_STATUS_TEXT_FIELDS = ("action", "tool", "last_completed_step", "summary")
+_STATUS_TEXT_FIELDS = ("action", "tool", "last_completed_step", "summary", "result")
 _TOOL_RE = re.compile(r"\bCalling\s+([\w-]+)", re.IGNORECASE)
 
 _STATUS_PROTOCOL = """
@@ -67,8 +68,13 @@ Report meaningful task status on standalone lines using this exact prefix and co
 @@JESS_STATUS {"state":"in_progress","action":"short current action"}
 Allowed states: in_progress, tool_running, step_completed, waiting, blocked, completed, failed.
 For tools include "tool"; for numbered steps include "step" and "step_total"; for milestones
-include "last_completed_step"; finish with exactly one completed or failed line containing
-"summary", for example @@JESS_STATUS {"state":"completed","summary":"short result"}.
+include "last_completed_step".
+Finish with exactly one completed or failed line. On success include BOTH:
+  "summary" -- one short spoken sentence (a label, e.g. "Fetched the last 10 important emails"), and
+  "result"  -- the ACTUAL substantive answer the user asked for, in full: if they asked a
+              question this is the answer; if they asked for a list this is the list itself.
+              Never put only a label in "result".
+Example: @@JESS_STATUS {"state":"completed","summary":"short spoken summary","result":"the full answer text the user asked for"}
 Emit only major milestones, not token-by-token updates. Continue the requested task
 normally; these status lines are consumed by the host application.
 """.strip()
@@ -78,7 +84,11 @@ normally; these status lines are consumed by the host application.
 # the echoed "completed" example would instantly terminate the job.
 _PROTOCOL_EXAMPLE_STATUSES = (
     {"state": "in_progress", "action": "short current action"},
-    {"state": "completed", "summary": "short result"},
+    {
+        "state": "completed",
+        "summary": "short spoken summary",
+        "result": "the full answer text the user asked for",
+    },
 )
 
 # Agents that crash (rate limits, tracebacks, stream failures) often still
@@ -112,6 +122,10 @@ _CAPACITY_RE = re.compile(
 )
 
 _MAX_KEPT_LINES = 500  # keep logs bounded; tail is what matters
+# Status text fields are short labels capped tight, except "result", which
+# carries the full substantive answer relayed to the user.
+_MAX_STATUS_TEXT_CHARS = 300
+_MAX_RESULT_CHARS = 4000
 
 # CLI agents love ANSI colours; Jess should not attempt to pronounce \x1b[0m.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\r\x07]")
@@ -148,7 +162,8 @@ class AgentJob:
     step: int | None = None
     step_total: int | None = None
     last_completed_step: str = ""
-    summary: str = ""
+    summary: str = ""  # short spoken label
+    result: str = ""  # full substantive answer relayed into the LLM context
     announce_start: bool = False
     started_at: str = field(default_factory=_now_iso)
     finished_at: str = ""
@@ -159,6 +174,7 @@ class AgentJob:
     _t0: float = field(default=0.0, repr=False)
     _last_status: float = field(default=0.0, repr=False)
     _host_before: str | None = field(default=None, repr=False)
+    _launch_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
 
 def build_command(
@@ -232,7 +248,8 @@ def parse_status_line(line: str) -> dict | None:
     for field_name in _STATUS_TEXT_FIELDS:
         field_value = value.get(field_name)
         if isinstance(field_value, str) and field_value.strip():
-            status[field_name] = field_value.strip()[:300]
+            cap = _MAX_RESULT_CHARS if field_name == "result" else _MAX_STATUS_TEXT_CHARS
+            status[field_name] = field_value.strip()[:cap]
     for field_name in ("step", "step_total"):
         field_value = value.get(field_name)
         if isinstance(field_value, int) and field_value > 0:
@@ -311,6 +328,19 @@ def follow_up_question(job: AgentJob) -> str | None:
     return questions[0] if questions else None
 
 
+def result_detail(job: AgentJob) -> str:
+    """Full substantive answer a finished job produced, for the LLM context.
+
+    Prefers the structured ``result`` the agent reported; falls back to the raw
+    output tail so that agents which print their answer to stdout without a
+    ``result`` field still have it relayed rather than lost behind the summary.
+    """
+    if job.result:
+        return job.result
+    body = "\n".join(line for line in job.lines if line.strip()).strip()
+    return body if body and body != job.summary else ""
+
+
 def announcement(job: AgentJob) -> str:
     """One-sentence-ish update for Jess to relay to the user."""
     tamper = (
@@ -324,6 +354,11 @@ def announcement(job: AgentJob) -> str:
         return f"Agent '{job.agent}' needs your input: {joined}{tamper}"
     summary = job.summary or summarize_output(job.lines)
     if job.status == STATUS_DONE:
+        if not (job.result or job.summary or job.lines):
+            return (
+                f"Agent '{job.agent}' reported '{job.task}' complete but returned no "
+                f"result to relay -- re-run it to capture the output.{tamper}"
+            )
         return (
             f"Background task on agent '{job.agent}' finished: {job.task}. "
             f"Result: {summary}{tamper}"
@@ -426,6 +461,13 @@ class AgentBridge:
         """True while any job is running, waiting, or blocked."""
         return any(job.status in _ACTIVE_STATUSES for job in self._jobs.values())
 
+    def latest_active(self) -> AgentJob | None:
+        """Return the newest active job, if any."""
+        return next(
+            (job for job in reversed(self._jobs.values()) if job.status in _ACTIVE_STATUSES),
+            None,
+        )
+
     def set_model_override(self, agent: str, provider: str) -> str | None:
         """Select a configured per-run model target; return its spoken label."""
         target = self._model_targets.get(agent, {}).get(provider)
@@ -444,7 +486,7 @@ class AgentBridge:
         job = AgentJob(
             job_id=f"job-{next(self._counter)}",
             agent=agent,
-            task=task,
+            task=task.partition("\n\n[Untrusted conversation context:")[0],
             machine=self.machine_for(agent),
             announce_start=announce_start,
             model_label=self._model_labels.get(agent, ""),
@@ -455,10 +497,21 @@ class AgentBridge:
 
         template = self._backends.get(agent)
         if template is None:
-            return await self._fail_fast(job, f"unknown agent backend '{agent}'")
+            result = await self._fail_fast(job, f"unknown agent backend '{agent}'")
+            job._launch_done.set()
+            return result
 
         cwd = resolve_cwd(cwd, self._workspace_dir)
         job._host_before = await self._host_snapshot()
+        if job.status == STATUS_CANCELLED:
+            job.state = STATE_CANCELLED
+            job.secs = round(time.monotonic() - job._t0, 1)
+            job.summary = "Superseded before launch"
+            job.finished_at = _now_iso()
+            self._emit_job(job, "finished", summary=job.summary, secs=job.secs)
+            await self._notify_finished(job)
+            job._launch_done.set()
+            return job.job_id
         command_task = (
             task
             if agent == "mock"
@@ -473,9 +526,12 @@ class AgentBridge:
                 stderr=asyncio.subprocess.STDOUT,
             )
         except (OSError, FileNotFoundError) as e:
-            return await self._fail_fast(job, f"could not launch {command[0]}: {e}")
+            result = await self._fail_fast(job, f"could not launch {command[0]}: {e}")
+            job._launch_done.set()
+            return result
 
         self._procs[job.job_id] = proc
+        job._launch_done.set()
         self._emit_job(job, "started")
         logger.info(f"Agent job {job.job_id} [{job.agent}] started: {job.task}")
         task = asyncio.create_task(self._stream(job, proc), name=f"agent-{job.job_id}")
@@ -487,10 +543,25 @@ class AgentBridge:
         """Cancel an active job if it exists."""
         proc = self._procs.get(job_id)
         job = self._jobs.get(job_id)
-        if proc is None or job is None or job.status not in _ACTIVE_STATUSES:
+        if job is None or job.status not in _ACTIVE_STATUSES:
             return
         job.status = STATUS_CANCELLED
+        job.state = STATE_CANCELLED
+        if proc is None:
+            await job._launch_done.wait()
+            proc = self._procs.get(job_id)
+        if proc is None:
+            return
         await self._terminate(proc)
+
+    async def replace_latest(self, correction: str) -> str | None:
+        """Cancel the newest active job, then restart it with user correction context."""
+        job = self.latest_active()
+        if job is None:
+            return None
+        await self.cancel(job.job_id)
+        task = f"{job.task}\n\nUser correction: {correction}"
+        return await self.start(job.agent, task, announce_start=True)
 
     async def shutdown(self) -> None:
         """Stop every live job and reap its subprocess before the loop closes.
@@ -745,6 +816,7 @@ class AgentBridge:
             "step_total": job.step_total,
             "last_completed_step": job.last_completed_step,
             "summary": job.summary,
+            "result": job.result,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
             "failure_kind": job.failure_kind,
