@@ -634,33 +634,58 @@ class IntentRouter:
             task = _clean_task(verdict["task"], text)
             agent = _select_backend(task, default_backend, verdict["category"])
             ungrounded = _grounding_gap(task, verdict["reason"], text)
-            grounded = ungrounded is None
-            reason = verdict["reason"] or "classifier judged this a real-world task"
-            if not grounded:
-                logger.warning(
-                    f"Intent classifier proposed an ungrounded task for {text!r}: "
-                    f"{task!r} ({ungrounded}); holding for confirmation"
+            if ungrounded is None:
+                return RoutingDecision(
+                    text=text,
+                    # In the uncertain band: lookups are harmless so dispatch
+                    # anyway; anything that could change state asks first.
+                    action=ACTION_DISPATCH if (confident or read_only) else ACTION_CONFIRM,
+                    intent="agent_task",
+                    category=verdict["category"],
+                    requirement="required" if confident else "optional",
+                    confidence=verdict["confidence"],
+                    task=task,
+                    agent=agent,
+                    reason=verdict["reason"] or "classifier judged this a real-world task",
+                    source="classifier",
+                    fallback=fallback,
+                    grounded=True,
+                    risk=_classify_risk(agent, task, grounded=True, confident=confident),
                 )
-                reason = f"{reason} -- held: {ungrounded}"
-            return RoutingDecision(
-                text=text,
-                # In the uncertain band: lookups are harmless so dispatch
-                # anyway; anything that could change state asks first. An
-                # ungrounded task never auto-dispatches, however confident or
-                # read-only the classifier claims to be.
-                action=ACTION_DISPATCH if grounded and (confident or read_only) else ACTION_CONFIRM,
-                intent="agent_task",
-                category=verdict["category"],
-                requirement="required" if (confident and grounded) else "optional",
-                confidence=verdict["confidence"],
-                task=task,
-                agent=agent,
-                reason=reason,
-                source="classifier",
-                fallback=fallback,
-                grounded=grounded,
-                risk=_classify_risk(agent, task, grounded=grounded, confident=confident),
-            )
+            # Ungrounded: the classifier invented a task with no topical link to
+            # what was said. A read-only lookup the user never raised (weather,
+            # directions, scores -- the small model regurgitating a few-shot
+            # example) is pure noise, so discard it silently rather than asking.
+            # An ungrounded *mutating* task still gets a confirmation checkpoint:
+            # it may be a genuine indirect request ("tidy up those old logs" ->
+            # "Delete old logs"), and a state change is worth one question.
+            if read_only:
+                logger.warning(
+                    f"Discarding ungrounded read-only task for {text!r}: {task!r} ({ungrounded})"
+                )
+                verdict = None
+            else:
+                logger.warning(
+                    f"Holding ungrounded mutating task for {text!r}: {task!r} ({ungrounded})"
+                )
+                return RoutingDecision(
+                    text=text,
+                    action=ACTION_CONFIRM,
+                    intent="agent_task",
+                    category=verdict["category"],
+                    requirement="optional",
+                    confidence=verdict["confidence"],
+                    task=task,
+                    agent=agent,
+                    reason=(
+                        f"{verdict['reason'] or 'classifier judged this a real-world task'} "
+                        f"-- held: {ungrounded}"
+                    ),
+                    source="classifier",
+                    fallback=fallback,
+                    grounded=False,
+                    risk=_classify_risk(agent, task, grounded=False, confident=confident),
+                )
 
         # Chat: nothing dispatches; the marker + promise guard still watch.
         if verdict is not None:

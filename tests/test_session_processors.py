@@ -19,8 +19,10 @@ from remote_agent_protocol.session_processors import (
     DelegationTap,
     LLMDelegateTap,
     MicGate,
+    STTNoiseFilter,
     TranscriptTap,
     is_placeholder_task,
+    is_stt_hallucination,
     looks_like_delegation_promise,
 )
 
@@ -60,6 +62,26 @@ class MicGateTests(unittest.IsolatedAsyncioTestCase):
                 BotStoppedSpeakingFrame,
                 InputAudioRawFrame,
             ],
+        )
+
+
+class STTNoiseFilterTests(unittest.IsolatedAsyncioTestCase):
+    def _transcript(self, text):
+        return TranscriptionFrame(text=text, user_id="u", timestamp="t")
+
+    def test_known_hallucinations_are_recognized(self):
+        for text in ("Thank you.", "thank you", "Thanks for watching!", "  You  ", "Bye."):
+            self.assertTrue(is_stt_hallucination(text), text)
+
+    def test_real_utterances_are_kept(self):
+        for text in ("thank you for opening the file", "open the steam app", "what time is it"):
+            self.assertFalse(is_stt_hallucination(text), text)
+
+    async def test_filter_drops_hallucination_but_passes_real_speech(self):
+        await run_test(
+            STTNoiseFilter(),
+            frames_to_send=[self._transcript("Thank you."), self._transcript("open the file")],
+            expected_down_frames=[TranscriptionFrame],  # only the real one survives
         )
 
 

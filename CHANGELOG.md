@@ -49,6 +49,14 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - Injected agent status speech (task started, still working, finished, handoff)
   now appears in the on-screen transcript. It previously bypassed the LLM text
   path, so later-stage updates were spoken aloud but never shown.
+- Whisper's stock silence-hallucinations ("thank you", "thanks for watching",
+  a bare "you", etc.) are dropped when they are the entire utterance, so they no
+  longer trigger a spurious reply or get parsed as a command.
+- An ungrounded read-only lookup the classifier invents with no connection to
+  what was said (the small local model regurgitating its weather few-shot
+  example is the classic case) is now discarded silently instead of prompting
+  you to confirm a task you never asked for. Ungrounded *mutating* tasks still
+  ask first, since a state change is worth one question.
 
 ## [1.2.0] - 2026-07-05
 

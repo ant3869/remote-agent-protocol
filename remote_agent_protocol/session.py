@@ -56,6 +56,7 @@ from remote_agent_protocol.session_processors import (
     EventCallback,
     LLMDelegateTap,
     MicGate,
+    STTNoiseFilter,
     TranscriptTap,
     looks_like_delegation_promise,
 )
@@ -215,6 +216,7 @@ class VoiceSession:
         processors += [
             self._gate,
             stt,
+            STTNoiseFilter(),  # drop Whisper silence-hallucinations before anything sees them
             TranscriptTap(self._on_event, role="user"),  # raw text, pre-delegation
             DelegationTap(
                 self._delegate_ack,

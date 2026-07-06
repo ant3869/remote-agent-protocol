@@ -57,6 +57,58 @@ class MicGate(FrameProcessor):
             await self.push_frame(frame, direction)
 
 
+# Whisper reliably hallucinates these stock phrases on silence or non-speech
+# audio -- they saturate its training data from video captions/outros. When one
+# is the ENTIRE utterance it is almost never a real turn, so responding to it
+# (or worse, parsing it as a command) is pure noise. Longer utterances that
+# merely contain the phrase ("thanks, now open the file") are left alone.
+_STT_HALLUCINATION_PHRASES = frozenset(
+    {
+        "thank you",
+        "thanks",
+        "thank you very much",
+        "thank you so much",
+        "thanks for watching",
+        "thank you for watching",
+        "thanks for watching everyone",
+        "please subscribe",
+        "like and subscribe",
+        "you",
+        "bye",
+        "bye bye",
+        "okay",
+        "so",
+    }
+)
+
+
+def _normalize_utterance(text: str) -> str:
+    """Lowercase, strip surrounding punctuation/space, and collapse whitespace."""
+    return " ".join(re.sub(r"[^\w\s]", " ", text).lower().split())
+
+
+def is_stt_hallucination(text: str) -> bool:
+    """True if the whole utterance is a known Whisper silence-hallucination."""
+    return _normalize_utterance(text) in _STT_HALLUCINATION_PHRASES
+
+
+class STTNoiseFilter(FrameProcessor):
+    """Drop transcriptions that are only a known Whisper silence-hallucination.
+
+    Sits right after STT so the phantom text never reaches the transcript, the
+    delegation parser, or the LLM -- it just disappears, as if the user had
+    said nothing.
+    """
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        """Swallow a hallucinated stock phrase; pass everything else through."""
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame) and is_stt_hallucination(frame.text):
+            logger.info(f"Dropping STT hallucination: {frame.text!r}")
+            return
+        await self.push_frame(frame, direction)
+
+
 def resolve_delegation(text: str, default_backend: str | None = None) -> tuple[str, str] | None:
     """Return (backend, task) for explicit or implicit delegations, else None."""
     parsed = voice_commands.parse_delegation(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)

@@ -404,7 +404,10 @@ class GroundingGapTests(unittest.IsolatedAsyncioTestCase):
     async def route(self, classify, text, **kwargs):
         return await make_router(classify, **kwargs).route(text, "code-puppy")
 
-    async def test_high_confidence_unrelated_task_is_held_not_dispatched(self):
+    async def test_ungrounded_mutating_task_is_held_not_dispatched(self):
+        # A mutating task with no topical link to what was said still gets a
+        # confirmation checkpoint -- it may be a genuine indirect request, and a
+        # state change is worth one question.
         classify = FakeClassify(
             result=verdict(
                 category="files_or_apps",
@@ -419,21 +422,23 @@ class GroundingGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision.grounded)
         self.assertEqual(decision.risk, intent_router.RISK_LOW_GROUNDING)
 
-    async def test_high_confidence_readonly_unrelated_task_still_holds(self):
-        # Read-only categories normally auto-dispatch in the uncertain band and
-        # even more so when confident -- grounding must override that.
+    async def test_ungrounded_readonly_lookup_is_discarded_not_asked(self):
+        # The user's exact complaint: a regurgitated weather task they never
+        # asked about. An ungrounded read-only lookup is pure noise -- discard it
+        # to chat rather than dispatching OR asking.
         classify = FakeClassify(
             result=verdict(
                 category="live_information",
-                task="Get the football score for the user's team",
+                task="Get tomorrow's rain forecast for the user's location",
                 conf=0.95,
-                reason="User wants a sports update",
+                reason="Needs live weather data",
             )
         )
         decision = await self.route(classify, "what a weird noise that was")
 
-        self.assertEqual(decision.action, "confirm")
-        self.assertFalse(decision.grounded)
+        self.assertEqual(decision.action, intent_router.ACTION_NONE)
+        self.assertEqual(decision.intent, "chat")
+        self.assertEqual(decision.task, "")
 
     async def test_grounded_task_with_sparse_verdict_text_still_dispatches(self):
         # Guards against false positives: a terse/placeholder-ish task+reason
