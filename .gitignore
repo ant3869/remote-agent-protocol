@@ -80,6 +80,8 @@ data/
 # They embed absolute local paths, so they stay per-machine.
 .cursor/
 .zed/
+.codex/
 .claude/CLAUDE.md
 .github/copilot-instructions.md
 .github/instructions/
+.github/skills/

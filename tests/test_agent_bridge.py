@@ -139,6 +139,34 @@ class PureHelperTests(unittest.TestCase):
         job.lines = ["ERROR: simulated"]
         self.assertIn("FAILED", agent_bridge.announcement(job))
 
+    def test_task_label_shortens_long_task(self):
+        long_task = (
+            "check my emails for the last, check my last 10 emails to see if "
+            "there's anything important"
+        )
+        label = agent_bridge.task_label(long_task)
+        self.assertLessEqual(len(label), 45)
+        self.assertNotIn("important", label)  # trailing rambling clause dropped
+        self.assertTrue(label)
+
+    def test_task_label_keeps_short_task_and_handles_empty(self):
+        self.assertEqual(agent_bridge.task_label("open the steam app"), "open the steam app")
+        self.assertEqual(agent_bridge.task_label(""), "the task")
+
+    def test_finished_announcement_avoids_verbatim_long_task(self):
+        # The spoken completion must not read the whole (long) task back aloud;
+        # it leads with the result summary instead.
+        long_task = (
+            "please find my usps validation code buried somewhere in my very "
+            "long inbox from last week if it even exists at all"
+        )
+        job = agent_bridge.AgentJob(job_id="j", agent="hermes-yolo", task=long_task)
+        job.status = agent_bridge.STATUS_DONE
+        job.summary = "Found the code: 4821"
+        text = agent_bridge.announcement(job)
+        self.assertIn("Found the code", text)
+        self.assertNotIn(long_task, text)
+
     def test_structured_status_line_is_normalized(self):
         status = agent_bridge.parse_status_line(
             '@@JESS_STATUS {"state":"step_completed","action":"Drawing fur",'

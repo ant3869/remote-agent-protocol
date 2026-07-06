@@ -341,6 +341,27 @@ def result_detail(job: AgentJob) -> str:
     return body if body and body != job.summary else ""
 
 
+_TASK_LABEL_MAX_CHARS = 45
+
+
+def task_label(task: str) -> str:
+    """A short, speakable reference to a task -- never the full verbatim sentence.
+
+    Status updates are spoken repeatedly (start, still-working, finish); reading
+    a long user phrasing aloud each time is grating. Reduce it to the leading
+    clause within a small budget so updates stay concise while still identifying
+    which task they refer to.
+    """
+    text = " ".join((task or "").split())
+    if not text:
+        return "the task"
+    clause = re.split(r"[,;.]", text, maxsplit=1)[0].strip() or text
+    if len(clause) <= _TASK_LABEL_MAX_CHARS:
+        return clause
+    clipped = clause[:_TASK_LABEL_MAX_CHARS].rsplit(" ", 1)[0].strip()
+    return clipped or clause[:_TASK_LABEL_MAX_CHARS].strip()
+
+
 def announcement(job: AgentJob) -> str:
     """One-sentence-ish update for Jess to relay to the user."""
     tamper = (
@@ -356,15 +377,16 @@ def announcement(job: AgentJob) -> str:
     if job.status == STATUS_DONE:
         if not (job.result or job.summary or job.lines):
             return (
-                f"Agent '{job.agent}' reported '{job.task}' complete but returned no "
+                f"Agent '{job.agent}' finished '{task_label(job.task)}' but returned no "
                 f"result to relay -- re-run it to capture the output.{tamper}"
             )
-        return (
-            f"Background task on agent '{job.agent}' finished: {job.task}. "
-            f"Result: {summary}{tamper}"
-        )
+        # Lead with the result summary rather than reading the (often long) task
+        # back verbatim; the full result is placed in the LLM context separately.
+        if summary:
+            return f"{job.agent} finished: {summary}{tamper}"
+        return f"{job.agent} finished {task_label(job.task)}.{tamper}"
     if job.status == STATUS_CANCELLED:
-        return f"Background task on agent '{job.agent}' was cancelled: {job.task}.{tamper}"
+        return f"{job.agent} cancelled {task_label(job.task)}.{tamper}"
     if job.failure_kind == "quota":
         return (
             f"Agent '{job.agent}' failed because its current model or provider is out of "
@@ -375,9 +397,7 @@ def announcement(job: AgentJob) -> str:
             f"Agent '{job.agent}' failed because its provider is rate-limited or at capacity. "
             f"You can say 'switch {job.agent} to OpenAI'.{tamper}"
         )
-    return (
-        f"Background task on agent '{job.agent}' FAILED: {job.task}. Last output: {summary}{tamper}"
-    )
+    return f"{job.agent} FAILED {task_label(job.task)}. Last output: {summary}{tamper}"
 
 
 class AgentBridge:

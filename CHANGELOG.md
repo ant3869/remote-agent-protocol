@@ -28,6 +28,9 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - Long-term memory now captures facts stated casually -- phrasings with a
   leading filler word ("well, my...") or a contraction ("I've got...") that a
   stricter prefix filter previously dropped.
+- Spoken agent status updates (started, still working, finished, cancelled,
+  failed) now lead with a short result summary or task label instead of reading
+  the full, often long, task sentence back verbatim on every update.
 
 ### Fixed
 
@@ -43,6 +46,9 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - The Agents panel no longer crashes when it renders legacy task-history rows
   that predate status tracking (their null state/action previously killed the
   GUI event loop).
+- Injected agent status speech (task started, still working, finished, handoff)
+  now appears in the on-screen transcript. It previously bypassed the LLM text
+  path, so later-stage updates were spoken aloud but never shown.
 
 ## [1.2.0] - 2026-07-05
 

@@ -18,6 +18,7 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     MetricsFrame,
     TranscriptionFrame,
+    TTSSpeakFrame,
     UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -318,6 +319,14 @@ class TranscriptTap(FrameProcessor):
                 self._llm_buffer.append(frame.text)
             elif isinstance(frame, LLMFullResponseEndFrame):
                 self._emit_assistant_text()
+            elif isinstance(frame, TTSSpeakFrame) and frame.text.strip():
+                # Injected speech -- agent status updates (started, still
+                # working, finished, handoff) -- bypasses the LLM, so it never
+                # produces LLMTextFrames. Mirror it to the transcript here or it
+                # would be spoken aloud but never shown on screen.
+                self._emit(
+                    {"type": "transcript", "role": "assistant", "text": frame.text.strip()}
+                )
         elif isinstance(frame, MetricsFrame):
             self._emit_metrics(frame)
         elif isinstance(frame, UserStoppedSpeakingFrame):

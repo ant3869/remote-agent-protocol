@@ -10,6 +10,7 @@ from pipecat.frames.frames import (
     LLMUpdateSettingsFrame,
     MetricsFrame,
     TranscriptionFrame,
+    TTSSpeakFrame,
     UserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import TTFBMetricsData
@@ -219,6 +220,40 @@ class TranscriptTapRoleTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(events, [{"type": "transcript", "role": "assistant", "text": "Hey you."}])
+
+    async def test_assistant_tap_mirrors_injected_tts_speech(self):
+        # Agent status updates (finished/continuing/handoff) are injected as
+        # TTSSpeakFrames that bypass the LLM; they must still reach the
+        # transcript or they are spoken aloud but never shown (regression).
+        events: list[dict] = []
+        tap = TranscriptTap(events.append, role="assistant")
+
+        await run_test(
+            tap,
+            frames_to_send=[TTSSpeakFrame(text="  hermes-yolo finished: found two alerts.  ")],
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {
+                    "type": "transcript",
+                    "role": "assistant",
+                    "text": "hermes-yolo finished: found two alerts.",
+                }
+            ],
+        )
+
+    async def test_user_and_telemetry_taps_ignore_injected_tts(self):
+        # Only the assistant tap owns injected speech; the others must not
+        # double-report it.
+        for role in ("user", "telemetry"):
+            events: list[dict] = []
+            await run_test(
+                TranscriptTap(events.append, role=role),
+                frames_to_send=[TTSSpeakFrame(text="agent update")],
+            )
+            self.assertEqual(events, [], f"role {role} should ignore TTSSpeakFrame")
 
     async def test_telemetry_tap_owns_metrics_speaking_and_turns(self):
         events: list[dict] = []
