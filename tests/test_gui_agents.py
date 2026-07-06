@@ -72,6 +72,25 @@ class AgentsPanelStatusTests(unittest.TestCase):
         self.assertEqual(job["result"], "1. Security alert\n2. CI failure")
         self.assertEqual(job["summary"], "Fetched the last 10 emails")
 
+    def test_line_for_tolerates_null_state_from_legacy_history(self):
+        # Legacy history rows persist state/action as null. The row renderer must
+        # not crash on them (regression: .replace() on None killed the GUI pump).
+        job = {
+            "agent": "hermes-yolo",
+            "machine": "Main PC",
+            "task": "put a file on my desktop",
+            "status": "done",
+            "state": None,
+            "action": None,
+        }
+        line = self.panel._line_for(job)
+        self.assertIn("DONE", line)
+        self.assertIn("put a file on my desktop", line)
+        # active_summary skips terminal jobs, but must also survive a null state.
+        self.panel._jobs["j"] = dict(job, status="running", state=None)
+        self.panel._order = ["j"]
+        self.assertIn("RUNNING", self.panel.active_summary())
+
 
 if __name__ == "__main__":
     unittest.main()

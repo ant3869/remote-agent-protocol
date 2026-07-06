@@ -40,6 +40,9 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   code in an email") no longer get misrouted to the coding agent.
 - The Agents panel live-output pane refreshes while a job runs and surfaces the
   final result on completion, so a long-running task no longer appears frozen.
+- The Agents panel no longer crashes when it renders legacy task-history rows
+  that predate status tracking (their null state/action previously killed the
+  GUI event loop).
 
 ## [1.2.0] - 2026-07-05
 

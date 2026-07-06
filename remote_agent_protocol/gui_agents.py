@@ -65,9 +65,9 @@ class AgentsPanel:
             job = self._jobs[job_id]
             if job.get("status") not in _ACTIVE:
                 continue
-            agent = job.get("agent", "agent").replace("-", " ").title().replace(" ", "")
-            state = job.get("state", job.get("status", "running")).replace("_", " ").upper()
-            action = job.get("action") or job.get("task", "")
+            agent = (job.get("agent") or "agent").replace("-", " ").title().replace(" ", "")
+            state = (job.get("state") or job.get("status") or "running").replace("_", " ").upper()
+            action = job.get("action") or job.get("task") or ""
             return f"{agent} · {state} · {action}"[:58]
         return ""
 
@@ -334,12 +334,14 @@ class AgentsPanel:
     # -- rendering ---------------------------------------------------------------
 
     def _line_for(self, job: dict) -> str:
-        status = job.get("status", "?")
+        status = job.get("status") or "?"
         glyph = _GLYPHS.get(status, "…")
         took = f" ({job['secs']}s)" if job.get("secs") is not None else ""
-        target = f"{job['machine']}/{job['agent']}"
-        state = job.get("state", status).replace("_", " ").upper()
-        action = job.get("action") or job.get("task", "")
+        target = f"{job.get('machine') or 'local'}/{job.get('agent') or '?'}"
+        # `or` (not a .get default): legacy history rows persist state/action as
+        # null, and a null must fall back too, or .replace() blows up the pump.
+        state = (job.get("state") or status).replace("_", " ").upper()
+        action = job.get("action") or job.get("task") or ""
         tool = f" · {job['tool']}" if job.get("tool") else ""
         step = ""
         if job.get("step"):
@@ -375,7 +377,7 @@ class AgentsPanel:
         self.log.delete("1.0", END)
         job = self._jobs[job_id]
         details = [
-            f"Status: {job.get('state', job.get('status', '?'))}",
+            f"Status: {job.get('state') or job.get('status') or '?'}",
             f"Current action: {job.get('action') or '—'}",
             f"Active tool: {job.get('tool') or '—'}",
             f"Step: {job.get('step') or '—'} / {job.get('step_total') or '—'}",
