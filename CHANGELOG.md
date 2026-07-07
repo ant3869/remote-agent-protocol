@@ -8,6 +8,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.4.2] - 2026-07-07
+
+### Fixed
+
+- A single request no longer triggers the agent twice or loops the
+  confirmation prompt. When the deterministic router had already dispatched or
+  held a task for the turn, the assistant's own acknowledgement could carry a
+  delegation marker that fired a second job -- or, for a held task, re-asked
+  for confirmation on every reply in an endless loop. Delegation markers are
+  now ignored on turns that are merely acknowledging or confirming an
+  already-handled task, so one request maps to at most one delegation.
+
 ## [1.4.1] - 2026-07-07
 
 ### Changed

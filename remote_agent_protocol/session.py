@@ -768,7 +768,21 @@ class VoiceSession:
         On plain dispatch nothing more is needed -- the persona already said
         it's sending the task, and completion is announced by the bridge. A
         held job triggers one extra spoken turn asking for confirmation.
+
+        Suppressed on an ack/confirm/update turn (``_agent_ack_turn``): that
+        reply is already narrating an agent action the app itself initiated --
+        the deterministic router dispatched or held it this turn, or we injected
+        a confirmation/ack prompt. A marker there is the model re-delegating
+        something already handled. Acting on it double-runs the job (two hermes
+        jobs for one "check my emails" request) and, for a held task, re-injects
+        the confirmation prompt whose own reply carries another marker -- an
+        endless "say confirm to proceed" loop (jess_runtime.log 2026-07-07
+        00:52 and 00:55). This runs before ``_on_llm_response`` consumes the
+        flag, so it still reads the value set earlier this turn.
         """
+        if self._agent_ack_turn:
+            logger.info(f"Ignoring LLM delegation marker on an ack/confirm turn: {task!r}")
+            return
         ack, held = self._delegate_ack_ex(self._default_agent_backend, task)
         if held:
             self._spawn(self._inject_and_run(ack), name="llm-delegate-confirm")

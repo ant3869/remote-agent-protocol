@@ -85,6 +85,41 @@ class SessionDelegationTests(unittest.TestCase):
         )
         self.assertEqual(spawned, ["markerless-promise-confirm"])
 
+    def _session_with_recorders(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        voice_session._bridge = RecordingBridge()
+        spawned = []
+
+        def close_spawned(coro, *, name):
+            coro.close()
+            spawned.append(name)
+
+        voice_session._spawn = close_spawned
+        return voice_session, spawned
+
+    def test_llm_delegate_ignored_on_ack_turn(self):
+        # Regression: an ack/confirm turn already narrates an app-initiated
+        # agent action. A [[delegate:]] marker in that reply must not
+        # double-dispatch, nor re-hold a job whose confirmation prompt would
+        # loop (jess_runtime.log 2026-07-07 00:52 double job / 00:55 loop).
+        voice_session, spawned = self._session_with_recorders()
+        voice_session._agent_ack_turn = True
+
+        voice_session._llm_delegate("search work emails for a zip file today")
+
+        self.assertEqual(spawned, [])
+        self.assertEqual(voice_session._pending_confirmations, {})
+
+    def test_llm_delegate_still_fires_on_a_normal_turn(self):
+        # The guard must not break a genuine first-time marker delegation.
+        voice_session, spawned = self._session_with_recorders()
+        voice_session._agent_ack_turn = False
+
+        voice_session._llm_delegate("search the web for mechanical keyboards")
+
+        self.assertEqual(spawned, [f"delegate-{voice_session._default_agent_backend}"])
+        self.assertEqual(voice_session._pending_confirmations, {})
+
 
 class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_events_are_published_to_lifecycle_server_without_announcements(self):
