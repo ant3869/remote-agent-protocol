@@ -8,6 +8,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.4.5] - 2026-07-07
+
+### Fixed
+
+- Agent follow-up questions are now relayed with context and only when the
+  agent actually asked one. Before, any question mark in a coding agent's
+  streamed reasoning (e.g. "Are you running cmd.exe?") was spoken verbatim in
+  the assistant's voice, as if it were asking out of nowhere -- so the user
+  couldn't tell what was being asked, and their confused reply got misrouted
+  into brand-new tasks. Now only an explicitly marked question, or one the
+  agent ends on, counts, and it is spoken as "Agent 'X' needs your input: ...".
+  A finished job otherwise relays its result.
+
 ## [1.4.4] - 2026-07-07
 
 ### Changed

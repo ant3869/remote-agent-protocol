@@ -1020,11 +1020,14 @@ class VoiceSession:
                 )
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
-        questions = agent_bridge.follow_up_questions(job)
-        if questions:
-            text = " ".join(questions)
-        else:
-            text = agent_bridge.announcement(job)
+        # announcement() frames a follow-up question as "Agent 'X' needs your
+        # input: ..." so the user knows the agent is asking and about what.
+        # Speaking the bare question here instead made it sound like the persona
+        # asking out of nowhere -- a user heard a stray "Are you running
+        # cmd.exe?" (the agent narrating its own reasoning) and had no idea what
+        # it meant, then their confused reply was misrouted into new tasks
+        # (jess_runtime.log 2026-07-07 03:47).
+        text = agent_bridge.announcement(job)
         await self._worker.queue_frames([TTSSpeakFrame(text=text, append_to_context=True)])
 
     async def _hold_agent_confirmation(self, job: agent_bridge.AgentJob, prompt_text: str) -> None:

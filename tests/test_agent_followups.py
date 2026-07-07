@@ -95,6 +95,41 @@ class AgentFollowUpTests(unittest.TestCase):
         self.assertIsNone(agent_bridge.follow_up_question(failed))
         self.assertIsNone(agent_bridge.follow_up_question(done))
 
+    def test_ignores_mid_output_reasoning_question(self):
+        # Regression (jess_runtime.log 2026-07-07 03:47): a coding agent narrates
+        # a rhetorical question mid-thought and then finishes the task. That
+        # question must NOT be surfaced as needing the user's input -- the job
+        # is done, so the result is relayed instead.
+        job = agent_bridge.AgentJob(
+            job_id="job-cmd",
+            agent="code-puppy",
+            task="check the vlc scripts",
+            status=agent_bridge.STATUS_DONE,
+            lines=[
+                "Windows console found. Are you running cmd.exe?",
+                "Verified the parser is installed.",
+                "The VLC scripts are set up and working.",
+            ],
+            summary="VLC scripts are set up",
+            result="The VLC scripts are installed and working.",
+        )
+
+        self.assertEqual(agent_bridge.follow_up_questions(job), [])
+        # And the spoken announcement relays the result, not the stray question.
+        text = agent_bridge.announcement(job)
+        self.assertIn("installed and working", text)
+        self.assertNotIn("cmd.exe", text)
+
+    def test_unmarked_trailing_question_is_still_honoured(self):
+        job = agent_bridge.AgentJob(
+            job_id="job-tail",
+            agent="hermes",
+            task="book a flight",
+            status=agent_bridge.STATUS_DONE,
+            lines=["I checked the calendar.", "What date should I book?"],
+        )
+        self.assertEqual(agent_bridge.follow_up_question(job), "What date should I book?")
+
 
 if __name__ == "__main__":
     unittest.main()

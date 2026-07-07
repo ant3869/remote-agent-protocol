@@ -308,22 +308,28 @@ def _split_questions(text: str) -> list[str]:
 
 
 def follow_up_questions(job: AgentJob) -> list[str]:
-    """Return all agent questions for the user, preserving output order.
+    """Return the agent's questions for the user, preserving output order.
 
-    Agents are encouraged to print ``QUESTION: ...`` or
-    ``FOLLOW_UP_QUESTION: ...``. As a pragmatic fallback, lines ending in ``?``
-    are treated as questions too. Failed jobs are never treated as questions.
+    Agents are encouraged to mark questions with ``QUESTION: ...`` or
+    ``FOLLOW_UP_QUESTION: ...``; those are honoured wherever they appear. As a
+    fallback, a single UNMARKED question counts only when it is the *last* line
+    of the output -- i.e. the agent finished by asking. A question mark anywhere
+    earlier is almost always the agent narrating its own reasoning ("Are you
+    running cmd.exe?"); relaying that as if it needed the user's answer baffles
+    them and their reply gets misrouted into new tasks (jess_runtime.log
+    2026-07-07 03:47). Failed jobs are never treated as questions.
     """
     if job.status != STATUS_DONE:
         return []
+    stripped = [line.strip() for line in job.lines if line.strip()]
     questions: list[str] = []
-    for line in [line.strip() for line in job.lines if line.strip()]:
+    for line in stripped:
         match = _QUESTION_MARKER_RE.match(line)
         if match:
             marked = match.group(1).strip()
             questions.extend(_split_questions(marked) or [marked])
-        elif line.endswith("?"):
-            questions.extend(_split_questions(line) or [line])
+    if not questions and stripped and stripped[-1].endswith("?"):
+        questions.extend(_split_questions(stripped[-1]) or [stripped[-1]])
     return questions
 
 
