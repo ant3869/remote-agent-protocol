@@ -449,6 +449,28 @@ class GroundingGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, "dispatch")
         self.assertTrue(decision.grounded)
 
+    async def test_ungrounded_anaphoric_followup_defers_to_chat(self):
+        # "What is it supposed to do" refers to something earlier in the
+        # conversation the stateless classifier can't see, so it invented a task
+        # about a program literally named "it". That ungrounded, pronoun-driven
+        # verdict must go back to the LLM (which has the context) rather than
+        # becoming a confirmation for a nonsense task (jess_runtime.log
+        # 2026-07-07 03:49). Even though the category is mutating, the anaphora
+        # signal overrides the usual "hold mutating" checkpoint.
+        classify = FakeClassify(
+            result=verdict(
+                category="system_control",
+                task="Check the installation status of a software application called 'it'",
+                conf=0.9,
+                reason="User describes an unknown software application",
+            )
+        )
+        decision = await self.route(classify, "is it? what is it supposed to do?")
+
+        self.assertEqual(decision.action, intent_router.ACTION_NONE)
+        self.assertEqual(decision.intent, "chat")
+        self.assertEqual(decision.task, "")
+
 
 class RiskClassificationTests(unittest.IsolatedAsyncioTestCase):
     """Item 7: every decision carries a risk classification independent of

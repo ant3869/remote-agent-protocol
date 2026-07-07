@@ -321,8 +321,9 @@ class AgentsPanel:
         elif event == "finished":
             took = f" in {job['secs']}s" if job.get("secs") is not None else ""
             self._append_sys(f"Agent task {job['status']}{took} [{job['agent']}]: {job['task']}")
-        elif event == "progress" and evt.get("importance") in {"milestone", "attention"}:
-            self._append_sys(f"{job['agent']}: {job.get('action', job.get('state', 'working'))}")
+        # Progress narration is streamed into the conversation by the GUI
+        # (VoiceGUI._stream_agent_event) so it reads as a live feed of what the
+        # agent is doing; the panel just folds the state above and re-renders.
         self._refresh_list()
         # Keep the detail pane live for the job in focus. Without this the status
         # block freezes on its first render and a long-running job looks stuck,

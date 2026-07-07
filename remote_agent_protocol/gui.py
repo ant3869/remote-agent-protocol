@@ -37,6 +37,21 @@ _SESSION_TONES = {"ready": "ok", "failed": "danger", "building": "warn", "starti
 _LATENCY_KEYS = ("stt", "llm", "tts", "total")
 
 
+def agent_stream_line(evt: dict) -> str | None:
+    """The conversation feed line for one agent_job event, or None to skip.
+
+    Only ``progress`` events narrate what the agent is doing; ``started`` and
+    ``finished`` already have their own transcript lines, and ``output`` is raw
+    stdout kept to the Agents panel. Returns ``"<agent>: <action>"`` or None.
+    """
+    if evt.get("event") != "progress":
+        return None
+    action = (evt.get("action") or evt.get("state") or "").strip()
+    if not action:
+        return None
+    return f"{evt.get('agent', 'agent')}: {action}"
+
+
 class VoiceGUI:
     """The whole app: builds the window, owns the session + its thread."""
 
@@ -61,6 +76,8 @@ class VoiceGUI:
         self._syncing = False
         # Held delegations awaiting approval, oldest first; the bar shows [0].
         self._pending_confirms: list[dict] = []
+        # Last agent-stream line written to the transcript, to dedupe tool spam.
+        self._last_agent_stream = ""
         self._voice_map = self._build_voice_map()
         self._voice_labels = {v: k for k, v in self._voice_map.items()}
         self._models = self._model_choices()
@@ -408,6 +425,11 @@ class VoiceGUI:
         self.log.tag_config("body", foreground=theme.FG, spacing3=2)
         self.log.tag_config("sys", foreground=theme.DIM, spacing1=8, font=theme.FONT_SMALL)
         self.log.tag_config("agent", foreground=theme.WARN, spacing1=8, font=theme.FONT_SMALL)
+        # Live agent progress feed: dimmer than milestone lines, tucked in so a
+        # chatty agent doesn't shout over the conversation.
+        self.log.tag_config(
+            "agent_stream", foreground=theme.DIM, spacing1=1, lmargin1=18, font=theme.FONT_SMALL
+        )
         self.log.configure(state="disabled")
         self._append_sys("Jess is warming up — speak once the mic goes live, or type below.")
 
@@ -697,6 +719,7 @@ class VoiceGUI:
         elif kind == "agent_job":
             self._agents.handle_event(evt)
             self._refresh_agents_badge()
+            self._stream_agent_event(evt)
         elif kind == "agent_confirm":
             self._push_confirm(evt)
         elif kind == "agent_confirm_resolved":
@@ -730,6 +753,22 @@ class VoiceGUI:
 
     def _append_agent(self, text: str) -> None:
         self._append("agent", text)
+
+    def _stream_agent_event(self, evt: dict) -> None:
+        """Mirror an agent's live progress into the conversation as a feed line.
+
+        The started/finished lines are already written by the Agents panel; this
+        fills the gap in between so a delegated job reads as a running narration
+        ("code-puppy: checking for an open Command Prompt window") instead of a
+        silent wait punctuated by a single result. Raw stdout stays in the
+        Agents panel's detail pane -- only the distilled per-step action is
+        surfaced here, and consecutive duplicates (tool spam) are dropped.
+        """
+        line = agent_stream_line(evt)
+        if not line or line == self._last_agent_stream:
+            return
+        self._last_agent_stream = line
+        self._append("agent_stream", line)
 
     def _set_status(self, text: str, colour: str = theme.SUBTLE) -> None:
         self.status.configure(text=text, fg=colour)

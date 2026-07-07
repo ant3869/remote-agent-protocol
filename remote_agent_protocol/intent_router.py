@@ -319,6 +319,32 @@ def _grounding_gap(task: str, reason: str, text: str) -> str | None:
     return "classifier task/reason shares no word with the transcript"
 
 
+# Pronouns whose referent lives in the prior conversation, not the utterance.
+_ANAPHORA_WORDS = frozenset(
+    {"it", "its", "it's", "that", "this", "they", "them", "those", "these", "one"}
+)
+
+
+def _is_anaphoric(text: str) -> bool:
+    """True when the utterance leans on a pronoun with no antecedent of its own.
+
+    "What is it supposed to do", "how does that work", "is this the one" all
+    refer to something established earlier in the conversation. The stateless
+    classifier can't see that history, so any task it invents is a guess at the
+    referent ("a program called 'it'"). Paired with an ungrounded verdict this
+    is a reliable misroute signal: hand the turn back to the LLM, which does
+    have the conversation (and any staged agent results) to resolve the pronoun.
+
+    Fires only when the pronoun stands essentially alone -- the utterance names
+    no substantive referent of its own. "tidy up those old log files" carries a
+    real object ("log files"), so it is a genuine indirect request and is left
+    for the usual mutating-task confirmation, not discarded.
+    """
+    if not (set(re.findall(r"[a-z']+", text.lower())) & _ANAPHORA_WORDS):
+        return False
+    return len(_content_words(text) - _ANAPHORA_WORDS) <= 1
+
+
 def _classify_risk(agent: str, task: str, *, grounded: bool, confident: bool) -> str:
     """Classify WHY a decision might need a human in the loop, for logs/GUI.
 
@@ -666,13 +692,24 @@ class IntentRouter:
                     risk=_classify_risk(agent, task, grounded=True, confident=confident),
                 )
             # Ungrounded: the classifier invented a task with no topical link to
-            # what was said. A read-only lookup the user never raised (weather,
-            # directions, scores -- the small model regurgitating a few-shot
-            # example) is pure noise, so discard it silently rather than asking.
-            # An ungrounded *mutating* task still gets a confirmation checkpoint:
-            # it may be a genuine indirect request ("tidy up those old logs" ->
-            # "Delete old logs"), and a state change is worth one question.
-            if read_only:
+            # what was said. An anaphoric follow-up ("what is it supposed to do",
+            # "how does that work") is the clearest case -- the referent lives in
+            # the prior conversation the stateless classifier can't see, so the
+            # task is a guess at a pronoun ("a program called 'it'"). Defer to
+            # the LLM, which has the conversation and any staged agent results.
+            if _is_anaphoric(text):
+                logger.warning(
+                    f"Discarding ungrounded anaphoric follow-up for {text!r}: {task!r} "
+                    f"({ungrounded}) -- deferring to the LLM which has conversation context"
+                )
+                verdict = None
+            # A read-only lookup the user never raised (weather, directions,
+            # scores -- the small model regurgitating a few-shot example) is pure
+            # noise, so discard it silently rather than asking. An ungrounded
+            # *mutating* task still gets a confirmation checkpoint: it may be a
+            # genuine indirect request ("tidy up those old logs" -> "Delete old
+            # logs"), and a state change is worth one question.
+            elif read_only:
                 logger.warning(
                     f"Discarding ungrounded read-only task for {text!r}: {task!r} ({ungrounded})"
                 )

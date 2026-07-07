@@ -1,5 +1,6 @@
 import unittest
 
+from remote_agent_protocol.gui import agent_stream_line
 from remote_agent_protocol.gui_agents import AgentsPanel
 
 
@@ -90,6 +91,44 @@ class AgentsPanelStatusTests(unittest.TestCase):
         self.panel._jobs["j"] = dict(job, status="running", state=None)
         self.panel._order = ["j"]
         self.assertIn("RUNNING", self.panel.active_summary())
+
+    def test_panel_no_longer_writes_progress_to_transcript(self):
+        # Progress narration is streamed into the conversation by the GUI now,
+        # not the panel -- the panel must not also emit it (would double up).
+        self.panel.handle_event(
+            {
+                "job_id": "j1",
+                "agent": "code-puppy",
+                "event": "progress",
+                "importance": "milestone",
+                "state": "step_completed",
+                "action": "Opened Paint",
+            }
+        )
+        self.assertEqual(self.messages, [])
+
+
+class AgentStreamLineTests(unittest.TestCase):
+    def test_progress_event_becomes_a_feed_line(self):
+        self.assertEqual(
+            agent_stream_line(
+                {"event": "progress", "agent": "code-puppy", "action": "checking the window"}
+            ),
+            "code-puppy: checking the window",
+        )
+
+    def test_progress_without_action_falls_back_to_state(self):
+        self.assertEqual(
+            agent_stream_line({"event": "progress", "agent": "hermes", "state": "tool_running"}),
+            "hermes: tool_running",
+        )
+
+    def test_non_progress_events_are_skipped(self):
+        for event in ("started", "finished", "output"):
+            self.assertIsNone(agent_stream_line({"event": event, "agent": "x", "action": "y"}))
+
+    def test_blank_action_is_skipped(self):
+        self.assertIsNone(agent_stream_line({"event": "progress", "agent": "x", "action": "  "}))
 
 
 if __name__ == "__main__":

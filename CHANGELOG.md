@@ -8,6 +8,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.5.0] - 2026-07-07
+
+### Added
+
+- The conversation now shows a live feed of what a delegated agent is doing --
+  each progress step ("code-puppy: checking for an open Command Prompt window")
+  streams in as a dim line between the "task started" and "task done" markers,
+  so a long job reads as a running narration instead of a silent wait. Raw
+  stdout still lives in the Agents panel; only the distilled per-step action is
+  surfaced in the conversation.
+
+### Fixed
+
+- A context-dependent follow-up question ("what is it supposed to do", "how does
+  that work") is no longer turned into a bogus task. The intent classifier only
+  sees the single utterance, so it used to guess at the pronoun and invent a
+  task about a program literally named "it". When an ungrounded classifier
+  verdict comes from a bare pronoun like that, the turn is now handed back to
+  the assistant, which has the conversation (and staged agent results) to
+  resolve what "it" refers to.
+
 ## [1.4.5] - 2026-07-07
 
 ### Fixed
