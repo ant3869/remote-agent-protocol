@@ -8,6 +8,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.4.1] - 2026-07-07
+
+### Changed
+
+- Default voice model is now `gemma-12b-huihui` -- a 6.9GB abliterated 12B that
+  replies in ~710ms and, unlike the 12GB Q8 build, stays resident alongside the
+  intent classifier instead of evicting it. `gemma-e4b-max` remains the
+  low-latency "snappy" option (see the preset block in `env.example`).
+- Default intent classifier is now `gemma-e4b-aggressive` (was `llama3.2:1b`),
+  with the per-turn budget raised to 3s. Benchmarked at 92% routing accuracy
+  versus ~49% for the old default, which invented tasks from ordinary chat.
+- `env.example` documents the Snappy and Quality model presets with their
+  measured latency and VRAM footprint.
+
 ## [1.4.0] - 2026-07-06
 
 ### Added

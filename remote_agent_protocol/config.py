@@ -181,7 +181,12 @@ WHISPER_COMPUTE_TYPE = _env("WHISPER_COMPUTE_TYPE", "float16")
 #
 # AVOID for voice (they speak their <think> monologue): qwen3*, deepseek*,
 # anything 'Thinking'/'Reasoning'. See docs/MODELS.md for the full list + why.
-LLM_MODEL = _env("LLM_MODEL", "gemma-e4b-max")
+#
+# Default is gemma-12b-huihui: a 6.9GB abliterated 12B that measured ~710ms per
+# short reply (vs ~820ms for the 12GB Q8 gemma-12b) and, crucially, co-resides
+# with the intent classifier inside 16GB instead of evicting it. See the
+# "Model presets" block in env.example for the snappy alternative (gemma-e4b-max).
+LLM_MODEL = _env("LLM_MODEL", "gemma-12b-huihui")
 
 # ---------------------------------------------------------------------------
 # Thinking / reasoning -- THE big latency lever for voice
@@ -509,15 +514,18 @@ AGENT_DEFAULT_BACKEND = _env("AGENT_DEFAULT_BACKEND", "hermes")
 # confidence, tier, and reason.
 # ---------------------------------------------------------------------------
 INTENT_ROUTER_ENABLED = _env_bool("INTENT_ROUTER_ENABLED", True)
-# Any local Ollama model tag. Defaults to mem0's tiny model, which this setup
-# already keeps on disk and which classifies a short utterance in well under
-# a second -- classification is an easy task, it does not need the big voice
-# model. Kept separate from the voice model so the two never fight for VRAM.
-INTENT_MODEL = _env("INTENT_MODEL", "") or MEM0_LLM_MODEL
+# Any local Ollama model tag. Default is gemma-e4b-aggressive: it scored 92% on
+# the voice_probe routing corpus at ~0.8s/call, far ahead of the old tiny
+# default (llama3.2:1b, ~49% -- it hallucinated tasks from plain chat) and of
+# larger models that were both slower and less accurate at schema-constrained
+# JSON (see voice_probe/README.md). Thinking is disabled automatically so
+# thinking-capable models return JSON instead of empty output.
+INTENT_MODEL = _env("INTENT_MODEL", "") or "gemma-e4b-aggressive"
 # Classifier budget per utterance; on timeout the utterance stays chat (the
 # free tiers have already had their say), so a slow/busy Ollama can delay a
-# turn by at most this much and never stalls the pipeline.
-INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "1.5"))
+# turn by at most this much and never stalls the pipeline. 3s leaves headroom
+# for the ~0.9s p95 classifier under GPU contention with the resident voice model.
+INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "3.0"))
 # At/above dispatch confidence a task runs. Between confirm and dispatch is
 # the uncertain band: read-only lookups run anyway (a wrong lookup is
 # harmless), state-changing tasks are held for a spoken yes/no. Below the
