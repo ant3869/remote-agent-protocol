@@ -18,10 +18,13 @@ real-time audio pipeline.
   voice, follow a normalized lifecycle (started / in progress / tool running /
   waiting / blocked / completed / failed), and are announced out loud.
 - Destructive or elevated delegations are held for spoken or clicked
-  confirmation before they run.
+  confirmation before they run. If a one-shot backend asks for permission and
+  exits, approval safely relaunches the same task instead of reporting success.
 - Rapid corrections such as “wait, actually use httpx” cancel and replace the
   newest agent job; delegated prompts carry a bounded, explicitly untrusted
   conversation snapshot so contextual references survive the handoff.
+- Completed jobs speak the agent's substantive result, while live tool, step,
+  and last-completed fields continue advancing in the Agents panel.
 - Optional multi-wake persona routing (`WAKE_WORD_ENABLED=true` in `.env`):
   locally installed openwakeword models are matched to personas, the
   highest-confidence trigger wins, and persona/model/voice settings are queued

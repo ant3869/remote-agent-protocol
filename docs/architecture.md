@@ -43,7 +43,9 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
   (`jess_app_state.json`) so a restart boots as the character you actually use.
 - `agent_bridge.py` owns external agent subprocesses, bounded output capture,
   cancellation, provider-limit detection, model overrides, completion events,
-  and spoken summaries. See `model-recovery.md` for the exact CLI mappings.
+  and concise spoken results. A backend that exits with its own confirmation
+  gate is relaunched through the session's normal confirmation path instead of
+  being treated as completed. See `model-recovery.md` for the exact CLI mappings.
   Jobs default to a neutral sandbox directory rather than this repository, every
   task carries a scope preamble, and the host repo's working tree is diffed
   before/after each run so an unexpected edit to Jess's own source is flagged
@@ -123,6 +125,10 @@ without stopping voice. See `lifecycle-websocket.md` for the schema.
 spoken updates useful but sparse. Terminal updates use TTS directly and therefore
 do not depend on Ollama. Bounded runtime diagnostics are written to
 `jess_runtime.log`.
+
+`AGENT_CONFIRM_LOOP_LIMIT` defaults to `2` and stops a one-shot backend from
+repeatedly relaunching when it keeps asking for confirmation instead of doing
+the approved work.
 
 The remote launcher is intentionally external until the laptop's available API,
 authentication method, and exact Hermes/OpenClaw commands are known. Do not put

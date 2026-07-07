@@ -104,6 +104,14 @@ class PureHelperTests(unittest.TestCase):
         self.assertIn("@@JESS_STATUS", task)
         self.assertIn('"state":"completed"', task)
 
+    def test_status_protocol_tells_agent_result_is_read_aloud_and_must_be_brief(self):
+        # The dispatched agent's "result" is spoken via TTS -- it must be told
+        # to keep it concise, or a verbose answer either drags on or gets cut
+        # short before the valuable part is heard.
+        task = agent_bridge.with_status_protocol("what time is it")
+        self.assertIn("READ ALOUD", task)
+        self.assertIn("brief", task.lower())
+
     def test_machine_label_is_in_job_events(self):
         events: list[dict] = []
 
@@ -138,6 +146,26 @@ class PureHelperTests(unittest.TestCase):
         job.status = agent_bridge.STATUS_FAILED
         job.lines = ["ERROR: simulated"]
         self.assertIn("FAILED", agent_bridge.announcement(job))
+
+    def test_announcement_speaks_the_result_not_just_the_summary_label(self):
+        # Regression: jess_runtime.log 2026-07-06 19:13 -- hermes completed
+        # "what time is it" with summary "I checked the current time." and
+        # result "The current local time is 07:13 PM...". The spoken
+        # announcement said only the summary, never the actual time -- the one
+        # thing the user asked for. "summary" is a label, not the answer.
+        job = agent_bridge.AgentJob(job_id="j", agent="hermes", task="what time is it")
+        job.status = agent_bridge.STATUS_DONE
+        job.summary = "I checked the current time."
+        job.result = "The current local time is 07:13 PM on Monday, July 6, 2026."
+        text = agent_bridge.announcement(job)
+        self.assertIn("07:13 PM", text)
+
+    def test_announcement_falls_back_to_summary_when_no_result(self):
+        job = agent_bridge.AgentJob(job_id="j", agent="hermes", task="do a thing")
+        job.status = agent_bridge.STATUS_DONE
+        job.summary = "Did the thing"
+        text = agent_bridge.announcement(job)
+        self.assertIn("Did the thing", text)
 
     def test_task_label_returns_empty_for_long_or_empty_task(self):
         # A long task cannot be shortened into a clean reference without producing
@@ -182,6 +210,37 @@ class PureHelperTests(unittest.TestCase):
         text = agent_bridge.announcement(job)
         self.assertIn("Found the code", text)
         self.assertNotIn(long_task, text)
+
+    def test_requests_confirmation_detects_sub_agent_confirmation_gate(self):
+        # Some agent CLIs are one-shot: instead of doing the work, they print
+        # their own "say confirm to proceed" gate and exit "completed". That
+        # must be recognized, not treated as a real finished result.
+        job = agent_bridge.AgentJob(job_id="j", agent="hermes-yolo", task="search junk email")
+        job.status = agent_bridge.STATUS_DONE
+        job.summary = "Requesting confirmation to proceed"
+        job.result = (
+            "I'm about to search your junk email; please say 'confirm' to proceed "
+            "or 'cancel' to stop."
+        )
+        prompt = agent_bridge.requests_confirmation(job)
+        self.assertIsNotNone(prompt)
+
+    def test_requests_confirmation_ignores_genuine_completions(self):
+        job = agent_bridge.AgentJob(job_id="j", agent="hermes-yolo", task="search junk email")
+        job.status = agent_bridge.STATUS_DONE
+        job.summary = "Found two important emails"
+        job.result = "1. Security alert\n2. Invoice reminder"
+        self.assertIsNone(agent_bridge.requests_confirmation(job))
+
+    def test_requests_confirmation_ignores_non_terminal_or_failed_jobs(self):
+        # The gate phrase only matters once a job is actually DONE -- a running
+        # or failed job with similar wording in its output is not this case.
+        job = agent_bridge.AgentJob(job_id="j", agent="hermes-yolo", task="t")
+        job.status = agent_bridge.STATUS_RUNNING
+        job.summary = "Requesting confirmation to proceed"
+        self.assertIsNone(agent_bridge.requests_confirmation(job))
+        job.status = agent_bridge.STATUS_FAILED
+        self.assertIsNone(agent_bridge.requests_confirmation(job))
 
     def test_structured_status_line_is_normalized(self):
         status = agent_bridge.parse_status_line(
@@ -238,7 +297,7 @@ class PureHelperTests(unittest.TestCase):
         # relayed to the user rather than lost behind the spoken summary.
         answer = "\n".join(f"{i}. important email {i}" for i in range(1, 11))
         status = agent_bridge.parse_status_line(
-            '@@JESS_STATUS '
+            "@@JESS_STATUS "
             + json.dumps(
                 {"state": "completed", "summary": "Fetched the last 10 emails", "result": answer}
             )
@@ -627,6 +686,86 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(job.summary, "Dog drawn")
         self.assertEqual(job.action, "Dog drawn")
         self.assertEqual(sum(event["event"] == "finished" for event in events), 1)
+
+    def test_last_completed_step_advances_on_every_milestone(self):
+        # Regression: this used to only record the FIRST step_completed
+        # milestone and freeze forever, so "Last completed" never advanced in
+        # the GUI even as the agent kept making real progress.
+        events: list[dict] = []
+        script = (
+            'print(\'@@JESS_STATUS {"state":"step_completed","action":"opened inbox"}\', '
+            "flush=True); "
+            'print(\'@@JESS_STATUS {"state":"step_completed","action":"read 10 emails"}\', '
+            "flush=True); "
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"done"}\', flush=True)'
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            job_id = await bridge.start("mock", "check email")
+            for _ in range(100):
+                if any(event["event"] == "finished" for event in events):
+                    break
+                await asyncio.sleep(0.02)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.last_completed_step, "read 10 emails")
+
+    def test_last_completed_step_falls_back_to_summary_with_no_milestones(self):
+        # A backend that never reports a milestone still leaves the GUI with
+        # something meaningful once the job is actually done, instead of a
+        # permanent "-".
+        events: list[dict] = []
+        script = (
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"Fetched 10 emails"}\', '
+            "flush=True)"
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            job_id = await bridge.start("mock", "check email")
+            for _ in range(100):
+                if any(event["event"] == "finished" for event in events):
+                    break
+                await asyncio.sleep(0.02)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.last_completed_step, "Fetched 10 emails")
+
+    def test_tool_and_step_fields_populate_and_advance(self):
+        # Regression: the Agents panel's Active Tool / Step fields must reflect
+        # each new report, not just the first one or nothing at all.
+        events: list[dict] = []
+        script = (
+            'print(\'@@JESS_STATUS {"state":"tool_running","tool":"gmail","step":1,'
+            '"step_total":3,"action":"opening inbox"}\', flush=True); '
+            'print(\'@@JESS_STATUS {"state":"tool_running","tool":"gmail","step":2,'
+            '"step_total":3,"action":"reading messages"}\', flush=True); '
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"done"}\', flush=True)'
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            await bridge.start("mock", "check email")
+            for _ in range(100):
+                if any(event["event"] == "finished" for event in events):
+                    break
+                await asyncio.sleep(0.02)
+            return events
+
+        result_events = self._run(scenario())
+        progress = [e for e in result_events if e["event"] == "progress"]
+        self.assertEqual(progress[0]["tool"], "gmail")
+        self.assertEqual(progress[0]["step"], 1)
+        self.assertEqual(progress[1]["step"], 2)
 
     def test_silent_long_job_emits_progress_heartbeat(self):
         events: list[dict] = []

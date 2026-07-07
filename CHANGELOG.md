@@ -8,6 +8,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.3.1] - 2026-07-06
+
+### Fixed
+
+- The Agents panel's "Last completed" milestone now advances on every step
+  instead of freezing after the first one, and falls back to the final summary
+  when a backend never reports a milestone at all.
+- Delegated agents that exit by asking for permission now create a real
+  confirmation. Approval relaunches the task with the original working
+  directory, and repeated confirmation loops stop after two retries by default.
+- Spoken completion announcements now relay the agent's actual answer instead
+  of its short internal label. Delegated agents are told to keep spoken results
+  brief so the useful answer is heard in one pass.
+
 ## [1.3.0] - 2026-07-06
 
 ### Added
@@ -57,7 +71,6 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   example is the classic case) is now discarded silently instead of prompting
   you to confirm a task you never asked for. Ungrounded *mutating* tasks still
   ask first, since a state change is worth one question.
-
 ## [1.2.0] - 2026-07-05
 
 ### Added

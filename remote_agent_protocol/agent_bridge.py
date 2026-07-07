@@ -74,6 +74,10 @@ Finish with exactly one completed or failed line. On success include BOTH:
   "result"  -- the ACTUAL substantive answer the user asked for, in full: if they asked a
               question this is the answer; if they asked for a list this is the list itself.
               Never put only a label in "result".
+"result" is READ ALOUD by text-to-speech, so keep it brief and to the point -- state
+the key facts plainly in a sentence or two (or a short list), with no padding, filler,
+or repeated framing. Do not pad it out just to sound thorough; a short correct answer
+is better than a long one, since the whole thing gets spoken start to finish.
 Example: @@JESS_STATUS {"state":"completed","summary":"short spoken summary","result":"the full answer text the user asked for"}
 Emit only major milestones, not token-by-token updates. Continue the requested task
 normally; these status lines are consumed by the host application.
@@ -152,6 +156,7 @@ class AgentJob:
     agent: str
     task: str
     machine: str = "local"
+    cwd: str | None = None  # resolved working dir this job ran in, for relaunch
     status: str = STATUS_RUNNING
     lines: list[str] = field(default_factory=list)
     returncode: int | None = None
@@ -328,6 +333,36 @@ def follow_up_question(job: AgentJob) -> str | None:
     return questions[0] if questions else None
 
 
+_CONFIRMATION_GATE_RE = re.compile(
+    r"\brequesting\s+confirmation\b"
+    r"|\bneeds?\s+(?:your\s+)?confirmation\b"
+    r"|\bwaiting\s+for\s+(?:your\s+)?confirmation\b"
+    r"|\bconfirm(?:ation)?\b[^.?!]{0,40}\bto\s+proceed\b"
+    r"|\bsay\s+['\"]?confirm['\"]?\b",
+    re.IGNORECASE,
+)
+
+
+def requests_confirmation(job: AgentJob) -> str | None:
+    """Return the confirmation prompt if a "completed" job is really asking permission.
+
+    Some agent backends are one-shot CLIs: instead of doing the work, they
+    sometimes decide they need the user's OK first, print a "say 'confirm' to
+    proceed" gate of their own, and exit -- which our harness would otherwise
+    take at face value as a successful completion (jess_runtime.log 2026-07-06
+    18:23 and 18:26: hermes-yolo "completed" with summary "Requesting
+    confirmation to proceed" and the task was never actually run). The caller
+    is expected to hold a fresh confirmation and relaunch on approval instead
+    of announcing this as a finished result.
+    """
+    if job.status != STATUS_DONE:
+        return None
+    for candidate in (job.result, job.summary):
+        if candidate and _CONFIRMATION_GATE_RE.search(candidate):
+            return candidate
+    return None
+
+
 def result_detail(job: AgentJob) -> str:
     """Full substantive answer a finished job produced, for the LLM context.
 
@@ -375,16 +410,17 @@ def announcement(job: AgentJob) -> str:
     # a truncated fragment of a long user sentence.
     ref = task_label(job.task) or "the task"
     if job.status == STATUS_DONE:
-        if not (job.result or job.summary or job.lines):
+        # "summary" is a short spoken LABEL ("I checked the current time"), not
+        # necessarily the answer -- "result" is the actual substantive content
+        # the user asked for ("The current local time is 7:13 PM..."). Speak
+        # the real answer; a label alone leaves out the one thing worth hearing.
+        answer = job.result or summary
+        if not answer:
             return (
                 f"Agent '{job.agent}' finished {ref} but returned no result to relay -- "
                 f"re-run it to capture the output.{tamper}"
             )
-        # Lead with the result summary rather than reading the (often long) task
-        # back verbatim; the full result is placed in the LLM context separately.
-        if summary:
-            return f"{job.agent} finished: {summary}{tamper}"
-        return f"{job.agent} finished {ref}.{tamper}"
+        return f"{job.agent} finished: {answer}{tamper}"
     if job.status == STATUS_CANCELLED:
         return f"{job.agent} cancelled {ref}.{tamper}"
     if job.failure_kind == "quota":
@@ -522,6 +558,7 @@ class AgentBridge:
             return result
 
         cwd = resolve_cwd(cwd, self._workspace_dir)
+        job.cwd = cwd
         job._host_before = await self._host_snapshot()
         if job.status == STATUS_CANCELLED:
             job.state = STATE_CANCELLED
@@ -787,8 +824,16 @@ class AgentBridge:
             job.status = STATUS_FAILED
         else:
             job.status = STATUS_RUNNING
-        if state == STATE_STEP_COMPLETED and not job.last_completed_step:
+        # Regression: this used to only fire once ("and not job.last_completed_step"),
+        # so "Last completed" froze at the FIRST milestone and never advanced.
+        # Update on every milestone, using the explicit field if the CLI gave one,
+        # else its action text for this same status.
+        if state == STATE_STEP_COMPLETED and "last_completed_step" not in status:
             job.last_completed_step = job.action
+        elif state in _TERMINAL_STATES and not job.last_completed_step:
+            # Backend never reported a milestone at all -- better to show the
+            # final summary than a permanent "-" once the job is actually done.
+            job.last_completed_step = job.summary or job.action
         job._last_status = time.monotonic()
         after = (job.state, job.action, job.tool, job.step, job.last_completed_step)
         if force or after != before:

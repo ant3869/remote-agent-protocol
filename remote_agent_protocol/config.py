@@ -436,6 +436,13 @@ AGENT_HISTORY_MAX = int(_env("AGENT_HISTORY_MAX", "100"))
 # acknowledgment. Manual, deliberate dispatch (the Delegate button, the Agents
 # panel) is never gated -- the click already IS the confirmation.
 AGENT_CONFIRM_ENABLED = _env_bool("AGENT_CONFIRM_ENABLED", True)
+# Some agent backends are one-shot CLIs: instead of actually doing the work,
+# they sometimes print a "should I proceed? say confirm/cancel" gate of their
+# own and exit. We resolve that by holding a fresh confirmation and relaunching
+# on approval (see agent_bridge.requests_confirmation / session._hold_agent_confirmation).
+# If the SAME agent does this this many times in a row with no real result in
+# between, stop looping and tell the user instead of relaunching forever.
+AGENT_CONFIRM_LOOP_LIMIT = int(_env("AGENT_CONFIRM_LOOP_LIMIT", "2"))
 # Task text containing any of these verbs is treated as destructive and needs
 # confirming regardless of which backend it targets.
 AGENT_DESTRUCTIVE_WORDS = (

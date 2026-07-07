@@ -120,6 +120,10 @@ class VoiceSession:
         # Delegations held awaiting the user's yes/no: token -> (agent, task, cwd).
         self._pending_confirmations: dict[str, tuple[str, str, str | None]] = {}
         self._confirm_counter = itertools.count(1)
+        # Consecutive times an agent has "completed" a job by asking for
+        # confirmation instead of a real result -- guards against relaunching
+        # forever if the backend just keeps re-asking (see _hold_agent_confirmation).
+        self._agent_confirm_streak: dict[str, int] = {}
         # Fabricated-delegation guard state: the next LLM response legitimately
         # talks about the agent because it answers an injected ack/update.
         self._agent_ack_turn = False
@@ -977,6 +981,13 @@ class VoiceSession:
                 self._model_recovery = None
         elif job.failure_kind in {"quota", "rate_limit", "capacity"}:
             self._model_recovery = (job.agent, job.task)
+
+        confirmation_prompt = agent_bridge.requests_confirmation(job)
+        if confirmation_prompt is not None:
+            await self._hold_agent_confirmation(job, confirmation_prompt)
+            return
+        self._agent_confirm_streak.pop(job.agent, None)
+
         # Stage the agent's actual answer in the LLM context so follow-ups like
         # "what were they?" are answered from the result rather than restating
         # the task. Done regardless of announcement/worker gating below.
@@ -1001,6 +1012,54 @@ class VoiceSession:
         else:
             text = agent_bridge.announcement(job)
         await self._worker.queue_frames([TTSSpeakFrame(text=text, append_to_context=True)])
+
+    async def _hold_agent_confirmation(self, job: agent_bridge.AgentJob, prompt_text: str) -> None:
+        """A sub-agent "finished" by asking permission instead of a real result.
+
+        Some backends are one-shot CLIs: the process already exited, so there is
+        no live task to resume. Register a fresh pending confirmation -- the same
+        mechanism used for our own pre-dispatch gate -- so a spoken/GUI "confirm"
+        relaunches the task; the relaunch text notes the approval so the agent
+        does not just ask again immediately. If the same agent keeps doing this
+        with no real result in between, stop looping and tell the user instead.
+        """
+        streak = self._agent_confirm_streak.get(job.agent, 0) + 1
+        self._agent_confirm_streak[job.agent] = streak
+        if streak > cfg.AGENT_CONFIRM_LOOP_LIMIT:
+            logger.warning(
+                f"Agent '{job.agent}' asked for confirmation {streak} times in a row "
+                f"with no result; giving up: {job.task!r}"
+            )
+            if cfg.AGENT_ANNOUNCE:
+                await self._inject_and_run(
+                    f"[Agent update: '{job.agent}' keeps asking for confirmation on the "
+                    "same task instead of doing it, and may be stuck. In ONE short "
+                    "sentence, tell the user this and suggest trying a different agent "
+                    "or rephrasing.]"
+                )
+            return
+        token = f"agent-confirm-{next(self._confirm_counter)}"
+        approved_task = (
+            f"{job.task}\n\nThe user has already confirmed this action -- proceed "
+            "without asking again."
+        )
+        self._pending_confirmations[token] = (job.agent, approved_task, job.cwd)
+        self._emit(
+            {
+                "type": "agent_confirm",
+                "token": token,
+                "agent": job.agent,
+                "task": job.task,
+                "machine": self._bridge.machine_for(job.agent),
+                "reason": "the agent needs your OK before continuing",
+                "transcript": prompt_text,
+            }
+        )
+        logger.info(f"Agent '{job.agent}' requested confirmation mid-task; holding: {job.task}")
+        if cfg.AGENT_ANNOUNCE:
+            await self._inject_and_run(
+                cfg.DELEGATION_CONFIRM_PROMPT.format(agent=job.agent, task=job.task)
+            )
 
     def _on_agent_event(self, event: dict) -> None:
         """Forward agent state to the UI and narrate useful, throttled progress."""
