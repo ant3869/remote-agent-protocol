@@ -8,6 +8,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.4.3] - 2026-07-07
+
+### Fixed
+
+- The intent classifier no longer times out on every turn. Pairing the 5GB
+  `gemma-e4b-aggressive` classifier with a 12B voice model overflowed a 16GB
+  GPU: their combined loaded footprint didn't fit, so Ollama reloaded a model
+  each turn and the classifier hit its timeout every time -- indirect requests
+  silently fell back to chat, so the assistant appeared to restate the request
+  instead of dispatching it and relaying the agent's answer. The default
+  classifier is `llama3.2:1b` again, which co-resides with a 12B voice model.
+- `env.example` presets now spell out the VRAM constraint: on 16GB you can pair
+  a 12B voice model with the tiny classifier, or a small voice model with the
+  accurate `gemma-e4b-aggressive` classifier, but not both large at once.
+
 ## [1.4.2] - 2026-07-07
 
 ### Fixed

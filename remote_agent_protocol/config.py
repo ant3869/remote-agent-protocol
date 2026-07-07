@@ -514,18 +514,25 @@ AGENT_DEFAULT_BACKEND = _env("AGENT_DEFAULT_BACKEND", "hermes")
 # confidence, tier, and reason.
 # ---------------------------------------------------------------------------
 INTENT_ROUTER_ENABLED = _env_bool("INTENT_ROUTER_ENABLED", True)
-# Any local Ollama model tag. Default is gemma-e4b-aggressive: it scored 92% on
-# the voice_probe routing corpus at ~0.8s/call, far ahead of the old tiny
-# default (llama3.2:1b, ~49% -- it hallucinated tasks from plain chat) and of
-# larger models that were both slower and less accurate at schema-constrained
-# JSON (see voice_probe/README.md). Thinking is disabled automatically so
-# thinking-capable models return JSON instead of empty output.
-INTENT_MODEL = _env("INTENT_MODEL", "") or "gemma-e4b-aggressive"
-# Classifier budget per utterance; on timeout the utterance stays chat (the
-# free tiers have already had their say), so a slow/busy Ollama can delay a
-# turn by at most this much and never stalls the pipeline. 3s leaves headroom
-# for the ~0.9s p95 classifier under GPU contention with the resident voice model.
-INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "3.0"))
+# Any local Ollama model tag. Deliberately tiny by default: the classifier and
+# the voice model are BOTH resident, and their loaded footprint (weights +
+# KV-cache) must fit the GPU or Ollama swaps them every turn and the classifier
+# times out on the cold reload. On a 16GB card a 5GB classifier (6.4GB loaded)
+# beside the 12B voice model (10GB loaded) overflows -> 0 successes, 10 timeouts
+# in one session (jess_runtime.log 2026-07-07 01:19+). llama3.2:1b (3GB loaded)
+# fits beside the 12B voice and classifies in ~0.9s warm.
+#
+# gemma-e4b-aggressive is far more accurate on voice_probe (92% vs ~49%) and is
+# the right classifier when paired with a SMALL voice model (both ~6GB -> fit);
+# see the Snappy preset in env.example. It just cannot co-reside with a 12B
+# voice model here. Thinking is disabled automatically either way so a
+# thinking-capable classifier returns JSON instead of empty output.
+INTENT_MODEL = _env("INTENT_MODEL", "") or MEM0_LLM_MODEL
+# Budget per utterance; on timeout the turn stays chat (the free tiers already
+# had their say), so a slow/busy Ollama delays a turn by at most this much and
+# never stalls the pipeline. 2s covers the tiny classifier's ~0.9s warm call
+# with headroom; raise it only for a larger, slower-loading classifier.
+INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "2.0"))
 # At/above dispatch confidence a task runs. Between confirm and dispatch is
 # the uncertain band: read-only lookups run anyway (a wrong lookup is
 # harmless), state-changing tasks are held for a spoken yes/no. Below the

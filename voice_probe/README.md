@@ -86,9 +86,19 @@ done
 
 Each writes a `run-live-<model>-<ts>.{jsonl,md,html}` so results don't collide.
 A model whose p95 exceeds `INTENT_TIMEOUT_SECS` will time out in production and
-silently degrade turns to chat — the report flags those as `latency`. Two
-resident models (voice + classifier) also share VRAM, so favor a small, fast,
-accurate classifier over the biggest one.
+silently degrade turns to chat — the report flags those as `latency`.
+
+> **Isolation caveat (learned the hard way).** These benchmarks load *only* the
+> classifier, so they report its best-case latency. In the running app the
+> classifier and the voice model are **both resident**, and their combined
+> *loaded* footprint (weights + KV-cache, larger than the file size) must fit
+> the GPU. A classifier that benchmarks at 0.8s alone can time out on **every**
+> turn in production if it doesn't co-reside with the voice model and Ollama
+> reloads it each turn. On 16GB, a 12B voice model (~10GB loaded) leaves room
+> only for a ~3GB classifier (`llama3.2:1b`); the accurate ~5GB
+> `gemma-e4b-aggressive` (6.4GB loaded) only fits beside a small voice model.
+> Always confirm the winning classifier stays resident with `ollama ps` while
+> the app is running — the benchmark pass rate is necessary but not sufficient.
 
 ## The test corpus (`corpus.py`)
 
