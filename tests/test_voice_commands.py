@@ -1,5 +1,6 @@
 import unittest
 
+from remote_agent_protocol import config as cfg
 from remote_agent_protocol import voice_commands
 
 BACKENDS = {"mock": [], "hermes": [], "hermes-yolo": [], "code-puppy": []}
@@ -360,13 +361,61 @@ class RequiresConfirmationTests(unittest.TestCase):
         self.assertTrue(self.req("hermes", "uninstall that app"))
 
     def test_space_bounded_words_avoid_false_positives(self):
-        # " rm " is space-padded in config so it only trips on the real command,
-        # not on words like "storm" or "warm".
+        # "rm" is matched as a whole word, so it only trips on the real command,
+        # never on words that embed it like "storm" or "warm".
         self.assertFalse(
             voice_commands.requires_confirmation(
-                "hermes", "the storm is warm", destructive_words=(" rm ",)
+                "hermes", "the storm is warm", destructive_words=("rm",)
             )
         )
+
+    def test_whole_word_matching_ignores_lookalike_stems(self):
+        # Short destructive stems must not trip on unrelated words that embed
+        # them: "kill" in "skill", "drop" in "dropbox", "install" in the noun
+        # "installer". (The past participle "installed" still matches via the
+        # inflection rule; a benign over-confirm on a read-only package list is
+        # the accepted safe direction.)
+        words = ("kill", "drop", "install", "empty")
+        for benign in (
+            "back up my files to dropbox",
+            "go grab the chrome installer",
+            "brainstorm a new skill idea",
+        ):
+            self.assertFalse(
+                voice_commands.requires_confirmation("hermes", benign, destructive_words=words),
+                benign,
+            )
+
+    def test_newly_covered_destructive_verbs_confirm(self):
+        # Data-loss / system verbs the old substring list missed. Uses the real
+        # shipped vocabulary, which is where these verbs now live.
+        for task in (
+            "empty the recycle bin",
+            "kill all the chrome processes",
+            "disable my firewall",
+            "run rm -rf on my home directory",
+        ):
+            self.assertTrue(
+                voice_commands.requires_confirmation(
+                    "hermes", task, destructive_words=cfg.AGENT_DESTRUCTIVE_WORDS
+                ),
+                task,
+            )
+
+    def test_informational_lookup_about_destructive_action_is_not_gated(self):
+        # A request for INSTRUCTIONS is a read-only lookup, even though it names
+        # a destructive verb -- the agent researches, it does not destroy.
+        for task in (
+            "search the web for how to permanently delete a facebook account",
+            "how do i uninstall a stubborn program",
+            "what happens if i format the wrong drive",
+        ):
+            self.assertFalse(self.req("hermes", task), task)
+
+    def test_destructive_imperative_still_gates_even_with_how_to_after(self):
+        # But if the utterance OPENS with the destructive command, the trailing
+        # "how to" framing must not smuggle it past the gate.
+        self.assertTrue(self.req("hermes", "delete everything, here's how to do it"))
 
 
 class ClassifyConfirmationReplyTests(unittest.TestCase):

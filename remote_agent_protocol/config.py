@@ -444,18 +444,29 @@ AGENT_CONFIRM_ENABLED = _env_bool("AGENT_CONFIRM_ENABLED", True)
 # between, stop looping and tell the user instead of relaunching forever.
 AGENT_CONFIRM_LOOP_LIMIT = int(_env("AGENT_CONFIRM_LOOP_LIMIT", "2"))
 # Task text containing any of these verbs is treated as destructive and needs
-# confirming regardless of which backend it targets.
+# confirming regardless of which backend it targets. Matched as whole words
+# (with common inflections) by voice_commands.requires_confirmation, so short
+# stems are safe here -- "kill" no longer trips on "skill", "rm" not on "storm",
+# "drop" not on "dropbox" -- and no manual space-padding is needed.
 AGENT_DESTRUCTIVE_WORDS = (
     "delete",
     "remove",
-    " rm ",
+    "rm",
     "erase",
     "wipe",
+    "shred",
     "format",
-    "install",  # covers "uninstall" too -- both mutate the system either way
+    "install",  # verb form only; "installed"/"installer" state words don't match
     "uninstall",
+    "reinstall",
     "drop",
     "destroy",
+    "purge",
+    "truncate",
+    "revoke",
+    "empty",  # "empty the recycle bin" is data loss, not a benign action
+    "kill",  # "kill the process"
+    "disable",  # "disable the firewall" -- security-sensitive
     "shutdown",
     "shut down",
     "reboot",

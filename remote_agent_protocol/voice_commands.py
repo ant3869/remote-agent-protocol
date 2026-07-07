@@ -9,6 +9,7 @@ them, so the session can actually start the job.
 Pure functions only -- no pipecat imports, fully unit-testable.
 """
 
+import functools
 import re
 
 # Leading fluff we tolerate before the actual command verb.
@@ -595,6 +596,35 @@ def looks_like_stt_noise(text: str) -> bool:
     return not _WORD_RE.findall(lowered)
 
 
+# Instructional / research framing around a destructive verb. "How to delete an
+# account", "search the web for how to uninstall X", "what happens if I wipe the
+# disk" are read-only lookups -- the agent researches, it does not destroy -- so
+# a destructive word appearing inside one must NOT force a confirmation.
+_INFORMATIONAL_LOOKUP_RE = re.compile(
+    r"\b(?:how\s+to|how\s+(?:do|can|would|should|might)\s+(?:i|you|we)|"
+    r"what\s+(?:happens|would\s+happen)\s+if|ways?\s+to|"
+    r"guide\s+(?:to|on|for)|tutorial\s+(?:on|for)|learn\s+(?:how\s+)?to|"
+    r"instructions?\s+(?:to|for|on|about))\b",
+    re.IGNORECASE,
+)
+
+
+@functools.lru_cache(maxsize=8)
+def _destructive_pattern(destructive_words: tuple[str, ...]) -> re.Pattern | None:
+    """Compile the destructive vocabulary into one whole-word matcher.
+
+    Matches each verb as a whole word with common inflections
+    (delete/deletes/deleted/deleting) so imperative, past, and plural forms all
+    trip -- but never a word that merely embeds the stem (skill, storm, dropbox,
+    installer). Multi-word entries ("shut down") allow flexible whitespace.
+    """
+    parts = [re.escape(word.strip().lower()).replace(r"\ ", r"\s+") for word in destructive_words]
+    parts = [part for part in parts if part]
+    if not parts:
+        return None
+    return re.compile(r"\b(?:" + "|".join(parts) + r")(?:s|es|ed|d|ing)?\b", re.IGNORECASE)
+
+
 def requires_confirmation(
     backend: str,
     task: str,
@@ -606,13 +636,33 @@ def requires_confirmation(
     Picking a backend IS the risk acknowledgment -- an elevated backend (e.g.
     ``hermes-yolo``, which auto-approves its own shell/file writes) no longer
     forces confirmation on top of that. The one remaining trigger is a
-    *destructive* task: its text contains a ``destructive_words`` verb like
+    *destructive* task: its text names a ``destructive_words`` verb like
     "delete"/"format"/"uninstall", regardless of which backend runs it --
     a false "needs confirming" costs one spoken sentence; a false "just do
     it" can wipe a folder.
+
+    Two refinements keep this both safe and un-annoying:
+
+    * Whole-word matching (see :func:`_destructive_pattern`) means a data-loss
+      verb like "empty the recycle bin" or "kill the process" now trips, while
+      lookalikes ("skill", "installer", "dropbox") no longer produce a spurious
+      gate.
+    * An *instructional* request about a destructive action ("how to delete an
+      account") is a read-only lookup and is not gated -- unless the utterance
+      itself opens with the destructive imperative ("delete everything, here's
+      how"), which is a real command.
     """
-    lowered_task = f" {(task or '').lower()} "
-    return any(word.strip() and word in lowered_task for word in destructive_words)
+    pattern = _destructive_pattern(tuple(destructive_words))
+    if pattern is None:
+        return False
+    lowered = (task or "").lower().strip()
+    if not pattern.search(lowered):
+        return False
+    first_word = lowered.split(" ", 1)[0] if lowered else ""
+    opens_with_destructive = bool(pattern.match(first_word))
+    if _INFORMATIONAL_LOOKUP_RE.search(lowered) and not opens_with_destructive:
+        return False
+    return True
 
 
 # Short replies that resolve a pending confirmation. Denials are checked FIRST

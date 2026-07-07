@@ -14,6 +14,10 @@ remote, and do not mix application code into it.
   `python -m remote_agent_protocol.terminal` (terminal mode).
 - App tests: `.venv\Scripts\python -m pytest tests/test_<name>.py` using the
   repo's `.venv` (not `uv run`). Lint with `.venv\Scripts\python -m ruff`.
+- Mediator test harness: `voice_probe/` probes the routing/delegation/
+  confirmation brain with a text-prompt corpus (a stand-in for speech). Run
+  `python -m voice_probe run --classifier {stub|live|off}`; see
+  `voice_probe/README.md`.
 - Runtime state is written to `data/` (gitignored). Config defaults live in
   `remote_agent_protocol/config.py`, overridable via `.env` (see `env.example`).
 - Architecture and roadmap: `docs/architecture.md`. Product changelog:

@@ -377,6 +377,12 @@ async def classify_with_ollama(
         "stream": False,
         "format": _RESPONSE_SCHEMA,
         "options": {"temperature": 0, "num_predict": 250},
+        # Disable the hidden reasoning monologue. A thinking-capable classifier
+        # model otherwise spends the whole num_predict budget in its "thinking"
+        # channel and returns empty content (done_reason=length), so json.loads
+        # fails and every turn silently degrades to chat. Ollama accepts this
+        # flag as a no-op on non-thinking models, so it is always safe to send.
+        "think": False,
         # Keep the (small) classifier model resident between turns; a cold
         # reload would eat the whole latency budget.
         "keep_alive": "30m",

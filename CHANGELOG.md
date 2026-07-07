@@ -8,6 +8,39 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.4.0] - 2026-07-06
+
+### Added
+
+- A text-driven test harness (`voice_probe`) for the routing / delegation /
+  confirmation mediator. It feeds a deliberate corpus of ~130 prompts through
+  the exact brain the voice path uses, scores each decision (chat / dispatch /
+  confirm) against a grounded expectation, classifies every failure, and writes
+  JSON, Markdown, and HTML reports. Run it with
+  `python -m voice_probe run --classifier {stub|live|off}`.
+- The harness can benchmark any local Ollama model as the intent classifier
+  (`--model <tag> --timeout <secs>`), reporting pass rate and latency so a
+  classifier can be chosen on evidence rather than guesswork.
+
+### Changed
+
+- The intent classifier now disables the model's hidden "thinking" pass. Some
+  local models spent their whole output budget reasoning and returned nothing,
+  which silently degraded every routed turn to plain chat; thinking-capable
+  models now work as the classifier.
+
+### Fixed
+
+- The confirmation gate for destructive actions now matches whole words (with
+  common inflections) instead of loose substrings. Data-loss and system
+  commands that previously slipped through unconfirmed -- "empty the recycle
+  bin", "kill the process", "disable the firewall", `rm` -- now correctly ask
+  first, while lookalikes ("installer", "dropbox", "a new skill") no longer
+  trigger a spurious confirmation.
+- Asking how to do something destructive ("search the web for how to delete an
+  account") is now treated as the read-only lookup it is, instead of being held
+  for confirmation.
+
 ## [1.3.1] - 2026-07-06
 
 ### Fixed

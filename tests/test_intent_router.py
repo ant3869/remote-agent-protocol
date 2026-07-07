@@ -573,5 +573,56 @@ class VerdictNormalizationTests(unittest.TestCase):
         self.assertIsNone(intent_router._normalize_verdict(verdict(conf="high")))
 
 
+class _FakeResp:
+    def __init__(self, content: str):
+        self._content = content
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    async def json(self):
+        return {"message": {"content": self._content}}
+
+
+class _FakeSession:
+    """Captures the POST payload so we can assert on the wire format."""
+
+    captured: dict = {}
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, json=None):
+        _FakeSession.captured = json
+        return _FakeResp(
+            '{"intent":"chat","category":"none","task":"","confidence":0.1,"reason":"x"}'
+        )
+
+
+class ClassifyPayloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_classify_disables_thinking_so_thinking_models_return_json(self):
+        # Regression: a thinking-capable classifier model spends the whole
+        # num_predict budget in its hidden channel and returns empty content
+        # unless thinking is disabled. The payload must carry think=False.
+        with patch.object(intent_router.aiohttp, "ClientSession", _FakeSession):
+            result = await intent_router.classify_with_ollama(
+                "hello", host="http://x", model="m", timeout_secs=1.0
+            )
+        self.assertEqual(_FakeSession.captured.get("think"), False)
+        self.assertEqual(result["intent"], "chat")
+
+
 if __name__ == "__main__":
     unittest.main()
