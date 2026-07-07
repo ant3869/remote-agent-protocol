@@ -8,6 +8,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.4.4] - 2026-07-07
+
+### Changed
+
+- The intent classifier's context is now capped, so it reserves far less VRAM
+  and stays resident beside the voice model instead of being reloaded (and
+  timing out) every turn. This lets a genuinely capable classifier co-reside
+  with a 12B voice model on a 16GB GPU.
+- Default classifier is now `qwen2.5:3b` (`ollama pull qwen2.5:3b`), which routes
+  at 81% on the voice_probe corpus -- far better than the tiny `llama3.2:1b`
+  (~49%) -- while loading at ~2.3GB, so it fits beside the 12B voice with room to
+  spare. So a 16GB box can now run 12B voice smarts *and* solid routing at once.
+  (The 92% `gemma-e4b-aggressive` is still too large to pair with a 12B voice;
+  use it with the small-voice "Snappy" preset -- see `env.example`.)
+
 ## [1.4.3] - 2026-07-07
 
 ### Fixed

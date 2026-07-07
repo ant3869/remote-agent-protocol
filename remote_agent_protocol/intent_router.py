@@ -376,7 +376,14 @@ async def classify_with_ollama(
         ],
         "stream": False,
         "format": _RESPONSE_SCHEMA,
-        "options": {"temperature": 0, "num_predict": 250},
+        # num_ctx caps the KV-cache the classifier reserves. Its whole prompt
+        # (system contract + one short utterance) plus the 250-token reply is
+        # well under 2K tokens, but models default to a much larger context and
+        # reserve VRAM to match -- enough that the classifier can no longer sit
+        # resident beside the voice model on a 16GB GPU, so Ollama reloads one
+        # each turn and the classifier times out. Capping it shrinks the
+        # footprint (qwen2.5:3b: 3.1GB -> 2.3GB loaded) so both stay resident.
+        "options": {"temperature": 0, "num_predict": 250, "num_ctx": 2048},
         # Disable the hidden reasoning monologue. A thinking-capable classifier
         # model otherwise spends the whole num_predict budget in its "thinking"
         # channel and returns empty content (done_reason=length), so json.loads

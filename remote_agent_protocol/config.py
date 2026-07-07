@@ -514,25 +514,23 @@ AGENT_DEFAULT_BACKEND = _env("AGENT_DEFAULT_BACKEND", "hermes")
 # confidence, tier, and reason.
 # ---------------------------------------------------------------------------
 INTENT_ROUTER_ENABLED = _env_bool("INTENT_ROUTER_ENABLED", True)
-# Any local Ollama model tag. Deliberately tiny by default: the classifier and
-# the voice model are BOTH resident, and their loaded footprint (weights +
-# KV-cache) must fit the GPU or Ollama swaps them every turn and the classifier
-# times out on the cold reload. On a 16GB card a 5GB classifier (6.4GB loaded)
-# beside the 12B voice model (10GB loaded) overflows -> 0 successes, 10 timeouts
-# in one session (jess_runtime.log 2026-07-07 01:19+). llama3.2:1b (3GB loaded)
-# fits beside the 12B voice and classifies in ~0.9s warm.
-#
-# gemma-e4b-aggressive is far more accurate on voice_probe (92% vs ~49%) and is
-# the right classifier when paired with a SMALL voice model (both ~6GB -> fit);
-# see the Snappy preset in env.example. It just cannot co-reside with a 12B
-# voice model here. Thinking is disabled automatically either way so a
-# thinking-capable classifier returns JSON instead of empty output.
-INTENT_MODEL = _env("INTENT_MODEL", "") or MEM0_LLM_MODEL
+# Any local Ollama model tag. The classifier and voice model are BOTH resident,
+# so the classifier's loaded footprint must leave room for the voice model or
+# Ollama reloads one each turn and the classifier times out (jess_runtime.log
+# 2026-07-07 01:19+: a 6.4GB classifier beside a 10GB 12B voice model overflowed
+# 16GB -> 0/10). classify_with_ollama caps the classifier's context so its
+# footprint stays small; qwen2.5:3b then loads at ~2.3GB and co-resides with a
+# 12B voice model (~12.3GB total) while routing at 81% on voice_probe -- far
+# better than the tiny llama3.2:1b (~49%). The 92% gemma-e4b-aggressive is still
+# too big (6.1GB even capped) to sit beside a 12B voice; pair it with a small
+# voice model instead (Snappy preset, env.example). Thinking is disabled
+# automatically so a thinking-capable classifier returns JSON, not empty output.
+INTENT_MODEL = _env("INTENT_MODEL", "") or "qwen2.5:3b"
 # Budget per utterance; on timeout the turn stays chat (the free tiers already
 # had their say), so a slow/busy Ollama delays a turn by at most this much and
-# never stalls the pipeline. 2s covers the tiny classifier's ~0.9s warm call
-# with headroom; raise it only for a larger, slower-loading classifier.
-INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "2.0"))
+# never stalls the pipeline. 2.5s covers qwen2.5:3b's ~1s warm call with headroom
+# for the occasional cold reload; raise it for a larger, slower classifier.
+INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "2.5"))
 # At/above dispatch confidence a task runs. Between confirm and dispatch is
 # the uncertain band: read-only lookups run anyway (a wrong lookup is
 # harmless), state-changing tasks are held for a spoken yes/no. Below the
