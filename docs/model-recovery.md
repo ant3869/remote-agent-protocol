@@ -4,10 +4,10 @@ Verified 2026-07-05 against the installed CLIs and current upstream docs.
 
 ## Supported commands
 
-| Agent | Interactive/persistent switch | One-shot override used by this app |
+| Agent | Interactive/persistent switch | Headless command used by this app |
 |---|---|---|
-| CodePuppy 0.0.591 | `/model chatgpt-gpt-5.5` | `code-puppy --model chatgpt-gpt-5.5 -p "<task>"` |
-| Hermes-Agent 0.18.0 | `/model openai-api:gpt-5.5 --global` | `hermes -z "<task>" --provider openai-api --model gpt-5.5` |
+| CodePuppy 0.0.591 | `/model chatgpt-gpt-5.5` | `code-puppy --model chatgpt-gpt-5.5 --quick-resume -p "<task>"` |
+| Hermes-Agent 0.18.0 | `/model openai-api:gpt-5.5 --global` | `hermes chat --resume <session_id> --provider openai-api --model gpt-5.5 -q "<task>"` |
 | OpenClaw 2026.1.29 | `openclaw models set openai/gpt-5.5` | Not enabled as an app backend |
 
 CodePuppy encodes the provider in its configured model key; it has no separate

@@ -114,6 +114,12 @@ step completed, waiting, blocked, completed, or failed. The bridge asks capable
 agents to emit `@@JESS_STATUS` JSON lines, derives basic tool activity from known
 CLI output, and emits a heartbeat for otherwise-silent jobs. Structured terminal
 markers finish and announce a task even when a one-shot CLI wrapper fails to exit.
+Code Puppy headless turns use `--quick-resume`, preserving the latest session for
+the job working directory's Git root and branch while starting fresh when absent.
+Hermes uses progress-visible single-query mode; the bridge captures its exit
+summary session ID and resumes that backend's session for later jobs in the same
+run. `AGENT_JOB_TIMEOUT_SECS` limits consecutive output silence rather than total
+runtime, allowing productive long jobs to continue while still reaping hangs.
 
 The same events are available to local dashboards through the v1 lifecycle
 WebSocket. Payloads have a monotonically increasing per-session sequence and

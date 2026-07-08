@@ -339,15 +339,21 @@ MEM0_SEARCH_THRESHOLD = 0.1
 AGENT_BACKENDS = {
     "mock": ["{python}", "-u", str(_ROOT / "scripts" / "mock_agent.py"), "{task}"],
     # Hermes Agent (NousResearch) -- installed at %LOCALAPPDATA%\hermes.
-    # -z = one-shot headless prompt; prints the answer to stdout and exits.
-    # Verified: `hermes -z "Reply with exactly: BRIDGE OK"` -> BRIDGE OK (~11s).
-    "hermes": ["hermes", "-z", "{task}"],
+    # Single-query mode streams progress and persists a session ID that
+    # AgentBridge resumes. --quiet would hide productive activity from the host.
+    "hermes": ["hermes", "chat", "-q", "{task}"],
     # Same, but auto-approves tool calls (file edits, shell, browsing...).
     # Powerful and DANGEROUS -- pick it knowingly, don't make it the default.
-    "hermes-yolo": ["hermes", "--yolo", "-z", "{task}"],
+    "hermes-yolo": ["hermes", "chat", "--yolo", "-q", "{task}"],
     # Code Puppy -- best for CODING tasks in a repo (pair with a working dir).
-    # -p = one-shot prompt. Verified: `code-puppy -p "..."` -> answer, exit 0.
-    "code-puppy": ["code-puppy", "-p", "{task}"],
+    # Quick-resume scopes memory to the cwd's git root + branch and starts fresh
+    # when no session exists; -p still returns control to the bridge after each turn.
+    "code-puppy": [
+        "code-puppy",
+        "--quick-resume",
+        "-p",
+        "{task}",
+    ],
     **_parse_command_map(_env("AGENT_BACKENDS_JSON", ""), "AGENT_BACKENDS_JSON"),
 }
 # Deterministic voice targets. Provider names are not guessed at runtime: each
@@ -388,9 +394,9 @@ LIFECYCLE_WS_PORT = int(_env("LIFECYCLE_WS_PORT", "8765"))
 LIFECYCLE_WS_PATH = "/events"
 LIFECYCLE_WS_QUEUE_SIZE = int(_env("LIFECYCLE_WS_QUEUE_SIZE", "64"))
 
-# How long a delegated job may run before it's force-stopped, in seconds. Five
-# minutes covers normal lookups while preventing a silent backend from hanging
-# forever; set 0 only for deliberately unbounded interactive work.
+# Maximum silence interval for a delegated job. Output resets the timer, so
+# productive multi-step work can exceed it while a stuck backend is still reaped.
+# Set 0 only for deliberately unbounded interactive work.
 AGENT_JOB_TIMEOUT_SECS = float(_env("AGENT_JOB_TIMEOUT_SECS", "300"))
 # Grace period between a polite terminate() and a hard kill() when a job is
 # cancelled or times out. Gives the agent a moment to flush output and exit.

@@ -29,6 +29,27 @@ class PureHelperTests(unittest.TestCase):
             ["code-puppy", "--model", "chatgpt-gpt-5.5", "-p", "do a thing"],
         )
 
+    def test_build_command_inserts_hermes_model_override_after_chat(self):
+        cmd = agent_bridge.build_command(
+            ["hermes", "chat", "--quiet", "-q", "{task}"],
+            "do a thing",
+            extra_args=["--provider", "openai-api", "--model", "gpt-5.5"],
+        )
+        self.assertEqual(
+            cmd,
+            [
+                "hermes",
+                "chat",
+                "--provider",
+                "openai-api",
+                "--model",
+                "gpt-5.5",
+                "--quiet",
+                "-q",
+                "do a thing",
+            ],
+        )
+
     def test_provider_failure_detection_distinguishes_quota_and_rate_limit(self):
         self.assertEqual(
             agent_bridge.detect_provider_failure("usage_limit_reached: plan exhausted"),
@@ -327,6 +348,73 @@ class BridgeLifecycleTests(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)
 
+    def test_hermes_follow_up_resumes_the_captured_session(self):
+        events: list[dict] = []
+        script = (
+            "import sys; "
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"ok",'
+            '"result":"ok"}\', flush=True); '
+            "print('session_id: 20260707_174900_abc123', flush=True); "
+            "print('ARGV ' + ' '.join(sys.argv[1:]), flush=True)"
+        )
+        backend = {
+            "hermes": [
+                "{python}",
+                "-u",
+                "-c",
+                script,
+                "chat",
+                "--quiet",
+                "-q",
+                "{task}",
+            ]
+        }
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(backend, events.append, completion_grace_secs=0.01)
+            await bridge.start("hermes", "first turn")
+            while sum(event["event"] == "finished" for event in events) < 1:
+                await asyncio.sleep(0.01)
+            second_id = await bridge.start("hermes", "follow up")
+            while sum(event["event"] == "finished" for event in events) < 2:
+                await asyncio.sleep(0.01)
+            return bridge.get(second_id)
+
+        second = self._run(scenario())
+        self.assertIn(
+            "ARGV chat --resume 20260707_174900_abc123 --quiet -q",
+            "\n".join(second.lines),
+        )
+        self.assertNotIn("session_id:", "\n".join(second.lines))
+
+    def test_hermes_follow_up_resumes_session_from_human_readable_summary(self):
+        events: list[dict] = []
+        script = (
+            "import sys; "
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"ok",'
+            '"result":"ok"}\', flush=True); '
+            "print('Session:        20260707_174900_abc123', flush=True); "
+            "print('ARGV ' + ' '.join(sys.argv[1:]), flush=True)"
+        )
+        backend = {"hermes": ["{python}", "-u", "-c", script, "chat", "-q", "{task}"]}
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(backend, events.append, completion_grace_secs=0.01)
+            await bridge.start("hermes", "first turn")
+            while sum(event["event"] == "finished" for event in events) < 1:
+                await asyncio.sleep(0.01)
+            second_id = await bridge.start("hermes", "follow up")
+            while sum(event["event"] == "finished" for event in events) < 2:
+                await asyncio.sleep(0.01)
+            return bridge.get(second_id)
+
+        second = self._run(scenario())
+        self.assertIn(
+            "ARGV chat --resume 20260707_174900_abc123 -q",
+            "\n".join(second.lines),
+        )
+        self.assertNotIn("Session:", "\n".join(second.lines))
+
     def test_execution_context_is_not_exposed_as_public_task(self):
         events: list[dict] = []
         execution_task = (
@@ -583,6 +671,33 @@ class BridgeLifecycleTests(unittest.TestCase):
         job = self._run(scenario())
         self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
         self.assertTrue(any("timeout" in line.lower() for line in job.lines))
+
+    def test_timeout_measures_inactivity_not_total_runtime(self):
+        events: list[dict] = []
+        script = (
+            "import time; "
+            "[(print(f'progress {i}', flush=True), time.sleep(0.15)) for i in range(5)]; "
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"done",'
+            '"result":"done"}\', flush=True)'
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]},
+                events.append,
+                timeout_secs=0.3,
+                completion_grace_secs=0.01,
+            )
+            job_id = await bridge.start("mock", "anything")
+            for _ in range(100):
+                if any(event["event"] == "finished" for event in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_DONE)
+        self.assertGreater(job.secs, 0.3)
 
     def test_usage_limit_fails_immediately_and_explains_recovery(self):
         events: list[dict] = []

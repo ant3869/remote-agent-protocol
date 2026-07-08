@@ -10,6 +10,22 @@ class AgentConfigTests(unittest.TestCase):
     def test_agent_jobs_have_a_bounded_default_runtime(self):
         self.assertGreater(config.AGENT_JOB_TIMEOUT_SECS, 0)
 
+    def test_code_puppy_resumes_the_workspace_session(self):
+        self.assertEqual(
+            config.AGENT_BACKENDS["code-puppy"],
+            ["code-puppy", "--quick-resume", "-p", "{task}"],
+        )
+
+    def test_hermes_uses_persistent_single_query_sessions(self):
+        self.assertEqual(
+            config.AGENT_BACKENDS["hermes"],
+            ["hermes", "chat", "-q", "{task}"],
+        )
+        self.assertEqual(
+            config.AGENT_BACKENDS["hermes-yolo"],
+            ["hermes", "chat", "--yolo", "-q", "{task}"],
+        )
+
     def test_installing_new_software_requires_confirmation(self):
         # "install a skill called agent-reach" ran straight to a live pip
         # install with no spoken confirmation (jess_runtime.log 2026-07-05

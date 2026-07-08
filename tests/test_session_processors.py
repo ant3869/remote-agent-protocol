@@ -145,6 +145,8 @@ class DelegationPromiseTests(unittest.TestCase):
             "I am dispatching the results of the diagnostic back to you via code-puppy.",
             "Allow me to access the coordinates; the Bat Computer is working on it.",
             "I shall check the recent sporting reports from the Bat Computer, sir.",
+            "I am having code-puppy update the Python GUI to change its color to blue, sir.",
+            "I am having code-puppy update the Python GUI to include the number 5, sir.",
         ):
             with self.subTest(text=text[:40]):
                 self.assertTrue(looks_like_delegation_promise(text))

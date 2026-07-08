@@ -8,6 +8,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.5.1] - 2026-07-08
+
+### Fixed
+
+- Code Puppy delegations now quick-resume the latest session scoped to the
+  working directory's Git root and branch, so follow-up jobs retain context.
+- Hermes delegations now use single-query sessions; the bridge captures each
+  backend's session ID and resumes it for follow-up jobs while leaving progress
+  output visible to the host.
+- Agent timeouts now measure consecutive silence instead of total wall-clock
+  runtime, so active multi-step installs are not killed at the five-minute mark.
+- Markerless replies such as "I am having code-puppy update..." now trigger the
+  existing confirmation guard instead of claiming work that was never launched.
+
 ## [1.5.0] - 2026-07-07
 
 ### Added

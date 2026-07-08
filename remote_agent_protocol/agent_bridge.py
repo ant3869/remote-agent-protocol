@@ -137,6 +137,10 @@ _QUESTION_MARKER_RE = re.compile(
     r"^\s*(?:follow[-_ ]?up[-_ ]?question|clarifying[-_ ]?question|question)\s*[:\-]\s*(.+)$",
     re.IGNORECASE,
 )
+_HERMES_SESSION_AGENTS = {"hermes", "hermes-yolo"}
+_HERMES_SESSION_RE = re.compile(
+    r"^(?:session_id:|Session:)\s*(\d{8}_\d{6}_[0-9a-f]{6})$", re.IGNORECASE
+)
 
 
 def _now_iso() -> str:
@@ -190,7 +194,12 @@ def build_command(
         part.replace("{task}", task).replace("{python}", sys.executable) for part in template
     ]
     if extra_args:
-        command[1:1] = extra_args
+        insert_at = (
+            command.index("chat") + 1
+            if Path(command[0]).stem.lower() == "hermes" and "chat" in command
+            else 1
+        )
+        command[insert_at:insert_at] = extra_args
     return command
 
 
@@ -497,6 +506,7 @@ class AgentBridge:
         self._model_targets = model_targets or {}
         self._model_overrides: dict[str, list[str]] = {}
         self._model_labels: dict[str, str] = {}
+        self._session_ids: dict[str, str] = {}
         self._jobs: dict[str, AgentJob] = {}
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         # Keep strong refs to the streaming tasks: asyncio only holds *weak*
@@ -581,6 +591,13 @@ class AgentBridge:
             else with_status_protocol(with_scope(task, cwd, self._scope_preamble))
         )
         command = build_command(template, command_task, extra_args=self._model_overrides.get(agent))
+        if session_id := self._session_ids.get(agent):
+            try:
+                chat_index = command.index("chat") + 1
+            except ValueError:
+                pass
+            else:
+                command[chat_index:chat_index] = ["--resume", session_id]
         try:
             proc = await asyncio.create_subprocess_exec(
                 *command,
@@ -664,9 +681,20 @@ class AgentBridge:
     async def _consume(self, job: AgentJob, proc: asyncio.subprocess.Process) -> None:
         """Drain stdout into the job's log, then wait for the exit code."""
         assert proc.stdout is not None
-        async for raw in proc.stdout:
+        while True:
+            if self._timeout_secs > 0:
+                raw = await asyncio.wait_for(proc.stdout.readline(), self._timeout_secs)
+            else:
+                raw = await proc.stdout.readline()
+            if not raw:
+                break
             line = clean_line(raw.decode("utf-8", errors="replace"))
             if not line:
+                continue
+            if job.agent in _HERMES_SESSION_AGENTS and (
+                session_match := _HERMES_SESSION_RE.fullmatch(line)
+            ):
+                self._session_ids[job.agent] = session_match.group(1)
                 continue
             failure_kind = detect_provider_failure(line)
             if failure_kind:
@@ -676,6 +704,10 @@ class AgentBridge:
             if status is not None:
                 self._apply_status(job, status)
                 if status["state"] in _TERMINAL_STATES:
+                    # Hermes query mode exits immediately after printing its
+                    # session summary, whose ID the next turn needs.
+                    if job.agent in _HERMES_SESSION_AGENTS:
+                        continue
                     await asyncio.sleep(self._completion_grace_secs)
                     await self._terminate(proc)
                     job.returncode = await proc.wait()
@@ -702,14 +734,13 @@ class AgentBridge:
             self._heartbeat(job, proc), name=f"agent-heartbeat-{job.job_id}"
         )
         try:
-            if self._timeout_secs > 0:
-                await asyncio.wait_for(self._consume(job, proc), self._timeout_secs)
-            else:
-                await self._consume(job, proc)
+            await self._consume(job, proc)
         except TimeoutError:
             timed_out = True
             await self._terminate(proc)
-            job.lines.append(f"[stopped: exceeded {self._timeout_secs:.0f}s timeout]")
+            job.lines.append(
+                f"[stopped: no output for {self._timeout_secs:.0f}s inactivity timeout]"
+            )
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
@@ -799,13 +830,16 @@ class AgentBridge:
                 and job.status == STATUS_RUNNING
                 and time.monotonic() - job._last_status >= self._progress_interval_secs
             ):
+                generic = job.action in {"", "Starting", "Still working"}
+                if generic and time.monotonic() - job._t0 < min(
+                    1.0, self._progress_interval_secs * 3
+                ):
+                    continue
                 self._apply_status(
                     job,
                     {
                         "state": STATE_IN_PROGRESS,
-                        "action": job.action
-                        if job.action not in {"", "Starting", "Still working"}
-                        else "Still working",
+                        "action": "Still working" if generic else job.action,
                     },
                     force=True,
                 )

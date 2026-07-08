@@ -193,7 +193,7 @@ _MARKER_HEAD = "[[delegate:"
 # that work will never happen.
 _PROMISE_VERB_RE = re.compile(
     r"\b(?:dispatch|summon|task|instruct|consult|deploy|engag|send|sending|"
-    r"check|verif|quer|fetch|initiat|relay|activat|run|running|working|look|ask)\w*\b",
+    r"check|verif|quer|fetch|initiat|relay|activat|updat|run|running|working|look|ask)\w*\b",
     re.IGNORECASE,
 )
 
@@ -376,9 +376,7 @@ class TranscriptTap(FrameProcessor):
                 # working, finished, handoff) -- bypasses the LLM, so it never
                 # produces LLMTextFrames. Mirror it to the transcript here or it
                 # would be spoken aloud but never shown on screen.
-                self._emit(
-                    {"type": "transcript", "role": "assistant", "text": frame.text.strip()}
-                )
+                self._emit({"type": "transcript", "role": "assistant", "text": frame.text.strip()})
         elif isinstance(frame, MetricsFrame):
             self._emit_metrics(frame)
         elif isinstance(frame, UserStoppedSpeakingFrame):
