@@ -13,7 +13,11 @@ real-time audio pipeline.
 ## Features
 
 - Voice and typed input share one brain: STT → delegation routing → memory →
-  Ollama → TTS, with live persona/voice/model switching from the GUI.
+  Ollama → TTS, with live persona/voice/model switching from the local web UI.
+- The composer can bundle held voice, typed notes, links, images, and files into
+  one reviewed prompt before the assistant or a delegated agent sees it.
+- Voice modes cover Free Talk, Wake Word, and Push To Talk, with the selected
+  mode persisted across restarts.
 - Agent jobs run as background subprocesses, stream output without blocking
   voice, follow a normalized lifecycle (started / in progress / tool running /
   waiting / blocked / completed / failed), and are announced out loud.
@@ -25,10 +29,11 @@ real-time audio pipeline.
   conversation snapshot so contextual references survive the handoff.
 - Completed jobs speak the agent's substantive result, while live tool, step,
   and last-completed fields continue advancing in the Agents panel.
-- Optional multi-wake persona routing (`WAKE_WORD_ENABLED=true` in `.env`):
-  locally installed openwakeword models are matched to personas, the
-  highest-confidence trigger wins, and persona/model/voice settings are queued
-  before command audio reaches STT. Missing secondary models are skipped.
+- Optional multi-wake persona routing (`WAKE_WORD_ENABLED=true` in `.env` or
+  Wake Word mode in the UI): locally installed openwakeword models are matched
+  to personas, repo-local models under `wake_word/wake_models` are discovered,
+  the highest-confidence trigger wins, and persona/model/voice settings are
+  queued before command audio reaches STT. Missing secondary models are skipped.
 - External dashboards can subscribe to future agent lifecycle events at
   `ws://127.0.0.1:8765/events`. The v1 stream is loopback-only and excludes raw
   agent output; see [the lifecycle API](docs/lifecycle-websocket.md).
@@ -67,7 +72,7 @@ ollama list
 
 | What | Command |
 | --- | --- |
-| Desktop control panel | `start_gui.bat` or `.venv\Scripts\python -m remote_agent_protocol` |
+| Web control center | `start_gui.bat` or `.venv\Scripts\python -m remote_agent_protocol` |
 | Terminal mode (no GUI) | `start_terminal.bat` or `.venv\Scripts\python -m remote_agent_protocol.terminal` |
 | List audio devices | `.venv\Scripts\python scripts\list_audio_devices.py` |
 | App tests | `.venv\Scripts\python -m pytest tests\test_agent_bridge.py tests\test_session_controls.py ...` |
@@ -76,7 +81,8 @@ ollama list
 
 | Path | Purpose |
 | --- | --- |
-| `remote_agent_protocol/` | The application package: GUI (`gui*.py`), voice session, agent bridge, wake word, memory, personas, config |
+| `remote_agent_protocol/` | The application package: web UI, fallback Tk GUI (`gui*.py`), voice session, agent bridge, wake word, memory, personas, config |
+| `wake_word/` | Optional repo-local wake models and training helpers for openwakeword |
 | `src/pipecat/` | Vendored Pipecat framework (merge from the `upstream` remote; do not mix app code in) |
 | `tests/test_*.py` | App unit tests live alongside the framework's tests |
 | `scripts/` | `mock_agent.py`, `smoke_agent_bridge.py`, `list_audio_devices.py`, plus upstream tooling |

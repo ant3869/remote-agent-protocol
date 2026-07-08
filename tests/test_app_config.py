@@ -4,6 +4,11 @@ from remote_agent_protocol import config
 
 
 class AgentConfigTests(unittest.TestCase):
+    def test_vad_accepts_short_low_gain_speech_onsets(self):
+        self.assertEqual(config.VAD_CONFIDENCE, 0.6)
+        self.assertEqual(config.VAD_START_SECS, 0.1)
+        self.assertEqual(config.VAD_MIN_VOLUME, 0.6)
+
     def test_ollama_clients_share_the_configured_host(self):
         self.assertEqual(config.OLLAMA_BASE_URL, f"{config.OLLAMA_HOST}/v1")
 

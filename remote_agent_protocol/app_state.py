@@ -19,6 +19,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from remote_agent_protocol import multimodal_prompt
+
 
 @dataclass
 class AppState:
@@ -26,6 +28,7 @@ class AppState:
 
     persona: str | None = None
     tool_user: str | None = None
+    voice_mode: str = multimodal_prompt.DEFAULT_VOICE_MODE
 
 
 def load_state(path: str | Path) -> AppState:
@@ -45,6 +48,7 @@ def load_state(path: str | Path) -> AppState:
     return AppState(
         persona=raw.get("persona") if isinstance(raw.get("persona"), str) else None,
         tool_user=raw.get("tool_user") if isinstance(raw.get("tool_user"), str) else None,
+        voice_mode=multimodal_prompt.normalize_voice_mode(raw.get("voice_mode")),
     )
 
 

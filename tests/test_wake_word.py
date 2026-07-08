@@ -105,6 +105,26 @@ class WakeWordConfigTests(unittest.TestCase):
 
         self.assertEqual(targets[0].persona, "Jarvis")
 
+    def test_discovers_repo_wake_models(self):
+        models = wake_word.discover_local_models()
+
+        self.assertIn("hey_luna", models)
+        self.assertIn("alice", models)
+
+    def test_config_falls_back_to_repo_model_when_default_missing(self):
+        class Cfg:
+            WAKE_WORD_ENABLED = True
+            WAKE_WORD_ENGINE = "openwakeword"
+            WAKE_WORD_MODEL = "missing_model"
+            WAKE_WORD_THRESHOLD = 0.5
+            WAKE_WORD_ACTIVE_WINDOW_SECS = 12
+            WAKE_WORD_PERSONAS = {}
+            WAKE_WORD_SWITCH_TIMEOUT_SECS = 0.5
+
+        settings = wake_word.settings_from_config(Cfg)
+
+        self.assertTrue(settings.effective_targets[0].model_path.endswith(".onnx"))
+
 
 class WakeWordGateTests(unittest.IsolatedAsyncioTestCase):
     async def test_armed_gate_drops_audio(self):

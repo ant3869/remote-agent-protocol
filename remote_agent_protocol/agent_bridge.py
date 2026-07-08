@@ -61,6 +61,12 @@ _STATUS_STATES = {
 _STATUS_MARKER = "@@JESS_STATUS"
 _STATUS_TEXT_FIELDS = ("action", "tool", "last_completed_step", "summary", "result")
 _TOOL_RE = re.compile(r"\bCalling\s+([\w-]+)", re.IGNORECASE)
+_STATUS_FRAGMENT_MAX_LINES = 12
+_STATUS_FRAGMENT_MAX_CHARS = 6000
+_SUMMARY_SKIP_RE = re.compile(
+    r"^(?:Resume this session with:|hermes\s+--resume\b|Duration:\s*|Messages:\s*)",
+    re.IGNORECASE,
+)
 
 _STATUS_PROTOCOL = """
 
@@ -273,6 +279,21 @@ def parse_status_line(line: str) -> dict | None:
     return status
 
 
+def _incomplete_status_line(line: str) -> bool:
+    """True when a status marker started but terminal wrapping split its JSON."""
+    marker = line.find(_STATUS_MARKER)
+    if marker < 0:
+        return False
+    payload = line[marker + len(_STATUS_MARKER) :].lstrip(" :")
+    if not payload.startswith("{"):
+        return False
+    try:
+        json.JSONDecoder().raw_decode(payload)
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
 def error_tail(lines: list[str]) -> str | None:
     """Return the most recent error-shaped line near the end of the output."""
     tail = [line.strip() for line in lines if line.strip()][-_ERROR_TAIL_WINDOW:]
@@ -303,7 +324,13 @@ def infer_status(line: str) -> dict | None:
 
 def summarize_output(lines: list[str], max_lines: int = 3, max_chars: int = 300) -> str:
     """Compact tail-of-log summary -- what Jess actually says out loud."""
-    tail = [line.strip() for line in lines if line.strip()][-max_lines:]
+    tail = [
+        line.strip()
+        for line in lines
+        if line.strip()
+        and not _SUMMARY_SKIP_RE.search(line.strip())
+        and not line.strip().startswith(_STATUS_MARKER)
+    ][-max_lines:]
     text = " ".join(tail)
     if len(text) > max_chars:
         text = text[: max_chars - 3] + "..."
@@ -681,6 +708,21 @@ class AgentBridge:
     async def _consume(self, job: AgentJob, proc: asyncio.subprocess.Process) -> None:
         """Drain stdout into the job's log, then wait for the exit code."""
         assert proc.stdout is not None
+        pending_status: list[str] = []
+
+        async def consume_status(status: dict) -> bool:
+            self._apply_status(job, status)
+            if status["state"] not in _TERMINAL_STATES:
+                return False
+            # Hermes query mode exits immediately after printing its session
+            # summary, whose ID the next turn needs.
+            if job.agent in _HERMES_SESSION_AGENTS:
+                return False
+            await asyncio.sleep(self._completion_grace_secs)
+            await self._terminate(proc)
+            job.returncode = await proc.wait()
+            return True
+
         while True:
             if self._timeout_secs > 0:
                 raw = await asyncio.wait_for(proc.stdout.readline(), self._timeout_secs)
@@ -700,18 +742,31 @@ class AgentBridge:
             if failure_kind:
                 job.failure_kind = failure_kind
                 job.failure_detail = line[:300]
+
+            if pending_status:
+                pending_status.append(line.strip())
+                joined = " ".join(pending_status)
+                status = parse_status_line(joined)
+                if status is not None:
+                    pending_status.clear()
+                    if await consume_status(status):
+                        return
+                    continue
+                if (
+                    len(pending_status) < _STATUS_FRAGMENT_MAX_LINES
+                    and len(joined) < _STATUS_FRAGMENT_MAX_CHARS
+                ):
+                    continue
+                pending_status.clear()
+                continue
+
             status = parse_status_line(line)
             if status is not None:
-                self._apply_status(job, status)
-                if status["state"] in _TERMINAL_STATES:
-                    # Hermes query mode exits immediately after printing its
-                    # session summary, whose ID the next turn needs.
-                    if job.agent in _HERMES_SESSION_AGENTS:
-                        continue
-                    await asyncio.sleep(self._completion_grace_secs)
-                    await self._terminate(proc)
-                    job.returncode = await proc.wait()
+                if await consume_status(status):
                     return
+                continue
+            if _incomplete_status_line(line):
+                pending_status = [line.strip()]
                 continue
             job.lines.append(line)
             del job.lines[:-_MAX_KEPT_LINES]

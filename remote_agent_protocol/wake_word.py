@@ -48,6 +48,7 @@ class WakeWordTarget:
     model: str
     persona: str
     threshold: float
+    model_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -79,69 +80,92 @@ class WakeWordStatus:
 
 def discover_local_models() -> set[str]:
     """Return canonical wake model names already installed on this machine."""
+    return set(discover_local_model_paths())
+
+
+def discover_local_model_paths() -> dict[str, str]:
+    """Return canonical wake model names mapped to local ONNX files when present."""
+    paths: dict[str, str] = {}
     spec = importlib.util.find_spec("openwakeword")
-    if spec is None or not spec.submodule_search_locations:
-        return set()
-    model_dir = Path(next(iter(spec.submodule_search_locations))) / "resources" / "models"
-    if not model_dir.is_dir():
-        return set()
-    names = set()
-    for path in model_dir.glob("*.onnx"):
-        if path.stem.startswith("hey_"):
-            names.add(re.sub(r"_v\d+(?:\.\d+)*$", "", path.stem))
-    return names
+    if spec is not None and spec.submodule_search_locations:
+        model_dir = Path(next(iter(spec.submodule_search_locations))) / "resources" / "models"
+        if model_dir.is_dir():
+            for path in model_dir.glob("*.onnx"):
+                paths.setdefault(_canonical_model_name(path.stem), str(path))
+    repo_dir = Path(__file__).resolve().parent.parent / "wake_word" / "wake_models"
+    if repo_dir.is_dir():
+        for path in repo_dir.rglob("*.onnx"):
+            paths[_canonical_model_name(path.stem)] = str(path)
+    return paths
+
+
+def _canonical_model_name(name: str) -> str:
+    """Normalize model file names and detector score keys for matching."""
+    name = re.sub(r"_v\d+(?:\.\d+)*$", "", Path(name).stem)
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
 def resolve_targets(
     mapping: dict[str, str],
     *,
-    available_models: set[str],
+    available_models: set[str] | dict[str, str],
     persona_names: set[str],
     threshold: float,
 ) -> tuple[WakeWordTarget, ...]:
     """Resolve explicit mappings or match installed model names to personas."""
+    model_paths = available_models if isinstance(available_models, dict) else {}
+    available_names = set(model_paths or available_models)
     if mapping:
         pairs = mapping.items()
     else:
         personas_by_key = {name.lower().replace(" ", "_"): name for name in persona_names}
         pairs = (
             (model, personas_by_key[model.removeprefix("hey_").lower()])
-            for model in sorted(available_models)
+            for model in sorted(available_names)
             if model.removeprefix("hey_").lower() in personas_by_key
         )
     targets = []
     for model, persona in pairs:
-        if model not in available_models:
+        canonical = _canonical_model_name(model)
+        if canonical not in available_names:
             logger.warning(f"Wake model '{model}' is not installed; skipping persona '{persona}'")
         elif persona not in persona_names:
             logger.warning(f"Wake model '{model}' names unknown persona '{persona}'; skipping")
         else:
-            targets.append(WakeWordTarget(model, persona, threshold))
+            targets.append(
+                WakeWordTarget(canonical, persona, threshold, model_paths.get(canonical, ""))
+            )
     return tuple(targets)
 
 
-def settings_from_config(cfg) -> WakeWordSettings:
+def settings_from_config(cfg, *, enabled: bool | None = None) -> WakeWordSettings:
     """Build WakeWordSettings from the app config module."""
     targets = ()
-    if cfg.WAKE_WORD_ENABLED:
+    wake_enabled = cfg.WAKE_WORD_ENABLED if enabled is None else enabled
+    model_paths = discover_local_model_paths()
+    if wake_enabled:
         from remote_agent_protocol import personas
 
         targets = resolve_targets(
             getattr(cfg, "WAKE_WORD_PERSONAS", {}),
-            available_models=discover_local_models(),
+            available_models=model_paths,
             persona_names=set(personas.names()),
             threshold=cfg.WAKE_WORD_THRESHOLD,
         )
         if not targets:
+            model = _canonical_model_name(cfg.WAKE_WORD_MODEL)
+            if model not in model_paths and model_paths:
+                model = sorted(model_paths)[0]
             targets = (
                 WakeWordTarget(
-                    cfg.WAKE_WORD_MODEL,
+                    model,
                     getattr(cfg, "DEFAULT_PERSONA_NAME", ""),
                     cfg.WAKE_WORD_THRESHOLD,
+                    model_paths.get(model, ""),
                 ),
             )
     return WakeWordSettings(
-        enabled=cfg.WAKE_WORD_ENABLED,
+        enabled=wake_enabled,
         engine=cfg.WAKE_WORD_ENGINE,
         model=cfg.WAKE_WORD_MODEL,
         threshold=cfg.WAKE_WORD_THRESHOLD,
@@ -184,7 +208,9 @@ def _openwakeword_detector(settings: WakeWordSettings):
 
     def build() -> Model:
         return Model(
-            wakeword_models=[target.model for target in settings.effective_targets],
+            wakeword_models=[
+                target.model_path or target.model for target in settings.effective_targets
+            ],
             inference_framework="onnx",
         )
 
@@ -192,7 +218,9 @@ def _openwakeword_detector(settings: WakeWordSettings):
         return build()
     except Exception:
         # 0.6.x ships without model files; fetch just what we need (one time).
-        models = [target.model for target in settings.effective_targets]
+        models = [target.model for target in settings.effective_targets if not target.model_path]
+        if not models:
+            raise
         logger.info(f"Downloading openwakeword models: {', '.join(models)}")
         from openwakeword.utils import download_models
 
@@ -247,6 +275,7 @@ class WakeWordGate(FrameProcessor):
         self._on_persona = on_persona
         self._detector = None
         self._bypass = False
+        self.enabled = settings.enabled
         self._awake_until = 0.0
         self._user_speaking = False
         self._buffer = bytearray()
@@ -287,10 +316,13 @@ class WakeWordGate(FrameProcessor):
         """Gate input audio; pass every other frame through untouched."""
         await super().process_frame(frame, direction)
         if isinstance(frame, StartFrame):
-            await self._setup_detector()
+            if self.enabled:
+                await self._setup_detector()
+            else:
+                self._emit("inactive")
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            if not self._bypass:
+            if self.enabled and not self._bypass:
                 self._open_window()
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotStartedSpeakingFrame):
@@ -301,10 +333,15 @@ class WakeWordGate(FrameProcessor):
             await self.push_frame(frame, direction)
         elif isinstance(frame, UserStoppedSpeakingFrame):
             self._user_speaking = False
-            if not self._bypass and self._awake_until:
+            if self.enabled and not self._bypass and self._awake_until:
                 self._open_window()  # each finished turn earns a fresh window
             await self.push_frame(frame, direction)
         elif isinstance(frame, InputAudioRawFrame):
+            if not self.enabled:
+                await self.push_frame(frame, direction)
+                return
+            if self._detector is None and not self._bypass:
+                await self._setup_detector()
             if self._bypass or not self._gateable(frame):
                 await self.push_frame(frame, direction)
             elif self._user_speaking:  # never cut off mid-utterance
@@ -326,6 +363,15 @@ class WakeWordGate(FrameProcessor):
         else:
             await self.push_frame(frame, direction)
 
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable passive wake gating without rebuilding the pipeline."""
+        if self.enabled == enabled:
+            return
+        self.enabled = enabled
+        self._awake_until = 0.0
+        self._buffer.clear()
+        self._emit("armed" if enabled else "inactive")
+
     async def _setup_detector(self) -> None:
         try:
             self._detector = await asyncio.to_thread(self._detector_factory, self._settings)
@@ -334,9 +380,9 @@ class WakeWordGate(FrameProcessor):
             logger.warning(f"Wake word engine unavailable ({exc}); staying always-listening")
             self._emit("bypass")
             return
-        self._emit("armed")
+        self._emit("armed" if self.enabled else "inactive")
         models = ", ".join(target.model for target in self._settings.effective_targets)
-        logger.info(f"Wake word gate armed: say one of [{models}] to open the mic")
+        logger.info(f"Wake word gate ready: [{models}]")
 
     def _gateable(self, frame: InputAudioRawFrame) -> bool:
         """Only gate the format the detector understands; otherwise pass audio."""
@@ -399,8 +445,7 @@ class WakeWordGate(FrameProcessor):
                     (
                         value
                         for model, value in scores.items()
-                        if model == target.model
-                        or re.sub(r"_v\d+(?:\.\d+)*$", "", model) == target.model
+                        if model == target.model or _canonical_model_name(model) == target.model
                     ),
                     0.0,
                 )

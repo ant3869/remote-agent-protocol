@@ -61,9 +61,12 @@ class ConfigPanel:
             font=theme.FONT_SMALL,
         ).pack(anchor="w")
 
-        toolbar = Frame(self.win, bg=theme.BG, padx=20)
-        toolbar.pack(fill=X)
-        Label(toolbar, text="PERSONA", bg=theme.BG, fg=theme.DIM, font=theme.FONT_SECTION).pack(
+        toolbar_panel = theme.panel(
+            self.win, bg=theme.CARD, border=theme.BORDER_LIGHT, pad=14, radius=22
+        )
+        toolbar_panel.pack(fill=X, padx=20)
+        toolbar = toolbar_panel.body
+        Label(toolbar, text="PERSONA", bg=theme.CARD, fg=theme.DIM, font=theme.FONT_SECTION).pack(
             side="left", padx=(0, 8)
         )
         self.persona_var = StringVar(value=self._current_name)
@@ -80,8 +83,11 @@ class ConfigPanel:
         )
         theme.button(toolbar, "Save persona", self._save_current, kind="primary").pack(side=RIGHT)
 
-        body = theme.card(self.win, pad=theme.PAD)
-        body.pack(fill=BOTH, expand=True, padx=20, pady=14)
+        body_panel = theme.panel(
+            self.win, bg=theme.CARD, border=theme.BORDER_LIGHT, pad=theme.PAD, radius=24, glow=True
+        )
+        body_panel.pack(fill=BOTH, expand=True, padx=20, pady=14)
+        body = body_panel.body
 
         self.voice_var = StringVar()
         self.backend_var = StringVar()

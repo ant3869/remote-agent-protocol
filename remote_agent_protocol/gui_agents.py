@@ -140,8 +140,9 @@ class AgentsPanel:
             font=theme.FONT_SMALL,
         ).pack(anchor="w")
 
-        form = theme.card(win, pad=12)
-        form.pack(fill=X, padx=20)
+        form_panel = theme.panel(win, bg=theme.CARD, border=theme.BORDER_LIGHT, pad=14, radius=22)
+        form_panel.pack(fill=X, padx=20)
+        form = form_panel.body
         row = Frame(form, bg=theme.CARD)
         row.pack(fill=X)
         Label(row, text="AGENT", bg=theme.CARD, fg=theme.DIM, font=theme.FONT_SECTION).pack(
@@ -183,32 +184,43 @@ class AgentsPanel:
         panes = Frame(win, bg=theme.BG, padx=20, pady=14)
         panes.pack(fill=BOTH, expand=True)
 
-        left = Frame(panes, bg=theme.BG, width=330)
-        left.pack(side=LEFT, fill="y", padx=(0, theme.GAP))
-        left.pack_propagate(False)
-        self._jobs_header = Label(left, text="Jobs", bg=theme.BG, fg=theme.FG, font=theme.FONT_H2)
-        self._jobs_header.pack(anchor="w", pady=(0, 6))
+        left_panel = theme.panel(panes, bg=theme.CARD, border=theme.BORDER, pad=0, radius=22)
+        left_panel.pack(side=LEFT, fill="y", padx=(0, theme.GAP))
+        left_panel.configure(width=340)
+        left_panel.pack_propagate(False)
+        left = left_panel.body
+        left.configure(padx=0, pady=0)
+        header = Frame(left, bg=theme.CARD, padx=14, pady=10)
+        header.pack(fill=X)
+        self._jobs_header = Label(
+            header, text="Jobs", bg=theme.CARD, fg=theme.FG, font=theme.FONT_H2
+        )
+        self._jobs_header.pack(side=LEFT)
         self.job_list = theme.listbox(left)
-        self.job_list.pack(fill=BOTH, expand=True)
+        self.job_list.pack(fill=BOTH, expand=True, padx=1)
         self.job_list.bind("<<ListboxSelect>>", lambda _e: self._show_log())
-        btns = Frame(left, bg=theme.BG)
-        btns.pack(fill=X, pady=(theme.GAP_SM, 0))
+        btns = Frame(left, bg=theme.CARD, padx=12, pady=12)
+        btns.pack(fill=X)
         theme.button(btns, "Cancel", self._cancel_selected, kind="danger").pack(side=LEFT)
         theme.button(btns, "Clear finished", self._clear_finished, kind="ghost").pack(
             side=LEFT, padx=(theme.GAP_SM, 0)
         )
 
-        right = Frame(panes, bg=theme.BG)
-        right.pack(side=LEFT, fill=BOTH, expand=True)
-        Label(right, text="Live output", bg=theme.BG, fg=theme.FG, font=theme.FONT_H2).pack(
-            anchor="w", pady=(0, 6)
-        )
+        right_panel = theme.panel(panes, bg=theme.CARD, border=theme.BORDER_LIGHT, pad=0, radius=22)
+        right_panel.pack(side=LEFT, fill=BOTH, expand=True)
+        right = right_panel.body
+        right.configure(padx=0, pady=0)
+        right_header = Frame(right, bg=theme.CARD, padx=14, pady=10)
+        right_header.pack(fill=X)
+        Label(
+            right_header, text="Live output", bg=theme.CARD, fg=theme.FG, font=theme.FONT_H2
+        ).pack(side=LEFT)
         self.log = theme.scrolled_text(right, font=theme.FONT_MONO_SMALL)
-        self.log.frame.pack(fill=BOTH, expand=True)
+        self.log.frame.pack(fill=BOTH, expand=True, padx=1)
         self.log.tag_config("dim", foreground=theme.DIM)
         self.log.configure(state="disabled")
-        rbtns = Frame(right, bg=theme.BG)
-        rbtns.pack(fill=X, pady=(theme.GAP_SM, 0))
+        rbtns = Frame(right, bg=theme.CARD, padx=12, pady=12)
+        rbtns.pack(fill=X)
         theme.button(rbtns, "Copy output", self._copy_output).pack(side=LEFT)
         theme.button(rbtns, "Speak result", self._speak_result).pack(
             side=LEFT, padx=(theme.GAP_SM, 0)
@@ -272,7 +284,9 @@ class AgentsPanel:
         if job_id is None:
             return
         job = self._jobs[job_id]
-        spoken = job.get("result") or job.get("summary") or agent_bridge.summarize_output(job["lines"])
+        spoken = (
+            job.get("result") or job.get("summary") or agent_bridge.summarize_output(job["lines"])
+        )
         if spoken:
             self._session.announce_text(
                 f"Result of task '{job['task']}' on agent '{job['agent']}': {spoken}"

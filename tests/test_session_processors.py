@@ -15,9 +15,11 @@ from pipecat.frames.frames import (
 )
 from pipecat.metrics.metrics import TTFBMetricsData
 from pipecat.tests.utils import run_test
+from remote_agent_protocol import multimodal_prompt
 from remote_agent_protocol.session_processors import (
     DelegationTap,
     LLMDelegateTap,
+    ManualPromptDraftTap,
     MicGate,
     STTNoiseFilter,
     TranscriptTap,
@@ -44,6 +46,16 @@ class MicGateTests(unittest.IsolatedAsyncioTestCase):
         # muted, not hot.
         await run_test(
             MicGate(muted=True),
+            frames_to_send=[audio_frame()],
+            expected_down_frames=[],
+        )
+
+    async def test_input_disabled_drops_audio_for_push_to_talk_idle(self):
+        gate = MicGate()
+        gate.input_enabled = False
+
+        await run_test(
+            gate,
             frames_to_send=[audio_frame()],
             expected_down_frames=[],
         )
@@ -83,6 +95,75 @@ class STTNoiseFilterTests(unittest.IsolatedAsyncioTestCase):
             frames_to_send=[self._transcript("Thank you."), self._transcript("open the file")],
             expected_down_frames=[TranscriptionFrame],  # only the real one survives
         )
+
+
+class ManualPromptDraftTapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_mode_holds_transcript_as_draft(self):
+        events = []
+        tap = ManualPromptDraftTap(lambda: True, lambda text, intent: events.append((text, intent)))
+
+        await run_test(
+            tap,
+            frames_to_send=[
+                TranscriptionFrame(text="look at the highlighted part", user_id="u", timestamp="t")
+            ],
+            expected_down_frames=[],
+        )
+
+        self.assertEqual(events, [("look at the highlighted part", "")])
+
+    async def test_send_it_now_is_draft_intent_not_llm_text(self):
+        events = []
+        tap = ManualPromptDraftTap(lambda: True, lambda text, intent: events.append((text, intent)))
+
+        await run_test(
+            tap,
+            frames_to_send=[TranscriptionFrame(text="send it now", user_id="u", timestamp="t")],
+            expected_down_frames=[],
+        )
+
+        self.assertEqual(events, [("send it now", "send")])
+
+    async def test_disabled_mode_passes_transcript_through(self):
+        tap = ManualPromptDraftTap(lambda: False, lambda *_: None)
+
+        await run_test(
+            tap,
+            frames_to_send=[TranscriptionFrame(text="hello", user_id="u", timestamp="t")],
+            expected_down_frames=[TranscriptionFrame],
+        )
+
+    async def test_context_aware_mode_passes_normal_free_talk(self):
+        events = []
+        tap = ManualPromptDraftTap(
+            lambda text: bool(multimodal_prompt.context_signals(text)),
+            lambda text, intent: events.append((text, intent)),
+        )
+
+        await run_test(
+            tap,
+            frames_to_send=[TranscriptionFrame(text="hello there", user_id="u", timestamp="t")],
+            expected_down_frames=[TranscriptionFrame],
+        )
+
+        self.assertEqual(events, [])
+
+    async def test_context_aware_mode_holds_context_reference(self):
+        events = []
+        tap = ManualPromptDraftTap(
+            lambda text: bool(multimodal_prompt.context_signals(text)),
+            lambda text, intent: events.append((text, intent)),
+        )
+
+        await run_test(
+            tap,
+            frames_to_send=[
+                TranscriptionFrame(text="look at this screenshot", user_id="u", timestamp="t")
+            ],
+            expected_down_frames=[],
+        )
+
+        self.assertEqual(events, [("look at this screenshot", "")])
 
 
 class DelegationTapTests(unittest.IsolatedAsyncioTestCase):

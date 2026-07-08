@@ -14,12 +14,20 @@ class AppStateFileTests(unittest.TestCase):
         self._dir.cleanup()
 
     def test_roundtrip(self):
-        app_state.save_state(self.path, app_state.AppState(persona="Butler", tool_user="mock"))
+        app_state.save_state(
+            self.path,
+            app_state.AppState(
+                persona="Butler",
+                tool_user="mock",
+                voice_mode="push_to_talk",
+            ),
+        )
 
         loaded = app_state.load_state(self.path)
 
         self.assertEqual(loaded.persona, "Butler")
         self.assertEqual(loaded.tool_user, "mock")
+        self.assertEqual(loaded.voice_mode, "push_to_talk")
 
     def test_save_leaves_no_temp_file(self):
         app_state.save_state(self.path, app_state.AppState(persona="Jess"))
@@ -46,6 +54,14 @@ class AppStateFileTests(unittest.TestCase):
 
         self.assertIsNone(state.persona)
         self.assertIsNone(state.tool_user)
+        self.assertEqual(state.voice_mode, "free_talk")
+
+    def test_unknown_voice_mode_falls_back_to_free_talk(self):
+        self.path.write_text('{"voice_mode": "banana"}', encoding="utf-8")
+
+        state = app_state.load_state(self.path)
+
+        self.assertEqual(state.voice_mode, "free_talk")
 
     def test_empty_path_disables_persistence(self):
         self.assertEqual(app_state.load_state(""), app_state.AppState())

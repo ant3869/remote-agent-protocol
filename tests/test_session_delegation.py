@@ -50,6 +50,14 @@ class RecordingLifecycleServer:
 
 
 class SessionDelegationTests(unittest.TestCase):
+    def test_system_prompt_keeps_hermes_female(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+
+        prompt = voice_session._system_instruction()
+
+        self.assertIn("Hermes is female", prompt)
+        self.assertIn("do not refer to her with male-coded terms", prompt)
+
     def test_implicit_delegation_uses_runtime_default_backend(self):
         parsed = session_processors.resolve_delegation(
             "go and find me the top 5 trending github repos",

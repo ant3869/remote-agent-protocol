@@ -8,14 +8,16 @@ comes from the shared design system in gui_theme.
 import asyncio
 import queue
 import threading
+import time
 from pathlib import Path
-from tkinter import BOTH, END, LEFT, RIGHT, Button, Frame, Label, StringVar, Tk, X, ttk
+from tkinter import BOTH, END, LEFT, RIGHT, Button, Frame, Label, StringVar, Tk, X, filedialog, ttk
 
 from remote_agent_protocol import (
     app_state,
     dashboard,
     diagnostics,
     logging_setup,
+    multimodal_prompt,
     ollama_models,
     persona_config,
     personas,
@@ -29,11 +31,12 @@ from remote_agent_protocol import gui_theme as theme
 from remote_agent_protocol.gui_agents import AgentsPanel
 from remote_agent_protocol.gui_config import ConfigPanel
 from remote_agent_protocol.gui_memory import MemoryPanel
+from remote_agent_protocol.gui_setup import SetupWizard
 from remote_agent_protocol.session import VoiceSession
 
 logging_setup.setup_logging(cfg.DEBUG_MODE)
 
-_SESSION_TONES = {"ready": "ok", "failed": "danger", "building": "warn", "starting": "warn"}
+_SESSION_TONES = {"ready": "ok", "failed": "danger", "building": "accent", "starting": "accent"}
 _LATENCY_KEYS = ("stt", "llm", "tts", "total")
 
 
@@ -66,6 +69,9 @@ class VoiceGUI:
         )
         self._persona = self._persona_by_name(boot_name)
         self._session = VoiceSession(self._persona, on_event=self._events.put)
+        self._session.set_manual_prompt_mode(True)
+        self._voice_mode = multimodal_prompt.normalize_voice_mode(self._app_state.voice_mode)
+        self._session.set_voice_mode(self._voice_mode)
         self._session.set_voicebox_warmup_personas(
             persona_config.voicebox_personas(personas.PERSONAS, self._persona_config)
         )
@@ -78,14 +84,21 @@ class VoiceGUI:
         self._pending_confirms: list[dict] = []
         # Last agent-stream line written to the transcript, to dedupe tool spam.
         self._last_agent_stream = ""
+        self._draft_attachments: list[multimodal_prompt.PromptAttachment] = []
+        self._draft_voice_text = ""
+        self._draft_context_signals: list[str] = []
+        self._draft_send_reason = "manual_send"
+        self._draft_touched_at = time.monotonic()
         self._voice_map = self._build_voice_map()
         self._voice_labels = {v: k for k, v in self._voice_map.items()}
         self._models = self._model_choices()
         self._latency = dashboard.LatencyState()
+        self._server_status_text = "checking"
 
         self._build_window()
         self._memory = MemoryPanel(self.root, self._session, self._append_sys)
         self._agents = AgentsPanel(self.root, self._session, self._append_agent)
+        self._setup_wizard = SetupWizard(self.root, self._session)
         self._config_panel = ConfigPanel(
             self.root,
             self._voice_map,
@@ -122,7 +135,7 @@ class VoiceGUI:
         self.root = Tk()
         self.root.title(cfg.APP_NAME)
         self.root.configure(bg=theme.BG)
-        self.root.geometry("1280x760+40+40")
+        self.root.geometry("1320x800+40+40")
         self.root.minsize(1040, 680)
 
         theme.init_style(self.root)
@@ -137,36 +150,38 @@ class VoiceGUI:
         shell = Frame(self.root, bg=theme.BG)
         shell.pack(fill=BOTH, expand=True)
 
-        self.topbar = Frame(shell, bg=theme.SURFACE, height=64, padx=20, pady=12)
+        self.topbar = Frame(shell, bg=theme.BG, height=78, padx=28, pady=16)
         self.topbar.pack(fill=X)
         self.topbar.pack_propagate(False)
         self._build_topbar()
 
-        body = Frame(shell, bg=theme.BG)
-        body.pack(fill=BOTH, expand=True)
+        body = Frame(shell, bg=theme.BG, padx=18)
+        body.pack(fill=BOTH, expand=True, pady=(0, 18))
 
-        self.sidebar = Frame(body, bg=theme.SURFACE, width=240, padx=14, pady=14)
-        self.sidebar.pack(side=LEFT, fill="y")
-        self.sidebar.pack_propagate(False)
+        self.sidebar_panel = theme.panel(body, bg=theme.SURFACE, pad=16, radius=24, glow=True)
+        self.sidebar_panel.configure(width=286)
+        self.sidebar_panel.pack(side=LEFT, fill="y", padx=(0, 18))
+        self.sidebar_panel.pack_propagate(False)
+        self.sidebar = self.sidebar_panel.body
 
-        self.main = Frame(body, bg=theme.BG, padx=20, pady=16)
+        self.main = Frame(body, bg=theme.BG)
         self.main.pack(side=LEFT, fill=BOTH, expand=True)
 
         self._build_sidebar()
         self._build_main_area()
 
     def _build_topbar(self) -> None:
-        brand = Frame(self.topbar, bg=theme.SURFACE)
+        brand = Frame(self.topbar, bg=theme.BG)
         brand.pack(side=LEFT)
-        Label(brand, text=cfg.APP_NAME, bg=theme.SURFACE, fg=theme.FG, font=theme.FONT_TITLE).pack(
-            anchor="w"
-        )
+        Label(
+            brand, text=cfg.APP_NAME, bg=theme.BG, fg=theme.FG, font=("Segoe UI Semibold", 18)
+        ).pack(anchor="w")
         Label(
             brand,
-            text="Local-first voice agent switchboard",
-            bg=theme.SURFACE,
-            fg=theme.DIM,
-            font=theme.FONT_SUBTITLE,
+            text="Premium local AI control center",
+            bg=theme.BG,
+            fg=theme.SUBTLE,
+            font=theme.FONT_SMALL,
         ).pack(anchor="w")
 
         # Packed right-to-left so they read: Session · Ollama · TTS · Agents.
@@ -187,24 +202,33 @@ class VoiceGUI:
         self._build_mic_card()
         self._build_telemetry()
 
-        theme.section_label(self.sidebar, "Panels").pack(anchor="w", pady=(theme.GAP, 6))
+        nav_panel = theme.panel(self.sidebar, bg=theme.CARD, border=theme.BORDER, pad=12, radius=18)
+        nav_panel.pack(fill=X, pady=(theme.GAP, 0))
+        nav = nav_panel.body
+        theme.section_label(nav, "Panels", bg=theme.CARD).pack(anchor="w", pady=(0, 8))
         for text, command in (
             ("Memory", lambda: self._memory.open()),
             ("Agents", lambda: self._agents.open()),
+            ("Setup wizard", lambda: self._setup_wizard.open()),
             ("Persona settings", lambda: self._config_panel.open()),
         ):
-            theme.button(self.sidebar, text, command, kind="ghost", anchor="w").pack(fill=X, pady=1)
+            theme.button(nav, text, command, kind="ghost", anchor="w").pack(fill=X, pady=2)
 
-        theme.section_label(self.sidebar, "Actions").pack(anchor="w", pady=(theme.GAP, 6))
+        actions_panel = theme.panel(
+            self.sidebar, bg=theme.CARD, border=theme.BORDER, pad=12, radius=18
+        )
+        actions_panel.pack(fill=X, pady=(theme.GAP, 0))
+        actions = actions_panel.body
+        theme.section_label(actions, "Actions", bg=theme.CARD).pack(anchor="w", pady=(0, 8))
         for text, command in (
             ("New chat", self._restart),
             ("Free VRAM", self._free_vram),
             ("Start Ollama", self._restart_ollama),
             ("Export diagnostics", self._export_diagnostics),
         ):
-            theme.button(self.sidebar, text, command, kind="ghost", anchor="w").pack(fill=X, pady=1)
+            theme.button(actions, text, command, kind="ghost", anchor="w").pack(fill=X, pady=2)
         theme.button(
-            self.sidebar, "Reboot session", self._restart_session, kind="danger", anchor="w"
+            actions, "Reboot session", self._restart_session, kind="danger", anchor="w"
         ).pack(fill=X, pady=(6, 0))
 
         Label(
@@ -217,25 +241,47 @@ class VoiceGUI:
         ).pack(side="bottom", anchor="w", pady=(theme.GAP, 0))
 
     def _build_mic_card(self) -> None:
-        card = theme.card(self.sidebar, pad=12)
-        card.pack(fill=X)
+        mic_panel = theme.panel(
+            self.sidebar,
+            bg=theme.GLOW_CARD,
+            border=theme.BORDER_ACTIVE,
+            pad=16,
+            radius=22,
+            glow=True,
+        )
+        mic_panel.pack(fill=X)
+        card = mic_panel.body
+        header = Frame(card, bg=theme.GLOW_CARD)
+        header.pack(fill=X, pady=(0, theme.GAP_SM))
+        Label(
+            header,
+            text=self._persona.name,
+            bg=theme.GLOW_CARD,
+            fg=theme.FG,
+            font=theme.FONT_H2,
+        ).pack(side=LEFT)
+        Label(header, text="online", bg=theme.GLOW_CARD, fg=theme.OK, font=theme.FONT_SMALL).pack(
+            side=RIGHT
+        )
         self.dot = Label(
-            card, text="●", bg=theme.CARD, fg=theme.SPEAK_OFF, font=("Segoe UI Light", 30)
+            card, text="●", bg=theme.GLOW_CARD, fg=theme.SPEAK_OFF, font=("Segoe UI Light", 40)
         )
         self.dot.pack(anchor="center")
         self.status = Label(
             card,
             text="Warming up models...",
-            bg=theme.CARD,
+            bg=theme.GLOW_CARD,
             fg=theme.SUBTLE,
             wraplength=190,
             justify="center",
-            font=theme.FONT_SMALL,
+            font=theme.FONT_STRONG,
         )
-        self.status.pack(anchor="center", pady=(0, 10))
+        self.status.pack(anchor="center", pady=(0, 12))
+        controls = Frame(card, bg=theme.GLOW_CARD)
+        controls.pack(fill=X)
         # Built directly (not via the factory): its colours flip with mute state.
         self.mute_btn = Button(
-            card,
+            controls,
             text="Mic — live",
             command=self._toggle_mute,
             bg=theme.ACCENT,
@@ -250,9 +296,50 @@ class VoiceGUI:
             highlightthickness=0,
         )
         self.mute_btn.pack(fill=X)
+        self.mode_btn = Button(
+            card,
+            text="Mode: Free Talk",
+            command=self._cycle_voice_mode,
+            bg=theme.SURFACE,
+            fg=theme.FG,
+            activebackground=theme.BORDER,
+            activeforeground=theme.FG,
+            relief="flat",
+            bd=0,
+            pady=8,
+            cursor="hand2",
+            font=theme.FONT_STRONG,
+            highlightthickness=0,
+        )
+        self.mode_btn.pack(fill=X, pady=(8, 0))
+        self.ptt_btn = Button(
+            card,
+            text="Hold to talk",
+            bg=theme.SURFACE,
+            fg=theme.DIM,
+            activebackground=theme.ACCENT,
+            activeforeground=theme.ON_ACCENT,
+            relief="flat",
+            bd=0,
+            pady=7,
+            cursor="hand2",
+            font=theme.FONT_STRONG,
+            highlightthickness=0,
+        )
+        self.ptt_btn.pack(fill=X, pady=(8, 0))
+        self.ptt_btn.bind("<ButtonPress-1>", self._ptt_down)
+        self.ptt_btn.bind("<ButtonRelease-1>", self._ptt_up)
+        self._apply_voice_mode_ui()
 
     def _build_telemetry(self) -> None:
-        theme.section_label(self.sidebar, "Telemetry").pack(anchor="w", pady=(theme.GAP, 6))
+        telemetry_panel = theme.panel(
+            self.sidebar, bg=theme.CARD, border=theme.BORDER, pad=12, radius=18
+        )
+        telemetry_panel.pack(fill=X, pady=(theme.GAP, 0))
+        self.telemetry_body = telemetry_panel.body
+        theme.section_label(self.telemetry_body, "Telemetry", bg=theme.CARD).pack(
+            anchor="w", pady=(0, 8)
+        )
         self._lat_labels: dict[str, Label] = {}
         for key in _LATENCY_KEYS:
             self._lat_labels[key] = self._metric(key.upper() if key != "total" else "Total", "—")
@@ -261,10 +348,11 @@ class VoiceGUI:
 
     def _build_main_area(self) -> None:
         self._build_header_card()
+        self._build_status_dashboard()
         self._build_agent_strip()
         self._build_confirm_bar()
-        self._build_composer_card()
         self._build_transcript_card()
+        self._build_composer_card()
 
     def _build_confirm_bar(self) -> None:
         """An amber-bordered banner shown only while a delegation awaits approval."""
@@ -296,27 +384,63 @@ class VoiceGUI:
         # Not packed until a confirmation actually arrives.
 
     def _wake_status(self) -> wake_word.WakeWordStatus:
-        return wake_word.preflight(wake_word.settings_from_config(cfg))
+        return wake_word.preflight(
+            wake_word.settings_from_config(
+                cfg,
+                enabled=(
+                    cfg.WAKE_WORD_ENABLED
+                    or self._voice_mode == multimodal_prompt.VOICE_MODE_WAKE_WORD
+                ),
+            )
+        )
 
     def _build_header_card(self) -> None:
-        header = Frame(self.main, bg=theme.BG)
-        header.pack(fill=X, pady=(0, theme.GAP))
+        hero_panel = theme.panel(
+            self.main, bg=theme.CARD, border=theme.BORDER_LIGHT, pad=18, radius=24, glow=True
+        )
+        hero_panel.pack(fill=X, pady=(0, theme.GAP))
+        header = hero_panel.body
+        top = Frame(header, bg=theme.CARD)
+        top.pack(fill=X, pady=(0, theme.GAP))
+        title_stack = Frame(top, bg=theme.CARD)
+        title_stack.pack(side=LEFT, fill=X, expand=True)
         self.persona_title = Label(
-            header,
+            title_stack,
             text=self._persona.name,
-            bg=theme.BG,
+            bg=theme.CARD,
             fg=theme.FG,
-            font=("Segoe UI Semibold", 18),
+            font=("Segoe UI Semibold", 24),
         )
-        self.persona_title.pack(side=LEFT)
+        self.persona_title.pack(anchor="w")
         self.blurb = Label(
-            header, text=self._persona.blurb, bg=theme.BG, fg=theme.SUBTLE, font=theme.FONT_SMALL
+            title_stack,
+            text=self._persona.blurb,
+            bg=theme.CARD,
+            fg=theme.SUBTLE,
+            font=theme.FONT_BODY,
         )
-        self.blurb.pack(side=RIGHT)
+        self.blurb.pack(anchor="w", pady=(3, 0))
+        mode_badge = Frame(
+            top,
+            bg=theme.SELECT_BG,
+            padx=14,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground=theme.BORDER_ACTIVE,
+        )
+        mode_badge.pack(side=RIGHT)
+        Label(mode_badge, text="●", bg=theme.SELECT_BG, fg=theme.CYAN, font=("Segoe UI", 9)).pack(
+            side=LEFT, padx=(0, 8)
+        )
+        Label(
+            mode_badge,
+            text="Voice control active",
+            bg=theme.SELECT_BG,
+            fg=theme.FG,
+            font=theme.FONT_STRONG,
+        ).pack(side=LEFT)
 
-        controls = theme.card(self.main, pad=14)
-        controls.pack(fill=X, pady=(0, theme.GAP))
-        row = Frame(controls, bg=theme.CARD)
+        row = Frame(header, bg=theme.CARD)
         row.pack(fill=X)
         self._labeled_combo(
             row,
@@ -355,36 +479,137 @@ class VoiceGUI:
             "voice_box",
         )
 
-    def _build_agent_strip(self) -> None:
-        strip = Frame(self.main, bg=theme.BG)
-        strip.pack(fill=X, pady=(0, theme.GAP))
-        theme.section_label(strip, "Agent backends", bg=theme.BG).pack(
-            side=LEFT, padx=(2, theme.GAP)
+    def _build_status_dashboard(self) -> None:
+        outer = theme.panel(self.main, bg=theme.CARD, border=theme.BORDER, pad=16, radius=22)
+        outer.pack(fill=X, pady=(0, theme.GAP))
+        panel = outer.body
+        header = Frame(panel, bg=theme.CARD)
+        header.pack(fill=X, pady=(0, theme.GAP_SM))
+        Label(
+            header,
+            text="System dashboard",
+            bg=theme.CARD,
+            fg=theme.FG,
+            font=theme.FONT_H2,
+        ).pack(side=LEFT)
+        Label(
+            header,
+            text="voice · model · memory · server",
+            bg=theme.CARD,
+            fg=theme.DIM,
+            font=theme.FONT_SMALL,
+        ).pack(side=RIGHT)
+
+        grid = Frame(panel, bg=theme.CARD)
+        grid.pack(fill=X)
+        self.dashboard_labels: dict[str, Label] = {}
+        items = (
+            ("mode", "◉", "Current mode", "info"),
+            ("model", "◆", "Model", "accent"),
+            ("memory", "✦", "Memory", "ok" if cfg.MEMORY_ENABLED else "neutral"),
+            ("server", "●", "Server", "neutral"),
         )
+        for index, (key, icon, title, tone) in enumerate(items):
+            tile_panel = theme.panel(
+                grid, bg=theme.ELEVATED_BG, border=theme.BORDER, pad=12, radius=16
+            )
+            tile_panel.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 10, 0))
+            grid.columnconfigure(index, weight=1)
+            tile = tile_panel.body
+            top = Frame(tile, bg=theme.ELEVATED_BG)
+            top.pack(fill=X)
+            Label(
+                top,
+                text=icon,
+                bg=theme.ELEVATED_BG,
+                fg=theme.TONES[tone],
+                font=("Segoe UI Semibold", 12),
+            ).pack(side=LEFT, padx=(0, 8))
+            Label(
+                top,
+                text=title.upper(),
+                bg=theme.ELEVATED_BG,
+                fg=theme.DIM,
+                font=theme.FONT_SECTION,
+            ).pack(side=LEFT)
+            row = Frame(tile, bg=theme.ELEVATED_BG)
+            row.pack(fill=X, pady=(6, 0))
+            Label(
+                row,
+                text="●",
+                bg=theme.ELEVATED_BG,
+                fg=theme.TONES[tone],
+                font=("Segoe UI", 9),
+            ).pack(side=LEFT, padx=(0, 8))
+            value = Label(
+                row,
+                text="—",
+                bg=theme.ELEVATED_BG,
+                fg=theme.FG,
+                font=theme.FONT_STRONG,
+                anchor="w",
+            )
+            value.pack(side=LEFT, fill=X, expand=True)
+            self.dashboard_labels[key] = value
+        self._refresh_status_dashboard()
+
+    def _refresh_status_dashboard(self) -> None:
+        if not hasattr(self, "dashboard_labels"):
+            return
+        labels = {
+            multimodal_prompt.VOICE_MODE_WAKE_WORD: "Wake Word",
+            multimodal_prompt.VOICE_MODE_FREE_TALK: "Free Talk",
+            multimodal_prompt.VOICE_MODE_PUSH_TO_TALK: "Push To Talk",
+        }
+        self.dashboard_labels["mode"].configure(text=labels[self._voice_mode])
+        self.dashboard_labels["model"].configure(text=self.model_box.get())
+        memory = "Short + semantic" if cfg.MEMORY_ENABLED and cfg.MEM0_ENABLED else "Local only"
+        self.dashboard_labels["memory"].configure(text=memory)
+        self.dashboard_labels["server"].configure(text=self._server_status_text)
+
+    def _build_agent_strip(self) -> None:
+        outer = theme.panel(self.main, bg=theme.CARD, border=theme.BORDER, pad=14, radius=20)
+        outer.pack(fill=X, pady=(0, theme.GAP))
+        strip = outer.body
+        header = Frame(strip, bg=theme.CARD)
+        header.pack(fill=X, pady=(0, theme.GAP_SM))
+        Label(header, text="Agent fabric", bg=theme.CARD, fg=theme.FG, font=theme.FONT_H2).pack(
+            side=LEFT
+        )
+        Label(
+            header,
+            text="local tool users ready for delegation",
+            bg=theme.CARD,
+            fg=theme.DIM,
+            font=theme.FONT_SMALL,
+        ).pack(side=RIGHT)
+        chips = Frame(strip, bg=theme.CARD)
+        chips.pack(fill=X)
         for backend in self._session.agent_backends():
             elevated = "yolo" in backend
-            chip = Frame(
-                strip,
-                bg=theme.CARD,
-                padx=10,
-                pady=5,
-                highlightthickness=1,
-                highlightbackground=theme.BORDER,
+            selected = backend == self._session.default_agent_backend()
+            chip_panel = theme.panel(
+                chips,
+                bg=theme.SELECT_BG if selected else theme.ELEVATED_BG,
+                border=theme.BORDER_ACTIVE if selected else theme.BORDER,
+                pad=10,
+                radius=16,
             )
-            chip.pack(side=LEFT, padx=(0, theme.GAP_SM))
+            chip_panel.pack(side=LEFT, fill=X, expand=True, padx=(0, theme.GAP_SM))
+            chip = chip_panel.body
             Label(
                 chip,
                 text="●",
-                bg=theme.CARD,
+                bg=theme.SELECT_BG if selected else theme.ELEVATED_BG,
                 fg=theme.DANGER if elevated else theme.ACCENT,
                 font=("Segoe UI", 7),
             ).pack(side=LEFT, padx=(0, 6))
-            name = Frame(chip, bg=theme.CARD)
+            name = Frame(chip, bg=theme.SELECT_BG if selected else theme.ELEVATED_BG)
             name.pack(side=LEFT)
             Label(
                 name,
                 text=backend,
-                bg=theme.CARD,
+                bg=theme.SELECT_BG if selected else theme.ELEVATED_BG,
                 fg=theme.FG,
                 font=("Segoe UI Semibold", 9),
                 justify="left",
@@ -392,21 +617,27 @@ class VoiceGUI:
             Label(
                 name,
                 text=self._session.agent_machine(backend),
-                bg=theme.CARD,
-                fg=theme.DIM,
+                bg=theme.SELECT_BG if selected else theme.ELEVATED_BG,
+                fg=theme.SUBTLE if selected else theme.DIM,
                 font=("Cascadia Mono", 8),
                 justify="left",
             ).pack(anchor="w")
 
     def _build_transcript_card(self) -> None:
-        card = theme.card(self.main, pad=0)
-        self.transcript_card = card
-        card.pack(fill=BOTH, expand=True, pady=(0, theme.GAP))
-        header = Frame(card, bg=theme.CARD, padx=14, pady=10)
+        outer = theme.panel(self.main, bg=theme.CARD, border=theme.BORDER_LIGHT, pad=0, radius=24)
+        self.transcript_card = outer
+        outer.pack(fill=BOTH, expand=True, pady=(0, theme.GAP))
+        card = outer.body
+        card.configure(padx=0, pady=0)
+        header = Frame(card, bg=theme.CARD, padx=18, pady=14)
         header.pack(fill=X)
-        Label(header, text="Conversation", bg=theme.CARD, fg=theme.FG, font=theme.FONT_H2).pack(
-            side=LEFT
-        )
+        Label(
+            header,
+            text="Transcription chat",
+            bg=theme.CARD,
+            fg=theme.FG,
+            font=("Segoe UI Semibold", 14),
+        ).pack(side=LEFT)
         Label(
             header,
             text="voice · text · agent events",
@@ -415,60 +646,152 @@ class VoiceGUI:
             font=theme.FONT_SMALL,
         ).pack(side=RIGHT)
 
-        self.log = theme.scrolled_text(card, font=theme.FONT_BODY, padx=16, pady=12)
+        self.log = theme.scrolled_text(card, font=theme.FONT_BODY, padx=22, pady=18)
         self.log.frame.configure(highlightthickness=0)
         self.log.frame.pack(fill=BOTH, expand=True, padx=1, pady=(0, 1))
-        self.log.tag_config("name_user", foreground=theme.USER, font=theme.FONT_NAME, spacing1=12)
         self.log.tag_config(
-            "name_assistant", foreground=theme.BOT, font=theme.FONT_NAME, spacing1=12
+            "name_user", foreground=theme.USER, font=theme.FONT_NAME, spacing1=16, lmargin1=8
         )
-        self.log.tag_config("body", foreground=theme.FG, spacing3=2)
-        self.log.tag_config("sys", foreground=theme.DIM, spacing1=8, font=theme.FONT_SMALL)
-        self.log.tag_config("agent", foreground=theme.WARN, spacing1=8, font=theme.FONT_SMALL)
+        self.log.tag_config(
+            "name_assistant",
+            foreground=theme.BOT,
+            font=theme.FONT_NAME,
+            spacing1=16,
+            lmargin1=8,
+        )
+        self.log.tag_config("body", foreground=theme.FG, spacing3=8, lmargin1=8, lmargin2=8)
+        self.log.tag_config("sys", foreground=theme.DIM, spacing1=10, font=theme.FONT_SMALL)
+        self.log.tag_config("agent", foreground=theme.CYAN, spacing1=10, font=theme.FONT_SMALL)
         # Live agent progress feed: dimmer than milestone lines, tucked in so a
         # chatty agent doesn't shout over the conversation.
         self.log.tag_config(
             "agent_stream", foreground=theme.DIM, spacing1=1, lmargin1=18, font=theme.FONT_SMALL
         )
         self.log.configure(state="disabled")
-        self._append_sys("Jess is warming up — speak once the mic goes live, or type below.")
+        self._append_sys(
+            "Ready when the mic comes online. Voice transcripts and replies land here."
+        )
 
     def _build_composer_card(self) -> None:
-        card = theme.card(self.main, pad=12)
-        card.pack(side="bottom", fill=X)
+        composer_panel = theme.panel(
+            self.main, bg=theme.CARD, border=theme.BORDER_LIGHT, pad=16, radius=22, glow=True
+        )
+        composer_panel.pack(side="bottom", fill=X)
+        card = composer_panel.body
+        top = Frame(card, bg=theme.CARD)
+        top.pack(fill=X)
+        Label(top, text="Command composer", bg=theme.CARD, fg=theme.FG, font=theme.FONT_H2).pack(
+            side=LEFT
+        )
+        Label(
+            top,
+            text="voice transcripts appear above",
+            bg=theme.CARD,
+            fg=theme.DIM,
+            font=theme.FONT_SMALL,
+        ).pack(side=RIGHT)
+
+        self.voice_preview_var = StringVar(value="Voice: waiting")
+        Label(
+            card,
+            textvariable=self.voice_preview_var,
+            bg=theme.CARD,
+            fg=theme.SUBTLE,
+            font=theme.FONT_SMALL,
+            anchor="w",
+            justify="left",
+            wraplength=900,
+        ).pack(fill=X, pady=(6, 8))
+
         row = Frame(card, bg=theme.CARD)
         row.pack(fill=X)
         self.type_var = StringVar()
         self.message_entry = theme.entry(
             row,
             textvariable=self.type_var,
-            placeholder="Message Jess — Enter to send",
-            bg=theme.SURFACE,
+            placeholder="Type a message — Enter sends",
+            bg=theme.INSET,
+            font=theme.FONT_BODY,
         )
-        self.message_entry.pack(side=LEFT, fill=X, expand=True, ipady=8, padx=(0, 10))
+        self.message_entry.pack(side=LEFT, fill=X, expand=True, ipady=10, padx=(0, 10))
         self.message_entry.bind("<Return>", lambda _e: self._send_typed())
+        self.message_entry.bind("<KeyRelease>", lambda _e: self._mark_context_changed())
         theme.button(row, "Send", self._send_typed, kind="primary").pack(side=LEFT, padx=(0, 6))
-        theme.button(row, "Delegate", self._delegate_typed).pack(side=LEFT)
+        theme.button(row, "Delegate", self._delegate_typed).pack(side=LEFT, padx=(0, 6))
+        self.context_toggle_btn = theme.button(
+            row, "Context", self._toggle_context_details, kind="ghost"
+        )
+        self.context_toggle_btn.pack(side=LEFT)
+
+        self.context_details = Frame(card, bg=theme.CARD)
+
+        self.notes_text = theme.scrolled_text(
+            self.context_details, font=theme.FONT_SMALL, padx=10, pady=7
+        )
+        self.notes_text.configure(height=3)
+        self.notes_text.frame.pack(fill=X, pady=(0, 8))
+        self.notes_text.bind("<KeyRelease>", lambda _e: self._mark_context_changed())
+
+        attach_row = Frame(self.context_details, bg=theme.CARD)
+        attach_row.pack(fill=X, pady=(0, 6))
+        self.attach_ref_var = StringVar()
+        self.attach_note_var = StringVar()
+        self.attach_ref_entry = theme.entry(
+            attach_row,
+            textvariable=self.attach_ref_var,
+            placeholder="Paste a link or file path",
+            bg=theme.SURFACE,
+            font=theme.FONT_SMALL,
+        )
+        self.attach_ref_entry.pack(side=LEFT, fill=X, expand=True, ipady=5, padx=(0, 6))
+        self.attach_note_entry = theme.entry(
+            attach_row,
+            textvariable=self.attach_note_var,
+            placeholder="Attachment note",
+            bg=theme.SURFACE,
+            font=theme.FONT_SMALL,
+        )
+        self.attach_note_entry.pack(side=LEFT, fill=X, expand=True, ipady=5, padx=(0, 6))
+        theme.button(attach_row, "Add", self._add_reference, kind="ghost").pack(
+            side=LEFT, padx=(0, 6)
+        )
+        theme.button(attach_row, "File", self._pick_attachment, kind="ghost").pack(side=LEFT)
+
+        self.attachment_list = theme.listbox(self.context_details, height=3, font=theme.FONT_SMALL)
+        self.attachment_list.pack(fill=X, pady=(0, 8))
+        self._render_attachments()
+        theme.button(
+            self.context_details,
+            "Remove selected context item",
+            self._remove_attachment,
+            kind="ghost",
+        ).pack(anchor="w")
         Label(
-            card,
-            text="Delegate runs the message on the selected tool user instead of Jess.",
+            self.context_details,
+            text="Optional notes, links, images, and files are bundled only when you send.",
             bg=theme.CARD,
             fg=theme.DIM,
             font=theme.FONT_SMALL,
         ).pack(anchor="w", pady=(6, 0))
+        self._context_details_open = False
 
     # -- small UI helpers -----------------------------------------------------
 
     def _metric(self, label: str, value: str) -> Label:
-        row = Frame(self.sidebar, bg=theme.SURFACE, pady=2)
+        parent = getattr(self, "telemetry_body", self.sidebar)
+        row = Frame(parent, bg=parent.cget("background"), pady=2)
         row.pack(fill=X)
         Label(
-            row, text=label.upper(), bg=theme.SURFACE, fg=theme.DIM, font=theme.FONT_SECTION
+            row,
+            text=label.upper(),
+            bg=parent.cget("background"),
+            fg=theme.DIM,
+            font=theme.FONT_SECTION,
         ).pack(side=LEFT)
         widget = Label(
             row,
             text=value,
-            bg=theme.SURFACE,
+            bg=parent.cget("background"),
             fg=theme.SUBTLE,
             justify="right",
             anchor="e",
@@ -495,6 +818,15 @@ class VoiceGUI:
         for key in _LATENCY_KEYS:
             value = self._latency.values.get(key)
             self._lat_labels[key].configure(text="—" if value is None else f"{value:.2f}s")
+
+    def _toggle_context_details(self) -> None:
+        self._context_details_open = not self._context_details_open
+        if self._context_details_open:
+            self.context_details.pack(fill=X, pady=(theme.GAP, 0))
+            self.context_toggle_btn.configure(text="Hide context")
+        else:
+            self.context_details.pack_forget()
+            self.context_toggle_btn.configure(text="Context")
 
     # -- widget callbacks -----------------------------------------------------
 
@@ -525,6 +857,7 @@ class VoiceGUI:
         self._syncing = False
         self.persona_title.configure(text=persona.name)
         self.blurb.configure(text=persona.blurb)
+        self._refresh_status_dashboard()
         self._append_sys(f"Now speaking as {persona.name}.")
         self._save_app_state()
 
@@ -549,6 +882,7 @@ class VoiceGUI:
             app_state.AppState(
                 persona=self._persona.name,
                 tool_user=self._session.default_agent_backend(),
+                voice_mode=self._voice_mode,
             ),
         )
 
@@ -558,6 +892,7 @@ class VoiceGUI:
         model = self.model_box.get()
         if model:
             self._session.set_model(model)
+            self._refresh_status_dashboard()
             self._append_sys(f"Model → {model} (first reply may reload)")
 
     def _restart(self) -> None:
@@ -589,28 +924,191 @@ class VoiceGUI:
             )
         self._set_status(
             "Mic muted — she can't hear you" if self.muted else "Listening...",
-            theme.WARN if self.muted else theme.FG,
+            theme.DIM if self.muted else theme.FG,
         )
 
+    def _cycle_voice_mode(self) -> None:
+        modes = multimodal_prompt.VOICE_MODES
+        self._voice_mode = modes[(modes.index(self._voice_mode) + 1) % len(modes)]
+        self._session.set_voice_mode(self._voice_mode)
+        self._apply_voice_mode_ui()
+        self._save_app_state()
+
+    def _apply_voice_mode_ui(self) -> None:
+        labels = {
+            multimodal_prompt.VOICE_MODE_WAKE_WORD: "Mode: Wake Word",
+            multimodal_prompt.VOICE_MODE_FREE_TALK: "Mode: Free Talk",
+            multimodal_prompt.VOICE_MODE_PUSH_TO_TALK: "Mode: Push To Talk",
+        }
+        self.mode_btn.configure(text=labels[self._voice_mode])
+        self._refresh_status_dashboard()
+        ptt = self._voice_mode == multimodal_prompt.VOICE_MODE_PUSH_TO_TALK
+        self.ptt_btn.configure(
+            fg=theme.FG if ptt else theme.DIM,
+            text="Hold to talk" if ptt else "Push to talk inactive",
+        )
+        if ptt:
+            self._set_status("Push To Talk — hold the button to speak", theme.SUBTLE)
+        elif self._voice_mode == multimodal_prompt.VOICE_MODE_WAKE_WORD:
+            self._set_status("Wake Word — listening passively", theme.SUBTLE)
+        else:
+            self._set_status("Listening...", theme.FG)
+
+    def _ptt_down(self, _evt=None) -> None:
+        if self._voice_mode != multimodal_prompt.VOICE_MODE_PUSH_TO_TALK:
+            return
+        self._session.set_push_to_talk(True)
+        self.ptt_btn.configure(bg=theme.ACCENT, fg=theme.ON_ACCENT)
+        self._set_status("Recording push-to-talk...", theme.FG)
+
+    def _ptt_up(self, _evt=None) -> None:
+        if self._voice_mode != multimodal_prompt.VOICE_MODE_PUSH_TO_TALK:
+            return
+        self._session.set_push_to_talk(False)
+        self.ptt_btn.configure(bg=theme.SURFACE, fg=theme.FG)
+        self._set_status("Push To Talk — hold the button to speak", theme.SUBTLE)
+
     def _send_typed(self) -> None:
-        if theme.placeholder_active(self.message_entry):
+        bundle = self._current_bundle()
+        if not self._bundle_has_content(bundle):
             return
-        text = self.type_var.get().strip()
-        if not text:
-            return
-        self.type_var.set("")
-        self._session.send_text(text)
+        self._session.send_multimodal_prompt(bundle)
+        self._clear_multimodal_draft()
 
     def _delegate_typed(self) -> None:
-        if theme.placeholder_active(self.message_entry):
+        bundle = self._current_bundle()
+        if not self._bundle_has_content(bundle):
             return
-        text = self.type_var.get().strip()
-        if not text:
-            return
-        self.type_var.set("")
+        text = bundle.agent_prompt()
         backend = self._session.default_agent_backend()
-        self._append_message("user", f"You → {backend}", text)
+        self._append_message(
+            "user", f"You → {backend}", bundle.final_user_instruction or "Shared prompt"
+        )
         self._session.start_agent_task(backend, text)
+        self._clear_multimodal_draft()
+
+    def _current_bundle(self) -> multimodal_prompt.MultimodalPromptBundle:
+        bundle = multimodal_prompt.MultimodalPromptBundle(user_id=cfg.MEM0_USER_ID)
+        bundle.voice_mode = self._voice_mode
+        bundle.send_reason = self._draft_send_reason
+        bundle.context_signals = self._current_context_signals(self._draft_voice_text)
+        if self._draft_voice_text:
+            bundle.add_voice_transcript(self._draft_voice_text)
+        bundle.set_text(self.notes_text.get("1.0", END))
+        if not theme.placeholder_active(self.message_entry):
+            bundle.set_final_instruction(self.type_var.get())
+        for attachment in self._draft_attachments:
+            bundle.add_attachment(attachment)
+        return bundle
+
+    @staticmethod
+    def _bundle_has_content(bundle: multimodal_prompt.MultimodalPromptBundle) -> bool:
+        return bool(
+            bundle.voice.transcript
+            or bundle.text.raw_text
+            or bundle.final_user_instruction
+            or bundle.attachments
+        )
+
+    def _clear_multimodal_draft(self) -> None:
+        self._draft_voice_text = ""
+        self._draft_context_signals = []
+        self._draft_send_reason = "manual_send"
+        self.voice_preview_var.set("Voice: waiting")
+        self.notes_text.delete("1.0", END)
+        self.type_var.set("")
+        self._draft_attachments.clear()
+        self._render_attachments()
+        self._sync_context_active()
+
+    def _composer_text(self) -> str:
+        chunks = [self.notes_text.get("1.0", END)]
+        if not theme.placeholder_active(self.message_entry):
+            chunks.append(self.type_var.get())
+        if not theme.placeholder_active(self.attach_ref_entry):
+            chunks.append(self.attach_ref_var.get())
+        return "\n".join(chunks)
+
+    def _current_context_signals(self, voice_text: str = "") -> list[str]:
+        text = "\n".join(part for part in (voice_text, self._composer_text()) if part)
+        return multimodal_prompt.context_signals(
+            text,
+            has_attachments=bool(self._draft_attachments),
+            draft_active=self._composer_has_context(),
+        )
+
+    def _composer_has_context(self) -> bool:
+        if self._draft_attachments or self._draft_voice_text:
+            return True
+        return bool(self._composer_text().strip())
+
+    def _mark_context_changed(self, signal: str = "draft_active") -> None:
+        self._draft_touched_at = time.monotonic()
+        if signal not in self._draft_context_signals:
+            self._draft_context_signals.append(signal)
+        self._sync_context_active()
+
+    def _sync_context_active(self) -> None:
+        signals = self._current_context_signals(self._draft_voice_text)
+        self._draft_context_signals = signals
+        self._session.set_context_active(bool(signals))
+
+    def _expire_context_draft(self) -> None:
+        if (
+            self._composer_has_context()
+            and time.monotonic() - self._draft_touched_at > cfg.CONTEXT_DRAFT_TIMEOUT_SECS
+        ):
+            self._clear_multimodal_draft()
+            self._set_status("Context draft expired; Free Talk is normal again.", theme.SUBTLE)
+        self.root.after(10000, self._expire_context_draft)
+
+    def _add_reference(self) -> None:
+        if theme.placeholder_active(self.attach_ref_entry):
+            return
+        reference = self.attach_ref_var.get().strip()
+        if not reference:
+            return
+        note = (
+            "" if theme.placeholder_active(self.attach_note_entry) else self.attach_note_var.get()
+        )
+        self._draft_attachments.append(
+            multimodal_prompt.attachment_from_reference(reference, note=note)
+        )
+        self._mark_context_changed("attachment")
+        self.attach_ref_var.set("")
+        self.attach_note_var.set("")
+        self._render_attachments()
+
+    def _pick_attachment(self) -> None:
+        path = filedialog.askopenfilename()
+        if not path:
+            return
+        note = (
+            "" if theme.placeholder_active(self.attach_note_entry) else self.attach_note_var.get()
+        )
+        self._draft_attachments.append(multimodal_prompt.attachment_from_reference(path, note=note))
+        self._mark_context_changed("attachment")
+        self.attach_note_var.set("")
+        self._render_attachments()
+
+    def _remove_attachment(self) -> None:
+        selection = self.attachment_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if 0 <= index < len(self._draft_attachments):
+            del self._draft_attachments[index]
+            self._render_attachments()
+            self._sync_context_active()
+
+    def _render_attachments(self) -> None:
+        self.attachment_list.delete(0, END)
+        if not self._draft_attachments:
+            theme.set_list_placeholder(self.attachment_list, "No attachments yet")
+            return
+        for attachment in self._draft_attachments:
+            note = f" — {attachment.user_note}" if attachment.user_note else ""
+            self.attachment_list.insert(END, f"{attachment.type}: {attachment.reference}{note}")
 
     # -- confirmation gate ----------------------------------------------------
 
@@ -685,6 +1183,25 @@ class VoiceGUI:
             self._append_message(role, who, evt.get("text", ""))
             if role == "user" and not getattr(self, "muted", False):
                 self._set_status("Thinking...", theme.SUBTLE)
+        elif kind == "draft_voice":
+            text = evt.get("text", "").strip()
+            if text:
+                self._draft_voice_text = text
+                self._draft_context_signals = multimodal_prompt.context_signals(
+                    text,
+                    has_attachments=bool(self._draft_attachments),
+                    draft_active=self._composer_has_context(),
+                )
+                self.voice_preview_var.set(f"Voice: {text}")
+                self._mark_context_changed("voice")
+            if evt.get("intent") == "send":
+                self._draft_send_reason = "voice_send_intent"
+                self._send_typed()
+            elif evt.get("intent") == "hold":
+                self._set_status("Holding draft...", theme.SUBTLE)
+            elif evt.get("intent") == "cancel":
+                self._clear_multimodal_draft()
+                self._set_status("Context draft cleared.", theme.SUBTLE)
         elif kind == "speaking":
             speaking = bool(evt.get("value"))
             self.dot.configure(fg=theme.SPEAK_ON if speaking else theme.SPEAK_OFF)
@@ -701,7 +1218,9 @@ class VoiceGUI:
                 self._update_latency()
         elif kind == "health":
             ok = bool(evt.get("ok"))
-            self.health_pill.set(evt.get("label", "Ollama ?"), "ok" if ok else "danger")
+            self._server_status_text = evt.get("label", "Ollama ?")
+            self.health_pill.set(self._server_status_text, "ok" if ok else "danger")
+            self._refresh_status_dashboard()
         elif kind == "tts_health":
             ok = bool(evt.get("ok"))
             self.tts_pill.set(evt.get("label", "TTS ?"), "ok" if ok else "danger")
@@ -733,6 +1252,7 @@ class VoiceGUI:
                 self._set_status("Pipeline failed — use Reboot session", theme.DANGER)
             elif state == "stopped":
                 self._set_status("Session stopped — use Reboot session", theme.WARN)
+            self._refresh_status_dashboard()
 
     def _append(self, tag: str, text: str) -> None:
         self.log.configure(state="normal")
@@ -783,7 +1303,7 @@ class VoiceGUI:
         state = evt.get("state", "")
         model = evt.get("model", "")
         if state == "armed":
-            self.wake_label.configure(text=f"armed — say '{model}'", fg=theme.WARN)
+            self.wake_label.configure(text=f"armed — say '{model}'", fg=theme.CYAN)
         elif state == "awake":
             window = evt.get("window_secs")
             self.wake_label.configure(
@@ -791,6 +1311,8 @@ class VoiceGUI:
             )
         elif state == "bypass":
             self.wake_label.configure(text="engine failed — always listening", fg=theme.DANGER)
+        elif state == "inactive":
+            self.wake_label.configure(text="inactive", fg=theme.DIM)
 
     # -- background pollers ---------------------------------------------------
 
@@ -881,6 +1403,9 @@ class VoiceGUI:
         if self._thread is not None:
             self._thread.join(timeout=5)
         self._session = VoiceSession(self._persona, on_event=self._events.put)
+        self._session.set_manual_prompt_mode(True)
+        self._session.set_voice_mode(self._voice_mode)
+        self._sync_context_active()
         self._session.set_voicebox_warmup_personas(
             persona_config.voicebox_personas(personas.PERSONAS, self._persona_config)
         )
@@ -927,6 +1452,7 @@ class VoiceGUI:
         self.root.after(80, self._pump)
         self.root.after(500, self._poll_health)
         self.root.after(1200, self._poll_tts_health)
+        self.root.after(10000, self._expire_context_draft)
         self.root.mainloop()
 
 

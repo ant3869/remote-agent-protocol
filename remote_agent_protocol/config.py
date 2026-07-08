@@ -226,6 +226,10 @@ DEFAULT_PERSONA_NAME = _env("DEFAULT_PERSONA_NAME", "Jess")
 # default instead.
 APP_STATE_FILE = _env("APP_STATE_FILE", str(DATA_DIR / "jess_app_state.json"))
 
+# Shared prompt drafts should not trap Free Talk forever after a stale upload or
+# abandoned "look at this" utterance.
+CONTEXT_DRAFT_TIMEOUT_SECS = float(_env("CONTEXT_DRAFT_TIMEOUT_SECS", "300"))
+
 # ---------------------------------------------------------------------------
 # TTS backend -- how she speaks
 # ---------------------------------------------------------------------------
@@ -268,9 +272,10 @@ VOICEBOX_WARMUP_DELAY_SECS = float(_env("VOICEBOX_WARMUP_DELAY_SECS", "8"))
 # NOTE: 0.85 was too strict -- quieter/farther speech never crossed the bar and
 # Jess never registered a turn. 0.6 is a much more forgiving starting point.
 # Lower = more sensitive (easier to trigger). Raise if she false-triggers on noise.
-VAD_CONFIDENCE = 0.6
-VAD_START_SECS = 0.2
-VAD_STOP_SECS = 0.6
+VAD_CONFIDENCE = float(_env("VAD_CONFIDENCE", "0.6"))
+VAD_START_SECS = float(_env("VAD_START_SECS", "0.1"))
+VAD_STOP_SECS = float(_env("VAD_STOP_SECS", "0.6"))
+VAD_MIN_VOLUME = float(_env("VAD_MIN_VOLUME", "0.6"))
 
 # ---------------------------------------------------------------------------
 # Memory -- the bot remembers conversations across restarts
@@ -580,6 +585,9 @@ LLM_DELEGATE_STYLE = (
     "never invent an answer and never pretend work is happening: say in one "
     "short sentence that you're sending it to your agent, and include the "
     "marker. If something cannot be done, say so plainly instead of promising."
+    " Do not infer gender from tool-agent names; Hermes/hermes/hermes-yolo is "
+    "female. For other tool agents, use their name or neutral 'agent' unless "
+    "the user has given you a specific preference."
 )
 
 # Nouns the persona may use for its tool agent (backend names and spoken
@@ -591,7 +599,10 @@ AGENT_PROMISE_NOUNS = ("agent", "bat computer")
 
 # Appended to the system prompt and refreshed on every user turn so the model
 # knows the real date/time (it has no clock) and who its tool agent is.
-RUNTIME_CONTEXT_TEMPLATE = "\n\nCurrent local date and time: {now}. Your tool agent is '{agent}'."
+RUNTIME_CONTEXT_TEMPLATE = (
+    "\n\nCurrent local date and time: {now}. Your tool agent is '{agent}'. "
+    "Hermes is female; do not refer to her with male-coded terms."
+)
 
 # What the LLM is told INSTEAD of your raw command once the job is actually
 # dispatched -- so her acknowledgment is truthful, short, and in-character.

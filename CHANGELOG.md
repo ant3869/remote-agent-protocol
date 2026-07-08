@@ -8,6 +8,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.6.0] - 2026-07-08
+
+### Added
+
+- `python -m remote_agent_protocol` now opens a local web control center with
+  the operational graphite UI, dense status panels, memory/setup views, live
+  agent state, and the same `VoiceSession` backend.
+- The shared prompt composer can bundle held voice, typed notes, links, images,
+  and files into one reviewed LLM turn, with context-aware draft holding and
+  optional direct delegation.
+- Voice mode is now persisted and switchable between Free Talk, Wake Word, and
+  Push To Talk; push-to-talk gates microphone input without rebuilding the
+  pipeline.
+- Local wake models under `wake_word/wake_models` are discovered automatically,
+  mapped to personas, and loaded lazily only when wake mode is active.
+
+### Changed
+
+- VAD sensitivity is now configurable from `.env`, and the default start window
+  is shorter so low-gain microphones can begin turns reliably.
+- The Tk interface remains available as a fallback/reference shell, while the
+  default launcher uses the web UI.
+
+### Fixed
+
+- Web status polling now uses cached session state instead of repeatedly
+  exporting the full voice snapshot.
+- Web sends now wait for the backend transcript event, avoiding duplicate user
+  rows while a prompt is in flight.
+
 ## [1.5.1] - 2026-07-08
 
 ### Fixed

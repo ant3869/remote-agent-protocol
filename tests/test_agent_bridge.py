@@ -153,6 +153,17 @@ class PureHelperTests(unittest.TestCase):
         self.assertTrue(summary.endswith("..."))
         self.assertLessEqual(len(summary), 50)
 
+    def test_summarize_output_skips_hermes_resume_footer(self):
+        lines = [
+            "useful final line",
+            "Resume this session with:",
+            "  hermes --resume 20260708_013253_075592 -p mera",
+            "Duration:       39s",
+            "Messages:       74 (4 user, 66 tool calls)",
+        ]
+
+        self.assertEqual(agent_bridge.summarize_output(lines), "useful final line")
+
     def test_announcement_mentions_agent_and_status(self):
         job = agent_bridge.AgentJob(job_id="j", agent="mock", task="review repo")
         job.status = agent_bridge.STATUS_DONE
@@ -414,6 +425,33 @@ class BridgeLifecycleTests(unittest.TestCase):
             "\n".join(second.lines),
         )
         self.assertNotIn("Session:", "\n".join(second.lines))
+
+    def test_wrapped_hermes_status_beats_resume_footer(self):
+        events: list[dict] = []
+        script = (
+            'print(\'     @@JESS_STATUS {"state":"completed",'
+            '"summary":"Fixed the local folder\', flush=True); '
+            'print(\'     link","result":"I found your note and fixed the link."}\', '
+            "flush=True); "
+            "print('Resume this session with:', flush=True); "
+            "print('  hermes --resume 20260708_013253_075592 -p mera', flush=True); "
+            "print('Duration:       39s', flush=True); "
+            "print('Messages:       74 (4 user, 66 tool calls)', flush=True)"
+        )
+        backend = {"hermes": ["{python}", "-u", "-c", script, "chat", "-q", "{task}"]}
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(backend, events.append, completion_grace_secs=0.01)
+            job_id = await bridge.start("hermes", "fix the link")
+            while not any(event["event"] == "finished" for event in events):
+                await asyncio.sleep(0.01)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+
+        self.assertEqual(job.summary, "Fixed the local folder link")
+        self.assertEqual(job.result, "I found your note and fixed the link.")
+        self.assertNotIn("--resume", agent_bridge.announcement(job))
 
     def test_execution_context_is_not_exposed_as_public_task(self):
         events: list[dict] = []

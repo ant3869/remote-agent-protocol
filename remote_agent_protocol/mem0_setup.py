@@ -17,6 +17,7 @@ No API keys, no cloud.
 
 import logging
 import os
+import re
 
 from remote_agent_protocol import config as cfg
 
@@ -60,6 +61,11 @@ _DURABLE_USER_MARKERS = (
     "remember that ",
     "call me ",
     "you can call me ",
+    "your name is ",
+    "the agent's name is ",
+    "the agents name is ",
+    "the assistant's name is ",
+    "the assistants name is ",
     "don't ",
     "do not ",
 )
@@ -103,6 +109,7 @@ def _strip_leading_filler(text: str) -> str:
                 break
     return text.lstrip(_FILLER_EDGE)
 
+
 _LOW_VALUE_USER_TEXT = {
     "lol",
     "lmao",
@@ -119,6 +126,12 @@ _LOW_VALUE_USER_TEXT = {
     "continue",
     "go on",
 }
+
+_AGENT_FACT_RE = re.compile(
+    r"^(?:the\s+)?(?:agent|assistant|tool agent|jess|hermes|hermes-agent|code puppy|code-puppy)"
+    r"\b.*\b(?:is|are|name is|goes by|called)\b",
+    re.IGNORECASE,
+)
 
 
 def filter_messages_for_storage(messages: list[dict]) -> list[dict]:
@@ -142,7 +155,10 @@ def filter_messages_for_storage(messages: list[dict]) -> list[dict]:
         # A durable marker is the real signal -- don't also impose a length floor
         # that would silently drop short but genuine facts like "I'm 40" or
         # "call me Ant". The marker prefixes already require content after them.
-        if _strip_leading_filler(lower.lstrip(" ,.-")).startswith(_DURABLE_USER_MARKERS):
+        stripped_lower = _strip_leading_filler(lower.lstrip(" ,.-"))
+        if stripped_lower.startswith(_DURABLE_USER_MARKERS) or _AGENT_FACT_RE.search(
+            stripped_lower
+        ):
             kept.append({"role": "user", "content": content})
     return kept
 

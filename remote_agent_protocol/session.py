@@ -41,6 +41,7 @@ from remote_agent_protocol import (
     mem0_setup,
     memory,
     memory_manager,
+    multimodal_prompt,
     stt_factory,
     tts_factory,
     voice_commands,
@@ -55,6 +56,7 @@ from remote_agent_protocol.session_processors import (
     DelegationTap,
     EventCallback,
     LLMDelegateTap,
+    ManualPromptDraftTap,
     MicGate,
     STTNoiseFilter,
     TranscriptTap,
@@ -116,6 +118,11 @@ class VoiceSession:
             self.set_default_agent_backend(persona.tool_user)
         self._warmup_personas: list[Persona] = []
         self._muted = False  # desired mic state; survives build()/rebuilds
+        self._manual_prompt_mode = False
+        self._voice_mode = multimodal_prompt.DEFAULT_VOICE_MODE
+        self._context_active = False
+        self._push_to_talk_active = False
+        self._wake_gate: wake_word.WakeWordGate | None = None
 
         # Delegations held awaiting the user's yes/no: token -> (agent, task, cwd).
         self._pending_confirmations: dict[str, tuple[str, str, str | None]] = {}
@@ -190,6 +197,7 @@ class VoiceSession:
                 confidence=cfg.VAD_CONFIDENCE,
                 start_secs=cfg.VAD_START_SECS,
                 stop_secs=cfg.VAD_STOP_SECS,
+                min_volume=cfg.VAD_MIN_VOLUME,
             )
         )
 
@@ -212,15 +220,18 @@ class VoiceSession:
             self._mem0_service = mem0_setup.create_memory_service()
 
         self._gate = MicGate(muted=self._muted)
+        self._apply_input_gate_state()
 
         processors: list = [transport.input()]
         wake_gate = self._build_wake_gate()
         if wake_gate is not None:
+            self._wake_gate = wake_gate
             processors.append(wake_gate)
         processors += [
             self._gate,
             stt,
             STTNoiseFilter(),  # drop Whisper silence-hallucinations before anything sees them
+            ManualPromptDraftTap(self._manual_prompt_enabled, self._on_draft_voice),
             TranscriptTap(self._on_event, role="user"),  # raw text, pre-delegation
             DelegationTap(
                 self._delegate_ack,
@@ -256,17 +267,23 @@ class VoiceSession:
 
     def _build_wake_gate(self) -> "wake_word.WakeWordGate | None":
         """Build the wake-word gate when enabled and usable, else None."""
-        if not cfg.WAKE_WORD_ENABLED:
+        should_build = (
+            cfg.WAKE_WORD_ENABLED or self._voice_mode == multimodal_prompt.VOICE_MODE_WAKE_WORD
+        )
+        has_local_models = bool(wake_word.discover_local_models())
+        if not should_build and not has_local_models:
             return None
-        settings = wake_word.settings_from_config(cfg)
+        settings = wake_word.settings_from_config(cfg, enabled=should_build or has_local_models)
         status = wake_word.preflight(settings)
         if not status.ready:
             logger.warning(f"Wake word requested but unavailable: {status.message}")
             self._emit({"type": "sys", "text": f"-- wake word unavailable: {status.message} --"})
             return None
-        return wake_word.WakeWordGate(
+        gate = wake_word.WakeWordGate(
             settings, on_event=self._emit, on_persona=self._apply_wake_persona
         )
+        gate.enabled = should_build
+        return gate
 
     # -- run / lifecycle ----------------------------------------------------
 
@@ -355,6 +372,49 @@ class VoiceSession:
         self._muted = muted
         if self._gate is not None:
             self._gate.muted = muted  # atomic bool assignment
+            self._apply_input_gate_state()
+
+    def set_manual_prompt_mode(self, enabled: bool) -> None:
+        """Hold voice transcripts as draft context until the composer sends."""
+        self._manual_prompt_mode = enabled
+
+    def set_context_active(self, active: bool) -> None:
+        """Tell the STT tap whether GUI composer context is waiting."""
+        self._context_active = active
+
+    def set_voice_mode(self, mode: str) -> None:
+        """Switch between Wake Word, Free Talk, and Push To Talk modes."""
+        self._voice_mode = multimodal_prompt.normalize_voice_mode(mode)
+        if self._voice_mode != multimodal_prompt.VOICE_MODE_PUSH_TO_TALK:
+            self._push_to_talk_active = False
+        self._apply_input_gate_state()
+        if self._wake_gate is not None:
+            self._wake_gate.set_enabled(self._voice_mode == multimodal_prompt.VOICE_MODE_WAKE_WORD)
+
+    def set_push_to_talk(self, active: bool) -> None:
+        """Open the mic only while the push-to-talk control is held."""
+        self._push_to_talk_active = active
+        self._apply_input_gate_state()
+
+    def _apply_input_gate_state(self) -> None:
+        if self._gate is None:
+            return
+        self._gate.input_enabled = (
+            self._voice_mode != multimodal_prompt.VOICE_MODE_PUSH_TO_TALK
+            or self._push_to_talk_active
+        )
+
+    def _manual_prompt_enabled(self, text: str = "") -> bool:
+        if not self._manual_prompt_mode:
+            return False
+        signals = multimodal_prompt.context_signals(
+            text,
+            draft_active=self._context_active,
+        )
+        return bool(signals)
+
+    def _on_draft_voice(self, text: str, intent: str) -> None:
+        self._emit({"type": "draft_voice", "text": text, "intent": intent})
 
     def set_voice(self, voice: str) -> None:
         """Live-swap the TTS voice; takes effect on the next spoken utterance."""
@@ -450,6 +510,10 @@ class VoiceSession:
     def send_text(self, text: str) -> None:
         """Typed input: same brain as voice (incl. delegation), spoken reply."""
         self._schedule(self._send_text(text))
+
+    def send_multimodal_prompt(self, bundle: multimodal_prompt.MultimodalPromptBundle) -> None:
+        """Send one reviewed multimodal prompt bundle as a single LLM turn."""
+        self._schedule(self._send_multimodal_prompt(bundle))
 
     def announce_text(self, text: str) -> None:
         """Have Jess relay ``text`` out loud, in-character, right now."""
@@ -954,6 +1018,7 @@ class VoiceSession:
             "model": self._persona.model_name(cfg.LLM_MODEL),
             "voice": self._persona.voice,
             "voice_backend": self._persona.voice_backend,
+            "voice_mode": self._voice_mode,
             "default_agent_backend": self._default_agent_backend,
             "agent_backends": self._bridge.backend_names(),
             "recent_routing": list(self._routing_history),
@@ -987,6 +1052,46 @@ class VoiceSession:
             frames.append(refresh)
         frames.append(LLMRunFrame())
         await self._worker.queue_frames(frames)
+
+    async def _send_multimodal_prompt(
+        self, bundle: multimodal_prompt.MultimodalPromptBundle
+    ) -> None:
+        if self._context is None or self._worker is None:
+            return
+        content = bundle.agent_prompt()
+        if not content.strip():
+            return
+        summary = bundle.final_user_instruction or bundle.text.edited_text or bundle.text.raw_text
+        self._emit(
+            {
+                "type": "transcript",
+                "role": "user",
+                "text": summary or "Shared multimodal prompt",
+            }
+        )
+        await self._remember_multimodal_preferences(bundle)
+        self._context.add_message({"role": "user", "content": content})
+        frames: list = []
+        refresh = self._context_refresh_frame()
+        if refresh is not None:
+            frames.append(refresh)
+        frames.append(LLMRunFrame())
+        await self._worker.queue_frames(frames)
+
+    async def _remember_multimodal_preferences(
+        self, bundle: multimodal_prompt.MultimodalPromptBundle
+    ) -> None:
+        if self._mem0_service is None:
+            return
+        for text in bundle.preference_candidates():
+            message = memory_manager.manual_memory_message(text)
+            await asyncio.to_thread(
+                lambda message=message: self._mem0_service.memory_client.add(
+                    messages=[message],
+                    user_id=cfg.MEM0_USER_ID,
+                    metadata={"source": "multimodal_prompt"},
+                )
+            )
 
     async def _announce_agent_job(self, job: agent_bridge.AgentJob) -> None:
         """Speak terminal agent status directly, without depending on the LLM."""

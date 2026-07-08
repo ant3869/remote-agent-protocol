@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Remote Agent Protocol</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-row">
+          <span class="brand-mark" aria-hidden="true">R</span>
+          <strong>Mission Control</strong>
+        </div>
+
+        <section class="assistant-control" aria-label="Assistant controls">
+          <div class="assistant-heading">
+            <span class="presence-dot" aria-hidden="true"></span>
+            <div>
+              <p class="section-label">Assistant</p>
+              <h1 id="personaName">Jess</h1>
+            </div>
+          </div>
+          <p id="personaBlurb" class="muted assistant-blurb">Local voice operator.</p>
+          <div class="voice-controls">
+            <button id="muteBtn" class="button status-success" type="button">Mic live</button>
+            <button id="modeBtn" class="button quiet" type="button">Free Talk</button>
+            <button id="pttBtn" class="button quiet ptt" type="button">Hold to talk</button>
+          </div>
+        </section>
+
+        <nav class="nav-links" aria-label="Application panels">
+          <p class="section-label nav-label">Workspace</p>
+          <button class="nav-link active" data-view="control" type="button"><span>⌁</span>Control Center</button>
+          <button class="nav-link" data-view="memory" type="button"><span>◫</span>Memory</button>
+          <button class="nav-link" data-view="setup" type="button"><span>◇</span>Setup</button>
+          <button class="nav-link" data-view="status" type="button"><span>◉</span>Status</button>
+          <button class="nav-link" data-view="settings" type="button"><span>⚙</span>Settings</button>
+        </nav>
+
+        <section class="sidebar-actions">
+          <p class="section-label nav-label">Actions</p>
+          <button id="restartChatBtn" class="side-action" type="button">New chat</button>
+          <button id="freeVramBtn" class="side-action" type="button">Free VRAM</button>
+          <button id="startOllamaBtn" class="side-action" type="button">Start Ollama</button>
+          <button id="diagnosticsBtn" class="side-action" type="button">Export diagnostics</button>
+          <button id="rebootBtn" class="side-action destructive" type="button">Reboot session</button>
+        </section>
+
+        <footer class="shortcuts"><kbd>Ctrl L</kbd> Message <kbd>Ctrl M</kbd> Mic</footer>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div class="title-stack">
+            <span class="section-label">Remote Agent Protocol</span>
+            <h2 id="appTitle">Control Center</h2>
+          </div>
+          <div class="status-pills" aria-live="polite">
+            <div class="status-pill"><span></span><b>Session</b><em id="sessionPill">starting</em></div>
+            <div class="status-pill"><span></span><b>Ollama</b><em id="ollamaPill">checking</em></div>
+            <div class="status-pill"><span></span><b>TTS</b><em id="ttsPill">checking</em></div>
+            <div class="status-pill agent-state"><span></span><b>Agents</b><em id="agentsPill">idle</em></div>
+          </div>
+        </header>
+
+        <section id="controlView" class="view active">
+          <header class="page-heading">
+            <div>
+              <h3 id="heroPersona">Jess</h3>
+              <p id="heroBlurb" class="muted">Local intelligence operator</p>
+            </div>
+            <span id="chatState" class="state-badge status-warning">warming up</span>
+          </header>
+
+          <section class="selector-toolbar" aria-label="Assistant configuration">
+            <label>Persona<select id="personaSelect"></select></label>
+            <label>Tool user<select id="toolSelect"></select></label>
+            <label>Model<select id="modelSelect"></select></label>
+            <label>Voice<select id="voiceSelect"></select></label>
+          </section>
+
+          <section id="confirmBar" class="confirm-bar hidden">
+            <div>
+              <p class="section-label">Confirmation required</p>
+              <strong id="confirmTitle">Agent task waiting</strong>
+              <p id="confirmText" class="muted"></p>
+            </div>
+            <div class="confirm-actions">
+              <button id="denyBtn" class="button destructive" type="button">Deny</button>
+              <button id="approveBtn" class="button status-success" type="button">Approve</button>
+            </div>
+          </section>
+
+          <section class="system-strip" aria-label="System summary">
+            <article><span>Mode</span><strong id="modeCard">Free Talk</strong></article>
+            <article><span>Model</span><strong id="modelCard">--</strong></article>
+            <article><span>Memory</span><strong id="memoryCard">Short + semantic</strong></article>
+            <article><span>Server</span><strong id="serverCard">checking</strong></article>
+            <article class="latency-summary"><span>Total latency</span><strong id="latTotal">--</strong></article>
+          </section>
+
+          <div class="control-grid">
+            <div class="conversation-column">
+              <section class="chat-card">
+                <div class="panel-header">
+                  <div>
+                    <p class="section-label">Conversation</p>
+                    <h3>Transcription chat</h3>
+                  </div>
+                  <span class="panel-meta">voice · text · agent events</span>
+                </div>
+                <div id="chatLog" class="chat-log" tabindex="0" aria-live="polite">
+                  <div class="empty-state">
+                    <span class="presence-dot"></span>
+                    <div><strong>Jess is warming up</strong><p>Speak when the mic is live, or type below.</p></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="composer-card">
+                <div class="composer-head">
+                  <div>
+                    <p class="section-label">Message</p>
+                    <span id="voiceDraftLabel">Voice transcript appears here when context is held.</span>
+                  </div>
+                  <button id="contextToggle" class="icon-button" type="button" title="Add context" aria-label="Add context">＋</button>
+                </div>
+                <textarea id="messageInput" rows="2" placeholder="Type a message. Enter sends; Shift+Enter adds a line."></textarea>
+                <div id="contextDrawer" class="context-drawer hidden">
+                  <textarea id="notesInput" rows="3" placeholder="Optional notes for this send only."></textarea>
+                  <div class="context-row">
+                    <input id="attachmentRef" type="text" placeholder="Link or file path" />
+                    <input id="attachmentNote" type="text" placeholder="Short note" />
+                    <button id="addAttachmentBtn" class="button quiet" type="button">Add</button>
+                  </div>
+                  <div id="attachmentList" class="attachment-list"></div>
+                </div>
+                <div class="composer-actions">
+                  <button id="delegateBtn" class="button accent-delegate" type="button">Delegate</button>
+                  <button id="sendBtn" class="button primary-action" type="button">Send</button>
+                </div>
+              </section>
+            </div>
+
+            <aside class="activity-panel">
+              <div class="panel-header">
+                <div><p class="section-label">Live activity</p><h3>Agents</h3></div>
+                <span class="accent-agent-label">research & tasks</span>
+              </div>
+              <section id="agentStrip" class="agent-strip"></section>
+              <div class="telemetry-table">
+                <div class="table-heading"><span>Telemetry</span><span>Latency</span></div>
+                <div><span>Speech to text</span><strong id="latStt">--</strong></div>
+                <div><span>Language model</span><strong id="latLlm">--</strong></div>
+                <div><span>Text to speech</span><strong id="latTts">--</strong></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="memoryView" class="view">
+          <header class="memory-header">
+            <div><p class="section-label">Recall browser</p><h3>Memory</h3></div>
+            <input id="memorySearch" class="search" type="search" placeholder="Search memories" />
+            <div class="memory-counts"><span><b id="diaryCount">0</b> diary</span><span><b id="nodeCount">0</b> nodes</span></div>
+          </header>
+          <div class="tab-row">
+            <button class="tab active" data-memory-tab="diary" type="button">Diary</button>
+            <button class="tab" data-memory-tab="knowledge" type="button">Knowledge</button>
+            <button class="tab" data-memory-tab="meals" type="button">Meals</button>
+          </div>
+          <div class="memory-layout">
+            <aside class="memory-tree">
+              <p class="section-label">Memory tree</p>
+              <button class="tree-item active" type="button">Root</button>
+              <button class="tree-item" type="button">Local and Events</button>
+              <button class="tree-item" type="button">Creative and Personal</button>
+              <button class="tree-item" type="button">Technology and AI</button>
+              <button class="tree-item" type="button">Health and Wellness</button>
+            </aside>
+            <section id="memoryList" class="memory-list"></section>
+            <aside class="memory-detail">
+              <p class="section-label">Selected memory</p>
+              <h4 id="memoryDetailTitle">Root</h4>
+              <p id="memoryDetailText">Select a memory to inspect its details.</p>
+            </aside>
+          </div>
+        </section>
+
+        <section id="setupView" class="view">
+          <div class="wizard">
+            <header class="wizard-title"><span class="wizard-icon">STT</span><div><h3>MLX Whisper Setup</h3><p>Configure local speech recognition.</p></div></header>
+            <section class="wizard-section">
+              <div class="section-heading"><span>01</span><div><h4>Language support</h4><p>Choose the model language profile.</p></div></div>
+              <div class="option-row"><button class="option-card selected" type="button">English only</button><button class="option-card" type="button">Multilingual · 99 languages</button></div>
+            </section>
+            <section class="wizard-section">
+              <div class="section-heading"><span>02</span><div><h4>Model size</h4><p>Balance speed, accuracy, and memory use.</p></div></div>
+              <input class="range" type="range" min="0" max="3" value="0" />
+              <div class="range-labels"><span>Tiny</span><span>Base</span><span>Small</span><span>Medium</span></div>
+              <div class="selection-banner">Tiny · ~75MB · ~1GB VRAM · fastest</div>
+            </section>
+            <section class="wizard-section">
+              <div class="section-heading"><span>03</span><div><h4>Requirements</h4><p>Local runtime dependencies.</p></div></div>
+              <div class="requirement-row"><span>FFmpeg</span><strong class="status-success">Installed</strong></div>
+              <div class="requirement-row"><span>MLX Whisper</span><strong class="status-success">Installed</strong></div>
+            </section>
+            <footer class="wizard-footer"><span class="status-success">Ready for local transcription</span><button class="button quiet" type="button">Back</button><button class="button primary-action" type="button">Next</button></footer>
+          </div>
+        </section>
+
+        <section id="statusView" class="view">
+          <header class="section-page-header"><div><p class="section-label">Services and runtime</p><h3>System status</h3></div><button class="button quiet" type="button">Refresh</button></header>
+          <div class="status-dashboard" id="statusDashboard"></div>
+        </section>
+
+        <section id="settingsView" class="view">
+          <header class="section-page-header"><div><p class="section-label">Local configuration</p><h3>Settings</h3></div></header>
+          <div class="settings-list">
+            <article><div><h4>Persona</h4><p>Active assistant identity</p></div><strong id="settingsPersona">--</strong></article>
+            <article><div><h4>Voice backend</h4><p>Current speech output profile</p></div><strong id="settingsVoice">--</strong></article>
+            <article><div><h4>Default agent</h4><p>Delegation target</p></div><strong id="settingsAgent">--</strong></article>
+            <article><div><h4>Diagnostics</h4><p>Write a local runtime report from the sidebar.</p></div><span class="muted">Local only</span></article>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

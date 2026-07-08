@@ -23,7 +23,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import dashboard, voice_commands
+from remote_agent_protocol import dashboard, multimodal_prompt, voice_commands
 
 EventCallback = Callable[[dict], None]
 
@@ -41,6 +41,7 @@ class MicGate(FrameProcessor):
         super().__init__(**kwargs)
         self._bot_speaking = False
         self.muted = muted
+        self.input_enabled = True
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         """Drop input audio while muted or while the bot is speaking."""
@@ -51,7 +52,9 @@ class MicGate(FrameProcessor):
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
             await self.push_frame(frame, direction)
-        elif isinstance(frame, InputAudioRawFrame) and (self._bot_speaking or self.muted):
+        elif isinstance(frame, InputAudioRawFrame) and (
+            self._bot_speaking or self.muted or not self.input_enabled
+        ):
             return
         else:
             await self.push_frame(frame, direction)
@@ -107,6 +110,41 @@ class STTNoiseFilter(FrameProcessor):
             logger.info(f"Dropping STT hallucination: {frame.text!r}")
             return
         await self.push_frame(frame, direction)
+
+
+class ManualPromptDraftTap(FrameProcessor):
+    """Hold completed STT transcripts only when shared context is active."""
+
+    def __init__(self, enabled, on_draft, **kwargs):
+        """Initialize the draft tap.
+
+        Args:
+            enabled: Callable returning whether this transcript should be held.
+            on_draft: Callable receiving ``(text, intent)`` for draft updates.
+            **kwargs: Additional arguments passed to FrameProcessor.
+        """
+        super().__init__(**kwargs)
+        self._enabled = enabled
+        self._on_draft = on_draft
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        """Convert user transcripts to draft events instead of LLM turns."""
+        await super().process_frame(frame, direction)
+        if (
+            isinstance(frame, TranscriptionFrame)
+            and frame.text.strip()
+            and self._should_hold(frame.text)
+        ):
+            text = frame.text.strip()
+            self._on_draft(text, multimodal_prompt.send_intent(text))
+            return
+        await self.push_frame(frame, direction)
+
+    def _should_hold(self, text: str) -> bool:
+        try:
+            return bool(self._enabled(text))
+        except TypeError:
+            return bool(self._enabled())
 
 
 def resolve_delegation(text: str, default_backend: str | None = None) -> tuple[str, str] | None:

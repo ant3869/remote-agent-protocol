@@ -1,48 +1,67 @@
-"""Design system for Remote Agent Protocol -- tokens, shared ttk styling, widget factories.
-
-Every window (the main shell and the toplevel panels) builds from these parts
-so the app reads as one product: calm dark neutrals, a single teal accent,
-semantic status colours, and a consistent spacing rhythm.
-"""
+"""Design system for Remote Agent Protocol -- tokens, shared ttk styling, widget factories."""
 
 from __future__ import annotations
 
 import ctypes
-from tkinter import Button, Entry, Frame, Label, Listbox, Text, ttk
+from tkinter import Button, Canvas, Entry, Frame, Label, Listbox, Text, ttk
 
 # -- colour tokens -------------------------------------------------------------
 
-BG = "#0a0d13"  # app background
-SURFACE = "#10151f"  # topbar / sidebar / field fills
-CARD = "#151b29"  # raised panels
-CARD_HOVER = "#1d2536"  # hover states + controls resting on a card
-INSET = "#0c1018"  # recessed wells: transcript, logs, lists
-BORDER = "#232c3f"
-BORDER_LIGHT = "#2f3a52"
+APP_BG = "#05070c"  # near-black app background
+PANEL_BG = "#0b1220"  # topbar / sidebar / panel background
+CARD_BG = "#111827"  # raised cards
+ELEVATED_BG = "#172033"  # controls resting on a card
+GLOW_BG = "#0e2138"
+INSET_BG = "#080d16"  # transcript, logs, lists
+BORDER = "#243149"
+BORDER_LIGHT = "#334563"
+BORDER_ACTIVE = "#22d3ee"
 
-FG = "#e8eef8"  # primary text
-SUBTLE = "#94a3b8"  # secondary text
-DIM = "#5f6c82"  # tertiary text, section labels
+TEXT_PRIMARY = "#f4f7fb"
+TEXT_SECONDARY = "#b7c3d7"
+TEXT_MUTED = "#728197"
 
-ACCENT = "#3ecfb2"
-ACCENT_HOVER = "#5fe0c6"
-ON_ACCENT = "#062720"  # text on accent fills
+BLUE = "#3b82f6"
+BLUE_HOVER = "#60a5fa"
+CYAN = "#22d3ee"
+FOCUS_RING = "#38bdf8"
+GLOW = "#134a66"
+ON_ACCENT = "#03111f"
 
-USER = "#82b8ff"  # user speaker colour
-BOT = "#f2ab66"  # assistant speaker colour
-OK = "#4ade80"
-WARN = "#f5c04e"
-DANGER = "#f8717a"
-ON_DANGER = "#2b0d12"
-DANGER_BG = "#291720"  # resting fill for destructive buttons
-DANGER_BG_HOVER = "#3a202c"
-SELECT_BG = "#20344d"  # list/text selection
+SUCCESS = "#22c55e"
+WARNING = "#f59e0b"
+ERROR = "#fb7185"
+DISABLED = "#3b475c"
+INFO = "#38bdf8"
+SELECT_BG = "#12365d"
+
+BG = APP_BG
+SURFACE = PANEL_BG
+CARD = CARD_BG
+CARD_HOVER = ELEVATED_BG
+GLOW_CARD = GLOW_BG
+INSET = INSET_BG
+
+FG = TEXT_PRIMARY
+SUBTLE = TEXT_SECONDARY
+DIM = TEXT_MUTED
+
+ACCENT = BLUE
+ACCENT_HOVER = CYAN
+
+USER = BLUE_HOVER
+BOT = CYAN
+OK = SUCCESS
+WARN = WARNING
+DANGER = ERROR
+ON_DANGER = "#2a0710"
+DANGER_BG = "#2a101b"
+DANGER_BG_HOVER = "#3b1626"
 
 # Aliases kept so the palette names used across the app stay stable.
-MUTED = WARN
-CYAN = ACCENT_HOVER
+MUTED = DISABLED
 SPEAK_ON = OK
-SPEAK_OFF = "#33415b"
+SPEAK_OFF = DISABLED
 
 # -- type + spacing tokens -------------------------------------------------------
 
@@ -62,6 +81,7 @@ PAD = 16  # card interior padding
 GAP = 12  # between cards / sections
 GAP_SM = 8
 GAP_XS = 4
+RADIUS = 18
 
 TONES = {
     "neutral": DIM,
@@ -69,6 +89,7 @@ TONES = {
     "warn": WARN,
     "danger": DANGER,
     "accent": ACCENT,
+    "info": INFO,
 }
 
 # -- window chrome ---------------------------------------------------------------
@@ -138,7 +159,7 @@ def init_style(root) -> None:
         darkcolor=SURFACE,
         padding=8,
     )
-    style.map("TEntry", bordercolor=[("focus", ACCENT)])
+    style.map("TEntry", bordercolor=[("focus", FOCUS_RING)])
     style.configure(
         "Vertical.TScrollbar",
         background=CARD_HOVER,
@@ -152,10 +173,119 @@ def init_style(root) -> None:
     )
     style.map("Vertical.TScrollbar", background=[("active", BORDER_LIGHT)])
     style.configure("TButton", background=CARD_HOVER, foreground=FG, borderwidth=0, padding=(12, 7))
-    style.map("TButton", background=[("active", BORDER_LIGHT)])
+    style.map(
+        "TButton",
+        background=[("disabled", SURFACE), ("active", BORDER_LIGHT)],
+        foreground=[("disabled", DIM)],
+    )
 
 
 # -- widget factories --------------------------------------------------------------
+
+
+def _rounded_rect(canvas: Canvas, x1: int, y1: int, x2: int, y2: int, radius: int, **kwargs):
+    points = [
+        x1 + radius,
+        y1,
+        x2 - radius,
+        y1,
+        x2,
+        y1,
+        x2,
+        y1 + radius,
+        x2,
+        y2 - radius,
+        x2,
+        y2,
+        x2 - radius,
+        y2,
+        x1 + radius,
+        y2,
+        x1,
+        y2,
+        x1,
+        y2 - radius,
+        x1,
+        y1 + radius,
+        x1,
+        y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+class RoundedPanel(Frame):
+    """Canvas-backed rounded panel with an inner body frame."""
+
+    def __init__(
+        self,
+        parent,
+        *,
+        bg: str = CARD,
+        border: str = BORDER,
+        radius: int = RADIUS,
+        pad: int = PAD,
+        glow: bool = False,
+    ) -> None:
+        """Create the panel and expose `.body` as the content container."""
+        super().__init__(parent, bg=parent.cget("background"), highlightthickness=0, bd=0)
+        self._bg = bg
+        self._border = border
+        self._radius = radius
+        self._pad = pad
+        self._glow = glow
+        self.canvas = Canvas(self, bg=self.cget("background"), highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.body = Frame(self.canvas, bg=bg, padx=pad, pady=pad)
+        self._window = self.canvas.create_window(pad, pad, anchor="nw", window=self.body)
+        self.canvas.bind("<Configure>", self._draw)
+        self.body.bind("<Configure>", self._sync_size)
+
+    def _sync_size(self, _event=None) -> None:
+        self.canvas.configure(
+            width=max(1, self.body.winfo_reqwidth() + self._pad * 2),
+            height=max(1, self.body.winfo_reqheight() + self._pad * 2),
+        )
+
+    def _draw(self, event=None) -> None:
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+        if width <= 2 or height <= 2:
+            return
+        self.canvas.delete("panel")
+        if self._glow:
+            _rounded_rect(
+                self.canvas,
+                3,
+                4,
+                width - 3,
+                height - 2,
+                self._radius + 2,
+                fill=GLOW,
+                outline="",
+                tags="panel",
+            )
+        _rounded_rect(
+            self.canvas,
+            1,
+            1,
+            width - 2,
+            height - 2,
+            self._radius,
+            fill=self._bg,
+            outline=self._border,
+            width=1,
+            tags="panel",
+        )
+        self.canvas.tag_lower("panel")
+        self.canvas.coords(self._window, self._pad, self._pad)
+        self.canvas.itemconfigure(
+            self._window, width=max(1, width - self._pad * 2), height=max(1, height - self._pad * 2)
+        )
+
+
+def panel(parent, *, bg=CARD, border=BORDER, pad=PAD, radius=RADIUS, glow=False) -> RoundedPanel:
+    """Rounded elevated panel; add children to `.body`."""
+    return RoundedPanel(parent, bg=bg, border=border, pad=pad, radius=radius, glow=glow)
 
 
 def card(parent, *, bg=CARD, pad=PAD) -> Frame:
@@ -171,9 +301,13 @@ def section_label(parent, text: str, *, bg=SURFACE) -> Label:
 
 
 def button(parent, text: str, command, *, kind: str = "default", anchor="center") -> Button:
-    """Flat button with hover feedback. Kinds: default, primary, danger, ghost."""
+    """Flat button with hover feedback."""
     if kind == "primary":
         colors = (ACCENT, ON_ACCENT, ACCENT_HOVER, ON_ACCENT)
+    elif kind == "selected":
+        colors = (SELECT_BG, FG, BORDER_LIGHT, FG)
+    elif kind == "warning":
+        colors = ("#2b2111", WARN, "#3d2d13", WARN)
     elif kind == "danger":
         colors = (DANGER_BG, DANGER, DANGER_BG_HOVER, DANGER)
     elif kind == "ghost":
@@ -200,7 +334,9 @@ def button(parent, text: str, command, *, kind: str = "default", anchor="center"
         cursor="hand2",
         font=FONT,
         anchor=anchor,
-        highlightthickness=0,
+        highlightthickness=1,
+        highlightbackground=base_bg,
+        highlightcolor=FOCUS_RING,
     )
     btn.bind("<Enter>", lambda _e: btn.configure(bg=hover_bg, fg=hover_fg))
     btn.bind("<Leave>", lambda _e: btn.configure(bg=base_bg, fg=base_fg))

@@ -21,18 +21,26 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
                                              +-> loopback lifecycle WebSocket
 ```
 
-- `gui.py` owns the Tk event loop and renders transcript, health, latency,
-  session state, persona controls, and shortcuts.
+- `web_gui.py` serves the default loopback web control center and bridges HTTP
+  actions/events to `VoiceSession`; `gui.py` remains as the Tk fallback shell.
+  The UI renders transcript, health, latency, session state, persona controls,
+  shortcuts, and the shared prompt composer. In composer mode, voice
+  transcripts, typed notes, links, images, and files stay in a local draft until
+  the user sends one reviewed prompt.
 - `session.py` owns the Pipecat pipeline and exposes thread-safe commands to the
-  GUI. The audio loop never calls Tk directly.
+  GUI. The audio loop never calls Tk directly. `send_multimodal_prompt()` adds
+  one assembled user message to the LLM context and runs one LLM turn.
 - `intent_router.py` routes explicit commands and high-confidence keyword
   matches without model latency, skips pure acknowledgments, and uses a small
   local classifier only for otherwise-ambiguous requests. Vague references to
   a named-but-forgotten package/skill/tool are caught deterministically and
   sent verbatim as identify-then-install tasks, held for confirmation.
-- `session_processors.py` contains the microphone gate, role-scoped transcript
-  observers, delegation processor, and guard against replies that claim agent
-  work without actually dispatching it.
+- `session_processors.py` contains the microphone gate, manual composer STT
+  draft tap, role-scoped transcript observers, delegation processor, and guard
+  against replies that claim agent work without actually dispatching it.
+- `multimodal_prompt.py` defines the prompt bundle, attachment references,
+  agent-facing Markdown assembly, send/hold voice intent parsing, and simple
+  durable-preference extraction across voice, text, and attachment notes.
 - `wake_word.py` provides optional multi-model wake routing (openwakeword,
   fully local). Installed models are matched to personas or mapped with
   `WAKE_WORD_PERSONAS_JSON`; the highest score wins and its persona settings
@@ -62,6 +70,9 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
 ## What is solid
 
 - Voice and typed input use the same session and routing path.
+- The desktop composer can hold voice, notes, links, images, and files as one
+  reviewed prompt bundle; transcript completion and attachment changes update
+  the draft instead of triggering the agent.
 - Delegation happens in code before the LLM sees the request. Each routing
   decision is logged; capability-state audits bypass the classifier, and a
   markerless promise creates a real pending confirmation for the original

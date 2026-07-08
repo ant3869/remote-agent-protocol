@@ -59,6 +59,18 @@ class Mem0FilterTests(unittest.TestCase):
 
         self.assertEqual([m["content"] for m in filtered], ["I'm 40.", "Call me Ant."])
 
+    def test_keeps_negative_preferences_and_agent_identity(self):
+        messages = [
+            {"role": "user", "content": "Don't call me handsome."},
+            {"role": "user", "content": "Your name is Hermes-Agent."},
+            {"role": "user", "content": "The agent's name is Hermes-Agent."},
+            {"role": "user", "content": "Hermes is female."},
+        ]
+
+        filtered = mem0_setup.filter_messages_for_storage(messages)
+
+        self.assertEqual([m["content"] for m in filtered], [m["content"] for m in messages])
+
     def test_keeps_facts_behind_leading_filler(self):
         # Casual/STT phrasing buries the marker behind a discourse word; the
         # fact must still be captured rather than silently dropped.
