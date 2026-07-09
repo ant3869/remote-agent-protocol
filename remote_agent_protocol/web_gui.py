@@ -16,8 +16,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from loguru import logger
+
 from remote_agent_protocol import (
+    agent_bridge,
     app_state,
+    coqui_tts,
     dashboard,
     diagnostics,
     logging_setup,
@@ -25,9 +29,11 @@ from remote_agent_protocol import (
     ollama_models,
     persona_config,
     personas,
+    process_guard,
     tts_factory,
     voicebox,
     voices,
+    wake_word,
 )
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol.session import VoiceSession
@@ -35,6 +41,58 @@ from remote_agent_protocol.session import VoiceSession
 logging_setup.setup_logging(cfg.DEBUG_MODE)
 
 _STATIC_DIR = Path(__file__).with_name("web_app")
+_AGENT_PROMPT_DEFAULTS = {
+    "scopePreamble": cfg.AGENT_SCOPE_PREAMBLE,
+    "statusProtocol": agent_bridge.status_protocol(),
+    "delegateStyle": cfg.LLM_DELEGATE_STYLE,
+    "dispatchAck": cfg.DELEGATION_ACK_PROMPT,
+    "update": cfg.AGENT_UPDATE_PROMPT,
+    "confirm": cfg.DELEGATION_CONFIRM_PROMPT,
+    "confirmApproved": cfg.AGENT_CONFIRM_APPROVED_PROMPT,
+    "confirmDenied": cfg.AGENT_CONFIRM_DENIED_PROMPT,
+}
+_AGENT_PROMPT_FIELDS = {
+    "scopePreamble": {
+        "label": "Agent scope preamble",
+        "help": "Prepended to delegated tasks so agents know the scratch cwd is not the target.",
+        "required": ["{cwd}"],
+    },
+    "statusProtocol": {
+        "label": "Agent status protocol",
+        "help": "Appended to delegated tasks; tells agents how to stream progress and concise results.",
+        "required": [],
+    },
+    "delegateStyle": {
+        "label": "Assistant delegation style",
+        "help": "Added to the assistant prompt so chat replies dispatch truthfully and briefly.",
+        "required": [],
+    },
+    "dispatchAck": {
+        "label": "Dispatch acknowledgement",
+        "help": "Injected after a task is sent to an agent.",
+        "required": ["{agent}", "{task}"],
+    },
+    "update": {
+        "label": "Agent update relay",
+        "help": "Injected when agent progress or completion needs to be spoken.",
+        "required": ["{update}"],
+    },
+    "confirm": {
+        "label": "Confirmation request",
+        "help": "Injected when a risky delegation is held for user approval.",
+        "required": ["{agent}", "{task}"],
+    },
+    "confirmApproved": {
+        "label": "Confirmation approved",
+        "help": "Injected after the user approves a held delegation.",
+        "required": ["{agent}"],
+    },
+    "confirmDenied": {
+        "label": "Confirmation denied",
+        "help": "Injected after the user cancels a held delegation.",
+        "required": ["{agent}"],
+    },
+}
 
 
 class WebVoiceApp:
@@ -50,31 +108,43 @@ class WebVoiceApp:
         self._persona_config = persona_config.load_config()
         self._personas = persona_config.effective_personas(personas.PERSONAS, self._persona_config)
         self._app_state = app_state.load_state(cfg.APP_STATE_FILE)
+        self._apply_agent_prompt_overrides()
         boot_name = app_state.resolve_persona_name(
             self._app_state.persona, self._persona_names(), cfg.DEFAULT_PERSONA_NAME
         )
         self._persona = self._persona_by_name(boot_name)
-        self._model = self._persona.model_name(cfg.LLM_MODEL)
-        self._voice = self._persona.voice
+        self._model = self._app_state.model or self._persona.model_name(cfg.LLM_MODEL)
+        self._voice = self._app_state.voice or self._persona.voice
+        self._tts_provider = self._app_state.tts_provider or self._persona.voice_backend
+        self._coqui_model = self._app_state.coqui_model or cfg.COQUI_TTS_MODEL
+        self._coqui_speaker = self._app_state.coqui_speaker or cfg.COQUI_TTS_SPEAKER
+        self._coqui_language = self._app_state.coqui_language or cfg.COQUI_TTS_LANGUAGE
+        self._coqui_device = self._app_state.coqui_device or cfg.COQUI_TTS_DEVICE
+        if self._tts_provider == "coqui" and self._coqui_speaker:
+            self._voice = self._coqui_speaker
         self._voice_mode = multimodal_prompt.normalize_voice_mode(self._app_state.voice_mode)
-        self._muted = False
+        self._muted = True
         self._session_state = "starting"
         self._health = {"ok": False, "label": "Ollama checking"}
         self._tts_health = {"ok": False, "label": "TTS checking"}
         self._latency = dashboard.LatencyState()
         self._models = self._model_choices()
         self._voice_map = dict(voices.labelled() + voicebox.labelled_profiles())
+        self._wake_status = self._initial_wake_status()
         self._pending_confirms: list[dict] = []
         self._agent_jobs: dict[str, dict] = {}
         self._session = self._new_session()
         self._thread: threading.Thread | None = None
+        self._event_thread: threading.Thread | None = None
+        self._health_thread: threading.Thread | None = None
 
     def run(self) -> None:
         """Start the voice session, web server, and browser shell."""
-        self._thread = threading.Thread(target=self._boot_thread, daemon=True)
-        self._thread.start()
-        threading.Thread(target=self._event_pump, daemon=True).start()
-        threading.Thread(target=self._health_poller, daemon=True).start()
+        self._start_session_thread()
+        self._event_thread = threading.Thread(target=self._event_pump, daemon=True)
+        self._health_thread = threading.Thread(target=self._health_poller, daemon=True)
+        self._event_thread.start()
+        self._health_thread.start()
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler_class())
         url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -85,14 +155,48 @@ class WebVoiceApp:
         except KeyboardInterrupt:
             pass
         finally:
-            self._stop.set()
-            self._session.shutdown()
+            self._stop_app()
             server.server_close()
+
+    def _start_session_thread(self) -> None:
+        self._thread = threading.Thread(target=self._boot_thread, daemon=True)
+        self._thread.start()
+
+    def _join_thread(self, thread: threading.Thread | None, timeout: float = 5.0) -> None:
+        if thread is None or thread is threading.current_thread():
+            return
+        thread.join(timeout=timeout)
+
+    def _stop_session(self, *, unload_models: bool, announce: bool = False) -> None:
+        try:
+            self._session.shutdown()
+        except Exception as exc:
+            logger.warning(f"Voice session shutdown failed: {exc}")
+        self._join_thread(self._thread)
+        self._thread = None
+        if unload_models:
+            self._unload_ollama_models(announce=announce)
+
+    def _stop_app(self) -> None:
+        self._stop.set()
+        self._stop_session(unload_models=True)
+        self._join_thread(self._event_thread, timeout=1.0)
+        self._join_thread(self._health_thread, timeout=1.0)
+        self._event_thread = None
+        self._health_thread = None
 
     def _new_session(self) -> VoiceSession:
         session = VoiceSession(self._persona, on_event=self._events_in.put)
         session.set_manual_prompt_mode(True)
         session.set_voice_mode(self._voice_mode)
+        session.set_muted(self._muted)
+        session.set_startup_defaults(
+            model=self._model,
+            voice=self._voice,
+            voice_backend=self._tts_provider,
+            voice_model=self._current_tts_model(),
+            tts_options=self._current_tts_options(),
+        )
         session.set_voicebox_warmup_personas(
             persona_config.voicebox_personas(personas.PERSONAS, self._persona_config)
         )
@@ -126,6 +230,7 @@ class WebVoiceApp:
             self._publish(evt)
 
     def _publish(self, evt: dict) -> None:
+        evt = _json_safe(evt)
         self._fold_event(evt)
         with self._lock:
             self._event_id += 1
@@ -157,14 +262,23 @@ class WebVoiceApp:
         elif kind == "agent_job":
             job_id = str(evt.get("job_id", ""))
             if job_id:
-                self._agent_jobs[job_id] = {**self._agent_jobs.get(job_id, {}), **evt}
+                old = self._agent_jobs.get(job_id, {})
+                lines = list(old.get("lines") or [])
+                if evt.get("event") == "output" and evt.get("line"):
+                    lines.append(str(evt["line"]))
+                    del lines[:-250]
+                elif isinstance(evt.get("lines"), list):
+                    lines = list(evt["lines"])[-250:]
+                self._agent_jobs[job_id] = {**old, **evt, "lines": lines}
+        elif kind == "wake":
+            self._wake_status = {**self._wake_status, **evt}
 
     def _health_poller(self) -> None:
         while not self._stop.is_set():
             health = dashboard.ollama_health(cfg.OLLAMA_HOST)
             self._publish({"type": "health", "ok": health.ok, "label": health.label})
             tts = dashboard.tts_health(
-                cfg.TTS_BACKEND,
+                self._tts_provider,
                 voicebox_url=voicebox.base_url(),
                 has_cartesia_key=bool(tts_factory.load_env_value("CARTESIA_API_KEY")),
             )
@@ -179,9 +293,124 @@ class WebVoiceApp:
             (persona for persona in self._personas if persona.name == name), self._personas[0]
         )
 
+    def _builtin_persona_names(self) -> set[str]:
+        return {persona.name for persona in personas.PERSONAS}
+
     def _model_choices(self) -> list[str]:
-        extra = [cfg.LLM_MODEL] + [persona.model for persona in self._personas if persona.model]
-        return sorted(set(ollama_models.available(cfg.OLLAMA_HOST)) | set(extra))
+        extra = [
+            cfg.LLM_MODEL,
+            getattr(self, "_model", ""),
+            *[persona.model for persona in self._personas if persona.model],
+        ]
+        return sorted(
+            set(ollama_models.available(cfg.OLLAMA_HOST)) | {model for model in extra if model}
+        )
+
+    def _tts_providers(self) -> list[dict]:
+        return [
+            {"id": "kokoro", "label": "Kokoro"},
+            {"id": "voicebox", "label": "Voicebox"},
+            {"id": "coqui", "label": "Coqui"},
+            {"id": "cartesia", "label": "Cartesia"},
+        ]
+
+    def _current_tts_model(self) -> str | None:
+        if self._tts_provider == "coqui":
+            return self._coqui_model
+        return self._persona.voice_model
+
+    def _current_tts_options(self) -> dict:
+        if self._tts_provider != "coqui":
+            return self._persona.tts_options or {}
+        options = {
+            "speaker": self._coqui_speaker,
+            "language": self._coqui_language,
+            "device": self._coqui_device,
+        }
+        if voices.is_valid(self._persona.voice):
+            options["fallback_voice"] = self._persona.voice
+        return options
+
+    def _apply_current_tts(self) -> None:
+        self._session.set_tts(
+            voice=self._voice,
+            voice_backend=self._tts_provider,
+            model=self._current_tts_model(),
+            tts_options=self._current_tts_options(),
+        )
+
+    def _use_persona_tts_defaults(self, persona: personas.Persona) -> None:
+        self._tts_provider = persona.voice_backend
+        self._voice = persona.voice
+        if persona.voice_backend == "coqui":
+            options = persona.tts_options or {}
+            self._coqui_model = persona.voice_model or self._coqui_model or cfg.COQUI_TTS_MODEL
+            self._coqui_speaker = str(options.get("speaker") or persona.voice or "")
+            self._coqui_language = str(options.get("language") or self._coqui_language or "")
+            self._coqui_device = str(
+                options.get("device") or self._coqui_device or cfg.COQUI_TTS_DEVICE
+            )
+            self._voice = self._coqui_speaker
+
+    def _tts_payload(self, *, refresh: bool = False) -> dict:
+        coqui = coqui_tts.status_payload(self._coqui_model, refresh=refresh)
+        return {
+            "providers": self._tts_providers(),
+            "provider": self._tts_provider,
+            "model": self._current_tts_model() or "",
+            "voice": self._voice,
+            "coqui": {
+                **coqui,
+                "speaker": self._coqui_speaker,
+                "language": self._coqui_language,
+                "device": self._coqui_device,
+            },
+        }
+
+    def _reload_personas(self) -> None:
+        self._persona_config = persona_config.load_config()
+        self._personas = persona_config.effective_personas(personas.PERSONAS, self._persona_config)
+        self._models = self._model_choices()
+        self._session.set_voicebox_warmup_personas(
+            persona_config.voicebox_personas(personas.PERSONAS, self._persona_config)
+        )
+
+    def _persona_payload(self, persona: personas.Persona) -> dict:
+        builtin = persona.name in self._builtin_persona_names()
+        return {
+            "name": persona.name,
+            "description": persona.blurb,
+            "systemPrompt": persona.personality,
+            "toneStyle": "Short conversational spoken replies",
+            "model": persona.model or "",
+            "effectiveModel": persona.model_name(cfg.LLM_MODEL),
+            "voice": persona.voice,
+            "voiceBackend": persona.voice_backend,
+            "voiceModel": persona.voice_model or "",
+            "ttsOptions": persona.tts_options or {},
+            "toolUser": persona.tool_user or "",
+            "builtin": builtin,
+            "memory": {
+                "enabled": cfg.MEMORY_ENABLED,
+                "semanticEnabled": cfg.MEM0_ENABLED,
+                "mode": "global + semantic" if cfg.MEM0_ENABLED else "global transcript",
+                "canWrite": cfg.MEMORY_ENABLED,
+                "canRetrieve": cfg.MEMORY_ENABLED,
+            },
+            "voiceDefaults": {
+                "mode": self._voice_mode,
+                "wakeWord": self._voice_mode == "wake_word",
+            },
+            "routing": {"defaultAgent": persona.tool_user or self._session.default_agent_backend()},
+            "advanced": {
+                "responseFormat": "Spoken style rule appended automatically",
+                "contextHandling": "Uses the shared context composer and session transcript",
+                "safety": "Uses the app's existing confirmation and refusal behavior",
+            },
+        }
+
+    def _personas_payload(self) -> list[dict]:
+        return [self._persona_payload(persona) for persona in self._personas]
 
     def _save_state(self) -> None:
         app_state.save_state(
@@ -190,8 +419,107 @@ class WebVoiceApp:
                 persona=self._persona.name,
                 tool_user=self._session.default_agent_backend(),
                 voice_mode=self._voice_mode,
+                model=self._model,
+                voice=self._voice,
+                tts_provider=self._tts_provider,
+                coqui_model=self._coqui_model,
+                coqui_speaker=self._coqui_speaker,
+                coqui_language=self._coqui_language,
+                coqui_device=self._coqui_device,
+                agent_prompts=self._app_state.agent_prompts,
             ),
         )
+
+    def _agent_prompt_current(self) -> dict[str, str]:
+        return {
+            "scopePreamble": cfg.AGENT_SCOPE_PREAMBLE,
+            "statusProtocol": agent_bridge.status_protocol(),
+            "delegateStyle": cfg.LLM_DELEGATE_STYLE,
+            "dispatchAck": cfg.DELEGATION_ACK_PROMPT,
+            "update": cfg.AGENT_UPDATE_PROMPT,
+            "confirm": cfg.DELEGATION_CONFIRM_PROMPT,
+            "confirmApproved": cfg.AGENT_CONFIRM_APPROVED_PROMPT,
+            "confirmDenied": cfg.AGENT_CONFIRM_DENIED_PROMPT,
+        }
+
+    def _agent_prompt_payload(self) -> dict:
+        current = self._agent_prompt_current()
+        return {
+            key: {
+                "key": key,
+                "label": meta["label"],
+                "help": meta["help"],
+                "required": meta["required"],
+                "default": _AGENT_PROMPT_DEFAULTS[key],
+                "value": current[key],
+                "custom": key in self._app_state.agent_prompts,
+            }
+            for key, meta in _AGENT_PROMPT_FIELDS.items()
+        }
+
+    def _agents_payload(self) -> dict:
+        return {
+            "jobs": list(self._agent_jobs.values()),
+            "history": self._session.agent_history(),
+            "prompts": self._agent_prompt_payload(),
+            "status": self._status_payload(),
+        }
+
+    def _apply_agent_prompt_overrides(self) -> None:
+        clean: dict[str, str] = {}
+        for key, value in (self._app_state.agent_prompts or {}).items():
+            if key not in _AGENT_PROMPT_FIELDS or not isinstance(value, str):
+                continue
+            if self._prompt_missing_placeholders(key, value):
+                continue
+            clean[key] = value
+        self._app_state.agent_prompts = clean
+        values = {**_AGENT_PROMPT_DEFAULTS, **clean}
+        cfg.AGENT_SCOPE_PREAMBLE = values["scopePreamble"]
+        agent_bridge.set_status_protocol(values["statusProtocol"])
+        cfg.LLM_DELEGATE_STYLE = values["delegateStyle"]
+        cfg.DELEGATION_ACK_PROMPT = values["dispatchAck"]
+        cfg.AGENT_UPDATE_PROMPT = values["update"]
+        cfg.DELEGATION_CONFIRM_PROMPT = values["confirm"]
+        cfg.AGENT_CONFIRM_APPROVED_PROMPT = values["confirmApproved"]
+        cfg.AGENT_CONFIRM_DENIED_PROMPT = values["confirmDenied"]
+
+    def _prompt_missing_placeholders(self, key: str, text: str) -> list[str]:
+        required = _AGENT_PROMPT_FIELDS.get(key, {}).get("required", [])
+        return [placeholder for placeholder in required if placeholder not in text]
+
+    def _save_agent_prompts(self, payload: dict) -> dict:
+        incoming = payload.get("prompts")
+        if not isinstance(incoming, dict):
+            return {"ok": False, "error": "prompts must be an object"}
+        saved = dict(self._app_state.agent_prompts)
+        for key, value in incoming.items():
+            if key not in _AGENT_PROMPT_FIELDS:
+                continue
+            text = str(value)
+            missing = self._prompt_missing_placeholders(key, text)
+            if missing:
+                return {
+                    "ok": False,
+                    "error": f"{_AGENT_PROMPT_FIELDS[key]['label']} must include "
+                    + ", ".join(missing),
+                    "prompts": self._agent_prompt_payload(),
+                    "status": self._status_payload(),
+                }
+            if text == _AGENT_PROMPT_DEFAULTS[key]:
+                saved.pop(key, None)
+            else:
+                saved[key] = text
+        self._app_state.agent_prompts = saved
+        self._apply_agent_prompt_overrides()
+        self._session.set_agent_scope_preamble(cfg.AGENT_SCOPE_PREAMBLE)
+        self._save_state()
+        return {
+            "ok": True,
+            "message": "Agent prompts saved.",
+            "prompts": self._agent_prompt_payload(),
+            "status": self._status_payload(),
+        }
 
     def _status_payload(self) -> dict:
         active_statuses = {"running", "waiting", "blocked"}
@@ -214,15 +542,7 @@ class WebVoiceApp:
             "model": self._model,
             "voice": self._voice,
             "toolUser": self._session.default_agent_backend(),
-            "personas": [
-                {
-                    "name": p.name,
-                    "blurb": p.blurb,
-                    "voice": p.voice,
-                    "model": p.model_name(cfg.LLM_MODEL),
-                }
-                for p in self._personas
-            ],
+            "personas": self._personas_payload(),
             "models": self._models,
             "voices": [
                 {"label": label, "value": value} for label, value in self._voice_map.items()
@@ -236,10 +556,46 @@ class WebVoiceApp:
             "agentStates": agent_states,
             "health": self._health,
             "ttsHealth": self._tts_health,
+            "tts": self._tts_payload(),
             "latency": self._latency.values,
             "pendingConfirms": self._pending_confirms,
             "memoryEnabled": cfg.MEMORY_ENABLED,
             "semanticMemoryEnabled": cfg.MEM0_ENABLED,
+            "wake": self._wake_payload(),
+        }
+
+    def _initial_wake_status(self) -> dict:
+        settings = wake_word.settings_from_config(
+            cfg, enabled=cfg.WAKE_WORD_ENABLED or self._voice_mode == "wake_word"
+        )
+        target = settings.effective_targets[0]
+        return {
+            "type": "wake",
+            "state": "inactive",
+            "phase": "idle",
+            "model": target.model,
+            "model_path": target.model_path,
+            "persona": target.persona,
+            "score": None,
+            "error": "",
+            "window_secs": settings.active_window_secs,
+            "remaining_secs": 0.0,
+            "detector_loaded": False,
+            "passive": False,
+            "available": [
+                {"model": item.model, "persona": item.persona, "model_path": item.model_path}
+                for item in settings.effective_targets
+            ],
+        }
+
+    def _wake_payload(self) -> dict:
+        phase = str(self._wake_status.get("phase") or "idle")
+        if self._voice_mode != "wake_word":
+            phase = "idle"
+        return {
+            **self._wake_status,
+            "enabled": self._voice_mode == "wake_word",
+            "phase": phase,
         }
 
     def _events_after(self, after: int) -> dict:
@@ -263,18 +619,48 @@ class WebVoiceApp:
         elif name == "persona":
             self._persona = self._persona_by_name(str(payload.get("name", "")))
             self._model = self._persona.model_name(cfg.LLM_MODEL)
-            self._voice = self._persona.voice
+            self._use_persona_tts_defaults(self._persona)
             self._session.set_persona(self._persona)
             self._save_state()
+        elif name == "persona_create":
+            return self._create_persona(payload)
+        elif name == "persona_save":
+            return self._save_persona(payload)
+        elif name == "persona_duplicate":
+            return self._duplicate_persona(payload)
+        elif name == "persona_delete":
+            return self._delete_persona(payload)
         elif name == "model":
             self._model = str(payload.get("model", ""))
             self._session.set_model(self._model)
+            self._save_state()
         elif name == "voice":
             self._voice = str(payload.get("voice", ""))
             self._session.set_voice(self._voice)
+            self._save_state()
+        elif name == "tts":
+            self._tts_provider = str(payload.get("provider") or self._tts_provider).strip()
+            self._voice = str(payload.get("voice") or self._voice).strip()
+            if self._tts_provider == "coqui":
+                self._coqui_model = str(payload.get("model") or self._coqui_model).strip()
+                self._coqui_speaker = str(payload.get("speaker") or "").strip()
+                self._coqui_language = str(payload.get("language") or "").strip()
+                self._coqui_device = str(payload.get("device") or self._coqui_device).strip()
+                self._voice = self._coqui_speaker
+            self._apply_current_tts()
+            self._save_state()
+        elif name == "tts_refresh":
+            self._tts_payload(refresh=True)
+            return {"ok": True, "status": self._status_payload()}
+        elif name == "tts_test":
+            self._apply_current_tts()
+            self._session.speak_text("This is the selected text to speech voice.")
+            return {"ok": True, "message": "Test voice queued.", "status": self._status_payload()}
         elif name == "tool_user":
             self._session.set_default_agent_backend(str(payload.get("backend", "")))
             self._save_state()
+        elif name == "agent_prompts_save":
+            return self._save_agent_prompts(payload)
         elif name == "send":
             self._session.send_multimodal_prompt(_bundle_from_payload(payload, self._voice_mode))
         elif name == "delegate":
@@ -302,6 +688,156 @@ class WebVoiceApp:
             return {"ok": False, "error": f"unknown action: {name}"}
         return {"ok": True, "status": self._status_payload()}
 
+    def _create_persona(self, payload: dict) -> dict:
+        source = self._persona_by_name(str(payload.get("source", self._persona.name)))
+        name = self._unique_persona_name("New Persona")
+        self._persona_config.custom_personas[name] = persona_config.override_from_persona(
+            personas.Persona(
+                name=name,
+                voice=source.voice,
+                voice_backend=source.voice_backend,
+                voice_model=source.voice_model,
+                tts_options=source.tts_options,
+                personality=source.personality,
+                blurb="",
+                model=source.model,
+                tool_user=source.tool_user,
+            )
+        )
+        persona_config.save_config(self._persona_config)
+        self._reload_personas()
+        self._activate_persona(name)
+        return {"ok": True, "message": f"Created {name}.", "status": self._status_payload()}
+
+    def _save_persona(self, payload: dict) -> dict:
+        original = str(payload.get("originalName", "")).strip()
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            return {
+                "ok": False,
+                "error": "Persona name is required.",
+                "status": self._status_payload(),
+            }
+        if not str(payload.get("systemPrompt", "")).strip():
+            return {
+                "ok": False,
+                "error": "System prompt is required.",
+                "status": self._status_payload(),
+            }
+        builtin_names = self._builtin_persona_names()
+        if original in builtin_names and name != original:
+            return {
+                "ok": False,
+                "error": "Built-in personas cannot be renamed. Duplicate it first.",
+                "status": self._status_payload(),
+            }
+        if name != original and name in self._persona_names():
+            return {
+                "ok": False,
+                "error": f"{name} already exists.",
+                "status": self._status_payload(),
+            }
+        override = self._override_from_payload(payload)
+        if not persona_config.valid_tool_user(override.tool_user):
+            return {
+                "ok": False,
+                "error": f"Unknown tool user: {override.tool_user}",
+                "status": self._status_payload(),
+            }
+        if original in builtin_names:
+            self._persona_config.personas[original] = override
+        else:
+            self._persona_config.custom_personas.pop(original, None)
+            self._persona_config.custom_personas[name] = override
+        persona_config.save_config(self._persona_config)
+        self._reload_personas()
+        if original == self._persona.name or name == self._persona.name:
+            self._activate_persona(name)
+        return {"ok": True, "message": f"Saved {name}.", "status": self._status_payload()}
+
+    def _duplicate_persona(self, payload: dict) -> dict:
+        source = self._persona_by_name(str(payload.get("name", self._persona.name)))
+        name = self._unique_persona_name(f"{source.name} Copy")
+        self._persona_config.custom_personas[name] = persona_config.override_from_persona(
+            personas.Persona(
+                name=name,
+                voice=source.voice,
+                voice_backend=source.voice_backend,
+                voice_model=source.voice_model,
+                tts_options=source.tts_options,
+                personality=source.personality,
+                blurb=source.blurb,
+                model=source.model,
+                tool_user=source.tool_user,
+            )
+        )
+        persona_config.save_config(self._persona_config)
+        self._reload_personas()
+        self._activate_persona(name)
+        return {
+            "ok": True,
+            "message": f"Duplicated {source.name}.",
+            "status": self._status_payload(),
+        }
+
+    def _delete_persona(self, payload: dict) -> dict:
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            return {
+                "ok": False,
+                "error": "Persona name is required.",
+                "status": self._status_payload(),
+            }
+        if name in self._builtin_persona_names():
+            self._persona_config.personas.pop(name, None)
+            message = f"Reset {name} to built-in defaults."
+        else:
+            self._persona_config.custom_personas.pop(name, None)
+            message = f"Deleted {name}."
+        persona_config.save_config(self._persona_config)
+        self._reload_personas()
+        if self._persona.name == name:
+            self._activate_persona(
+                app_state.resolve_persona_name("", self._persona_names(), cfg.DEFAULT_PERSONA_NAME)
+            )
+        return {"ok": True, "message": message, "status": self._status_payload()}
+
+    def _override_from_payload(self, payload: dict) -> persona_config.PersonaOverride:
+        backend = str(payload.get("voiceBackend", "")).strip() or cfg.TTS_BACKEND
+        tts_options = {}
+        if backend == "coqui":
+            tts_options = {
+                "speaker": str(payload.get("coquiSpeaker", "")).strip(),
+                "language": str(payload.get("coquiLanguage", "")).strip(),
+                "device": str(payload.get("coquiDevice", "")).strip() or cfg.COQUI_TTS_DEVICE,
+            }
+        return persona_config.PersonaOverride(
+            voice=str(payload.get("voice", "")).strip() or self._persona.voice,
+            voice_backend=backend,
+            voice_model=str(payload.get("voiceModel", "")).strip() or None,
+            tts_options={k: v for k, v in tts_options.items() if v},
+            personality=str(payload.get("systemPrompt", "")).strip(),
+            blurb=str(payload.get("description", "")).strip(),
+            model=str(payload.get("model", "")).strip() or None,
+            tool_user=str(payload.get("toolUser", "")).strip() or None,
+        )
+
+    def _activate_persona(self, name: str) -> None:
+        self._persona = self._persona_by_name(name)
+        self._model = self._persona.model_name(cfg.LLM_MODEL)
+        self._use_persona_tts_defaults(self._persona)
+        self._session.set_persona(self._persona)
+        self._save_state()
+
+    def _unique_persona_name(self, stem: str) -> str:
+        names = set(self._persona_names())
+        if stem not in names:
+            return stem
+        index = 2
+        while f"{stem} {index}" in names:
+            index += 1
+        return f"{stem} {index}"
+
     def _start_ollama(self) -> None:
         try:
             dashboard.start_ollama_app()
@@ -310,17 +846,28 @@ class WebVoiceApp:
             self._publish({"type": "sys", "text": f"Could not start Ollama: {exc}"})
 
     def _free_vram(self) -> None:
+        self._unload_ollama_models(announce=True)
+
+    def _unload_ollama_models(self, *, announce: bool) -> None:
         try:
             count = dashboard.stop_loaded_models(cfg.OLLAMA_HOST)
-            self._publish({"type": "sys", "text": f"Unloaded {count} Ollama model(s)."})
+            message = f"Unloaded {count} Ollama model(s)."
+            if announce:
+                self._publish({"type": "sys", "text": message})
+            else:
+                logger.info(message)
         except Exception as exc:
-            self._publish({"type": "sys", "text": f"Could not unload models: {exc}"})
+            message = f"Could not unload models: {exc}"
+            if announce:
+                self._publish({"type": "sys", "text": message})
+            else:
+                logger.warning(message)
 
     def _export_diagnostics(self) -> None:
         try:
             report = diagnostics.build_report(
                 session_snapshot=self._session.export_snapshot(),
-                tts_backend=cfg.TTS_BACKEND,
+                tts_backend=self._tts_provider,
                 ollama=self._health,
                 tts=self._tts_health,
                 latency_line=dashboard.format_latency_line(self._latency),
@@ -334,15 +881,10 @@ class WebVoiceApp:
 
     def _reboot_session(self) -> None:
         self._publish({"type": "session", "state": "rebooting"})
-        self._session.shutdown()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+        self._stop_session(unload_models=True, announce=True)
         self._session = self._new_session()
-        self._model = self._persona.model_name(cfg.LLM_MODEL)
-        self._voice = self._persona.voice
         self._session.set_muted(self._muted)
-        self._thread = threading.Thread(target=self._boot_thread, daemon=True)
-        self._thread.start()
+        self._start_session_thread()
 
     def _handler_class(self):
         app = self
@@ -352,6 +894,9 @@ class WebVoiceApp:
                 parsed = urlparse(self.path)
                 if parsed.path == "/api/status":
                     self._send_json(app._status_payload())
+                    return
+                if parsed.path == "/api/agents":
+                    self._send_json(app._agents_payload())
                     return
                 if parsed.path == "/api/events":
                     after = int(parse_qs(parsed.query).get("after", ["0"])[0] or 0)
@@ -438,9 +983,28 @@ def _bundle_from_payload(
     return bundle
 
 
+def _json_safe(value):
+    """Return a JSON-serializable copy of event/status payload values."""
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+    item = getattr(value, "item", None)
+    if callable(item):
+        return _json_safe(item())
+    return str(value)
+
+
 def run() -> None:
     """Launch the web UI."""
-    WebVoiceApp().run()
+    process_guard.close_previous_instance()
+    process_guard.write_lock()
+    try:
+        WebVoiceApp().run()
+    finally:
+        process_guard.release_lock()
 
 
 if __name__ == "__main__":

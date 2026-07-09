@@ -1,10 +1,8 @@
-"""Remember the operator's last picks (persona, tool user) across restarts.
+"""Remember the operator's app defaults across restarts.
 
-Deliberately tiny: this is UI state, not configuration. Persona *definitions*
-live in personas.py / persona_overrides.json; this file only records which one
-was active so the app boots as the character you actually use. Ad-hoc voice and
-model picks stay session-scoped on purpose -- pinning those is what the config
-panel's "Save persona" is for.
+Deliberately tiny: this is UI state, not persona configuration. Persona
+*definitions* live in personas.py / persona_overrides.json; this file records
+which runtime picks should come back on the next boot.
 
 Best-effort throughout: a missing or corrupt state file just means defaults.
 """
@@ -14,7 +12,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from loguru import logger
@@ -29,6 +27,14 @@ class AppState:
     persona: str | None = None
     tool_user: str | None = None
     voice_mode: str = multimodal_prompt.DEFAULT_VOICE_MODE
+    model: str | None = None
+    voice: str | None = None
+    tts_provider: str | None = None
+    coqui_model: str | None = None
+    coqui_speaker: str | None = None
+    coqui_language: str | None = None
+    coqui_device: str | None = None
+    agent_prompts: dict[str, str] = field(default_factory=dict)
 
 
 def load_state(path: str | Path) -> AppState:
@@ -45,10 +51,27 @@ def load_state(path: str | Path) -> AppState:
         return AppState()
     if not isinstance(raw, dict):
         return AppState()
+    agent_prompts = raw.get("agent_prompts")
+    if not isinstance(agent_prompts, dict):
+        agent_prompts = {}
     return AppState(
         persona=raw.get("persona") if isinstance(raw.get("persona"), str) else None,
         tool_user=raw.get("tool_user") if isinstance(raw.get("tool_user"), str) else None,
         voice_mode=multimodal_prompt.normalize_voice_mode(raw.get("voice_mode")),
+        model=raw.get("model") if isinstance(raw.get("model"), str) else None,
+        voice=raw.get("voice") if isinstance(raw.get("voice"), str) else None,
+        tts_provider=raw.get("tts_provider") if isinstance(raw.get("tts_provider"), str) else None,
+        coqui_model=raw.get("coqui_model") if isinstance(raw.get("coqui_model"), str) else None,
+        coqui_speaker=raw.get("coqui_speaker")
+        if isinstance(raw.get("coqui_speaker"), str)
+        else None,
+        coqui_language=raw.get("coqui_language")
+        if isinstance(raw.get("coqui_language"), str)
+        else None,
+        coqui_device=raw.get("coqui_device") if isinstance(raw.get("coqui_device"), str) else None,
+        agent_prompts={
+            str(key): value for key, value in agent_prompts.items() if isinstance(value, str)
+        },
     )
 
 

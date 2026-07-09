@@ -31,8 +31,9 @@ class Persona:
     blurb: str = ""  # one-liner shown in the GUI for flavour
     model: str | None = None  # override Ollama model; None = config.LLM_MODEL
     tool_user: str | None = None  # default delegated agent for this persona
-    voice_backend: str = "kokoro"  # kokoro / voicebox / cartesia
+    voice_backend: str = "kokoro"  # kokoro / voicebox / coqui / cartesia
     voice_model: str | None = None  # provider model/size, e.g. Voicebox 1.7B
+    tts_options: dict | None = None  # provider-specific fields (speaker/language/device)
 
     @property
     def system_prompt(self) -> str:

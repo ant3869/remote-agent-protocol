@@ -123,6 +123,11 @@ class VoiceSession:
         self._context_active = False
         self._push_to_talk_active = False
         self._wake_gate: wake_word.WakeWordGate | None = None
+        self._startup_model: str | None = None
+        self._startup_voice: str | None = None
+        self._startup_tts_backend: str | None = None
+        self._startup_tts_model: str | None = None
+        self._startup_tts_options: dict | None = None
 
         # Delegations held awaiting the user's yes/no: token -> (agent, task, cwd).
         self._pending_confirmations: dict[str, tuple[str, str, str | None]] = {}
@@ -139,6 +144,7 @@ class VoiceSession:
         # newest last -- lets a repeated proposal be flagged in logs/GUI
         # instead of silently re-asking as if nothing happened.
         self._recently_denied: deque[tuple[str, str]] = deque(maxlen=5)
+        self._recent_delegations: deque[tuple[float, str]] = deque(maxlen=20)
 
         # Intent routing: every utterance gets a RoutingDecision; the last 25
         # are kept for the diagnostics snapshot. _force_confirm carries an
@@ -190,6 +196,7 @@ class VoiceSession:
             self._persona.voice,
             voice_model=self._persona.voice_model,
             voice_backend=self._persona.voice_backend,
+            tts_options=self._persona.tts_options,
         )
 
         vad = SileroVADAnalyzer(
@@ -211,13 +218,16 @@ class VoiceSession:
         remembered = (
             memory.load_memory(cfg.MEMORY_FILE, cfg.MEMORY_MAX_MSGS) if cfg.MEMORY_ENABLED else []
         )
+        remembered = memory.strip_ephemeral(
+            remembered,
+            system_prefixes=(cfg.MEM0_MEMORY_HEADER,),
+            drop_contents=(cfg.KICKOFF_RETURNING, cfg.KICKOFF_FIRST),
+            drop_prefixes=cfg.EPHEMERAL_PROMPT_PREFIXES,
+        )
         if remembered:
             self._context.set_messages(remembered)
 
-        self._mem0_service = None
-        if cfg.MEM0_ENABLED:
-            logger.info("Initializing mem0 semantic memory (local Ollama + Qdrant)...")
-            self._mem0_service = mem0_setup.create_memory_service()
+        self._initialize_mem0_service()
 
         self._gate = MicGate(muted=self._muted)
         self._apply_input_gate_state()
@@ -265,6 +275,17 @@ class VoiceSession:
             params=PipelineParams(enable_metrics=True, enable_usage_metrics=True),
         )
 
+    def _initialize_mem0_service(self) -> None:
+        self._mem0_service = None
+        if not cfg.MEM0_ENABLED:
+            return
+        logger.info("Initializing mem0 semantic memory (local Ollama + Qdrant)...")
+        try:
+            self._mem0_service = mem0_setup.create_memory_service()
+        except Exception as exc:
+            logger.warning(f"Semantic memory unavailable; continuing without mem0: {exc}")
+            self._emit({"type": "sys", "text": f"-- semantic memory unavailable: {exc} --"})
+
     def _build_wake_gate(self) -> "wake_word.WakeWordGate | None":
         """Build the wake-word gate when enabled and usable, else None."""
         should_build = (
@@ -295,6 +316,20 @@ class VoiceSession:
             await self._lifecycle_ws.start()
         self._start_voicebox_warmups()
         self._spawn(self._router.warmup(), name="intent-router-warmup")
+        if (
+            self._startup_voice
+            or self._startup_tts_backend
+            or self._startup_tts_model
+            or self._startup_tts_options
+        ):
+            await self._apply_tts(
+                voice=self._startup_voice or self._persona.voice,
+                voice_backend=self._startup_tts_backend or self._persona.voice_backend,
+                model=self._startup_tts_model or self._persona.voice_model,
+                tts_options=self._startup_tts_options or self._persona.tts_options,
+            )
+        if self._startup_model and self._startup_model != self._persona.model_name(cfg.LLM_MODEL):
+            await self._apply_model(self._startup_model)
 
         # Kick things off. "user" role because Ollama doesn't know "developer".
         remembered = bool(self._context and self._context.get_messages())
@@ -313,6 +348,7 @@ class VoiceSession:
             # their transports die in __del__ after loop close (noisy crash on
             # the Windows proactor loop) and the children leak.
             await self._bridge.shutdown()
+            voicebox.stop_server()
             self._save_memory()
 
     def _save_memory(self) -> None:
@@ -391,6 +427,22 @@ class VoiceSession:
         if self._wake_gate is not None:
             self._wake_gate.set_enabled(self._voice_mode == multimodal_prompt.VOICE_MODE_WAKE_WORD)
 
+    def set_startup_defaults(
+        self,
+        *,
+        model: str | None = None,
+        voice: str | None = None,
+        voice_backend: str | None = None,
+        voice_model: str | None = None,
+        tts_options: dict | None = None,
+    ) -> None:
+        """Apply saved defaults before the first LLM/TTS turn after build()."""
+        self._startup_model = model or None
+        self._startup_voice = voice or None
+        self._startup_tts_backend = voice_backend or None
+        self._startup_tts_model = voice_model or None
+        self._startup_tts_options = tts_options or None
+
     def set_push_to_talk(self, active: bool) -> None:
         """Open the mic only while the push-to-talk control is held."""
         self._push_to_talk_active = active
@@ -419,6 +471,24 @@ class VoiceSession:
     def set_voice(self, voice: str) -> None:
         """Live-swap the TTS voice; takes effect on the next spoken utterance."""
         self._schedule(self._apply_voice(voice))
+
+    def set_tts(
+        self,
+        *,
+        voice: str,
+        voice_backend: str,
+        model: str | None = None,
+        tts_options: dict | None = None,
+    ) -> None:
+        """Live-swap TTS provider settings; takes effect on the next spoken utterance."""
+        self._schedule(
+            self._apply_tts(
+                voice=voice,
+                voice_backend=voice_backend,
+                model=model,
+                tts_options=tts_options,
+            )
+        )
 
     def set_model(self, model: str) -> None:
         """Live-swap the Ollama LLM model; takes effect on the next reply."""
@@ -507,6 +577,10 @@ class VoiceSession:
         self._default_agent_backend = backend
         logger.info(f"Default agent backend -> {backend}")
 
+    def set_agent_scope_preamble(self, preamble: str) -> None:
+        """Update the scope preamble used for future delegated jobs."""
+        self._bridge.set_scope_preamble(preamble)
+
     def send_text(self, text: str) -> None:
         """Typed input: same brain as voice (incl. delegation), spoken reply."""
         self._schedule(self._send_text(text))
@@ -518,6 +592,10 @@ class VoiceSession:
     def announce_text(self, text: str) -> None:
         """Have Jess relay ``text`` out loud, in-character, right now."""
         self._schedule(self._announce_text(text))
+
+    def speak_text(self, text: str) -> None:
+        """Speak exactly this text through the active TTS provider."""
+        self._schedule(self._speak_text(text))
 
     def start_agent_task(self, agent: str, task: str, cwd: str | None = None) -> None:
         """Fire-and-forget: delegate a task to an external agent, async."""
@@ -552,32 +630,56 @@ class VoiceSession:
             logger.info(f"Voice switch ignored for {cfg.TTS_BACKEND} backend: {voice}")
             return
         backend = voicebox.backend_for_voice(voice, cfg.TTS_BACKEND.lower().strip())
-        delta = self._tts_delta(
+        await self._apply_tts(
             voice=voice,
             voice_backend=backend,
             model=cfg.VOICEBOX_DEFAULT_MODEL if backend == "voicebox" else None,
         )
-        await self._worker.queue_frames([TTSUpdateSettingsFrame(delta=delta)])
-        logger.info(f"Voice -> {voice} ({backend})")
 
     async def _apply_persona_tts(self, persona: Persona) -> None:
         assert self._tts is not None and self._worker is not None
-        delta = self._tts_delta(
+        await self._apply_tts(
             voice=persona.voice,
             model=persona.voice_model,
             voice_backend=persona.voice_backend,
+            tts_options=persona.tts_options,
+        )
+
+    async def _apply_tts(
+        self,
+        *,
+        voice: str,
+        voice_backend: str,
+        model: str | None,
+        tts_options: dict | None = None,
+    ) -> None:
+        assert self._tts is not None and self._worker is not None
+        delta = self._tts_delta(
+            voice=voice,
+            model=model,
+            voice_backend=voice_backend,
+            tts_options=tts_options,
         )
         await self._worker.queue_frames([TTSUpdateSettingsFrame(delta=delta)])
-        logger.info(f"Voice -> {persona.voice} ({persona.voice_backend})")
+        logger.info(f"TTS -> {voice_backend} voice={voice} model={model or '-'}")
 
-    def _tts_delta(self, *, voice: str, model: str | None, voice_backend: str):
+    def _tts_delta(
+        self,
+        *,
+        voice: str,
+        model: str | None,
+        voice_backend: str,
+        tts_options: dict | None = None,
+    ):
         """Build a settings delta the active TTS service actually accepts.
 
         ``voice_backend`` only exists on PersonaTTSService's settings; other
         backends (Cartesia) reject unknown fields, so pass what fits.
         """
         if isinstance(self._tts, PersonaTTSService):
-            return self._tts.Settings(voice=voice, model=model, voice_backend=voice_backend)
+            return self._tts.Settings(
+                voice=voice, model=model, voice_backend=voice_backend, extra=tts_options or {}
+            )
         return self._tts.Settings(voice=voice)
 
     async def _apply_model(self, model: str) -> None:
@@ -770,6 +872,7 @@ class VoiceSession:
     def _delegate_ack_ex(self, agent: str, task: str, cwd: str | None = None) -> tuple[str, bool]:
         """Dispatch or hold a delegation; return (LLM-facing ack, was_held)."""
         self._agent_ack_turn = True  # the reply to the ack talks about the agent truthfully
+        self._remember_delegation(task)
         force_confirm, self._force_confirm = self._force_confirm, False
         forced_reason, self._force_confirm_reason = self._force_confirm_reason, ""
         destructive = cfg.AGENT_CONFIRM_ENABLED and voice_commands.requires_confirmation(
@@ -825,6 +928,26 @@ class VoiceSession:
     def _remember_denial(self, agent: str, task: str) -> None:
         self._recently_denied.append((agent, task.strip().lower()))
 
+    @staticmethod
+    def _delegation_key(task: str) -> str:
+        """Normalize a task enough to dedupe echoed markers, not user intent."""
+        return " ".join(task.casefold().split())
+
+    def _remember_delegation(self, task: str) -> None:
+        key = self._delegation_key(task)
+        if key:
+            self._recent_delegations.append((time.monotonic(), key))
+
+    def _recently_delegated(self, task: str) -> bool:
+        key = self._delegation_key(task)
+        if not key:
+            return False
+        now = time.monotonic()
+        ttl = max(30.0, cfg.AGENT_PROGRESS_INTERVAL_SECS * 3)
+        while self._recent_delegations and now - self._recent_delegations[0][0] > ttl:
+            self._recent_delegations.popleft()
+        return any(recent_key == key for _, recent_key in self._recent_delegations)
+
     def _llm_delegate(self, task: str) -> None:
         """The LLM embedded a [[delegate: ...]] marker; run it for real.
 
@@ -846,6 +969,9 @@ class VoiceSession:
         """
         if self._agent_ack_turn:
             logger.info(f"Ignoring LLM delegation marker on an ack/confirm turn: {task!r}")
+            return
+        if self._recently_delegated(task):
+            logger.info(f"Ignoring duplicate LLM delegation marker for handled task: {task!r}")
             return
         ack, held = self._delegate_ack_ex(self._default_agent_backend, task)
         if held:
@@ -1247,6 +1373,11 @@ class VoiceSession:
             return
         self._context.add_message({"role": "user", "content": template.format(**{field: text})})
         await self._worker.queue_frames([LLMRunFrame()])
+
+    async def _speak_text(self, text: str) -> None:
+        if self._worker is None:
+            return
+        await self._worker.queue_frames([TTSSpeakFrame(text=text, append_to_context=False)])
 
     async def _forget_semantic_memory(self) -> None:
         if self._mem0_service is None:

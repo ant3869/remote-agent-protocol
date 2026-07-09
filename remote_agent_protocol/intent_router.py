@@ -150,6 +150,11 @@ _CODING_TASK_RE = re.compile(
     r"pull request|merge conflict|stack trace|compile|repo(?:sitory)?)\b",
     re.IGNORECASE,
 )
+_PRODUCT_RESEARCH_RE = re.compile(
+    r"\b(?:top[- ]rated|most bought|best|reviews?|rated|buy|shopping|"
+    r"product|accessor(?:y|ies)|head\s+strap|quest|oculus|metaquest)\b",
+    re.IGNORECASE,
+)
 
 # Mirrors the "Examples:" block in _CLASSIFIER_SYSTEM -- kept as data (not
 # parsed from the prompt string) so a leaked example can be recognized
@@ -345,6 +350,14 @@ def _is_anaphoric(text: str) -> bool:
     return len(_content_words(text) - _ANAPHORA_WORDS) <= 1
 
 
+def _looks_fragmentary(text: str) -> bool:
+    """True for clipped wake-window crumbs that carry no task object."""
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    if len(words) <= 2 and not _content_words(text):
+        return True
+    return len(words) == 1 and words[0] in {"system"}
+
+
 def _classify_risk(agent: str, task: str, *, grounded: bool, confident: bool) -> str:
     """Classify WHY a decision might need a human in the loop, for logs/GUI.
 
@@ -462,6 +475,8 @@ def _clean_task(task: str, utterance: str) -> str:
 
 def _select_backend(task: str, default_backend: str, category: str) -> str:
     """Prefer the configured coding agent for concrete codebase work."""
+    if category in READ_ONLY_CATEGORIES and default_backend == "code-puppy":
+        return "hermes" if "hermes" in cfg.AGENT_BACKENDS else default_backend
     if (
         category in {"files_or_apps", "other_action"}
         and "code-puppy" in cfg.AGENT_BACKENDS
@@ -469,6 +484,12 @@ def _select_backend(task: str, default_backend: str, category: str) -> str:
     ):
         return "code-puppy"
     return default_backend
+
+
+def _normalize_category(category: str, task: str, text: str) -> str:
+    if category == "files_or_apps" and _PRODUCT_RESEARCH_RE.search(f"{text} {task}"):
+        return "web_research"
+    return category
 
 
 class IntentRouter:
@@ -587,6 +608,14 @@ class IntentRouter:
                 source="noise",
                 fallback="noise",
             )
+        if _looks_fragmentary(text):
+            logger.info(f"Routing[noise] rejecting fragmentary utterance: {text!r}")
+            return RoutingDecision(
+                text=text,
+                reason="clipped or fragmentary utterance, not enough to delegate",
+                source="noise",
+                fallback="noise",
+            )
 
         # Tier 4: a vague reference to a named capability ("there's a package
         # for X, I forgot the name, make sure we have it"). Any rewrite loses
@@ -619,12 +648,13 @@ class IntentRouter:
         # dispatch without spending the classifier budget.
         task = voice_commands.parse_implicit_task(text) if self._auto_delegate else None
         if task is not None:
-            agent = _select_backend(task, default_backend, "other_action")
+            category = "web_research" if _PRODUCT_RESEARCH_RE.search(task) else "other_action"
+            agent = _select_backend(task, default_backend, category)
             return RoutingDecision(
                 text=text,
                 action=ACTION_DISPATCH,
                 intent="agent_task",
-                category="other_action",
+                category=category,
                 requirement="required",
                 confidence=0.9,
                 task=task,
@@ -669,9 +699,10 @@ class IntentRouter:
             and verdict["confidence"] >= self._confirm_conf
         ):
             confident = verdict["confidence"] >= self._dispatch_conf
-            read_only = verdict["category"] in READ_ONLY_CATEGORIES
             task = _clean_task(verdict["task"], text)
-            agent = _select_backend(task, default_backend, verdict["category"])
+            category = _normalize_category(verdict["category"], task, text)
+            read_only = category in READ_ONLY_CATEGORIES
+            agent = _select_backend(task, default_backend, category)
             ungrounded = _grounding_gap(task, verdict["reason"], text)
             if ungrounded is None:
                 return RoutingDecision(
@@ -680,7 +711,7 @@ class IntentRouter:
                     # anyway; anything that could change state asks first.
                     action=ACTION_DISPATCH if (confident or read_only) else ACTION_CONFIRM,
                     intent="agent_task",
-                    category=verdict["category"],
+                    category=category,
                     requirement="required" if confident else "optional",
                     confidence=verdict["confidence"],
                     task=task,
@@ -722,7 +753,7 @@ class IntentRouter:
                     text=text,
                     action=ACTION_CONFIRM,
                     intent="agent_task",
-                    category=verdict["category"],
+                    category=category,
                     requirement="optional",
                     confidence=verdict["confidence"],
                     task=task,

@@ -25,6 +25,7 @@ class PersonaOverride:
     voice: str | None = None
     voice_backend: str | None = None
     voice_model: str | None = None
+    tts_options: dict | None = None
     personality: str | None = None
     blurb: str | None = None
     model: str | None = None
@@ -36,6 +37,7 @@ class PersonaConfig:
     """All persona overrides, keyed by persona name."""
 
     personas: dict[str, PersonaOverride] = field(default_factory=dict)
+    custom_personas: dict[str, PersonaOverride] = field(default_factory=dict)
 
 
 def load_config(path: str | Path = CONFIG_PATH) -> PersonaConfig:
@@ -49,19 +51,29 @@ def load_config(path: str | Path = CONFIG_PATH) -> PersonaConfig:
         for name, values in raw.get("personas", {}).items()
         if isinstance(values, dict)
     }
-    return PersonaConfig(personas=overrides)
+    custom = {
+        name: PersonaOverride(**values)
+        for name, values in raw.get("custom_personas", {}).items()
+        if isinstance(values, dict)
+    }
+    return PersonaConfig(personas=overrides, custom_personas=custom)
 
 
 def save_config(config: PersonaConfig, path: str | Path = CONFIG_PATH) -> None:
     """Write overrides as pretty JSON, dropping empty fields."""
     path = Path(path)
-    data = {
-        "personas": {
-            name: {k: v for k, v in asdict(override).items() if v not in (None, "")}
-            for name, override in config.personas.items()
-        }
-    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"personas": _serialize_overrides(config.personas)}
+    if config.custom_personas:
+        data["custom_personas"] = _serialize_overrides(config.custom_personas)
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _serialize_overrides(overrides: dict[str, PersonaOverride]) -> dict[str, dict]:
+    return {
+        name: {k: v for k, v in asdict(override).items() if v not in (None, "", {})}
+        for name, override in overrides.items()
+    }
 
 
 def apply_override(base: Persona, override: PersonaOverride | None) -> Persona:
@@ -73,6 +85,9 @@ def apply_override(base: Persona, override: PersonaOverride | None) -> Persona:
         voice=override.voice or base.voice,
         voice_backend=override.voice_backend or base.voice_backend,
         voice_model=override.voice_model or base.voice_model,
+        tts_options=override.tts_options
+        if override.tts_options not in (None, {})
+        else base.tts_options,
         personality=override.personality or base.personality,
         blurb=override.blurb or base.blurb,
         model=override.model if override.model not in (None, "") else base.model,
@@ -82,7 +97,34 @@ def apply_override(base: Persona, override: PersonaOverride | None) -> Persona:
 
 def effective_personas(bases: list[Persona], config: PersonaConfig) -> list[Persona]:
     """Built-in personas with user overrides applied, original order kept."""
-    return [apply_override(base, config.personas.get(base.name)) for base in bases]
+    builtins = [apply_override(base, config.personas.get(base.name)) for base in bases]
+    builtin_names = {persona.name for persona in bases}
+    custom = [
+        persona_from_override(name, override)
+        for name, override in config.custom_personas.items()
+        if name not in builtin_names
+    ]
+    return builtins + custom
+
+
+def persona_from_override(name: str, override: PersonaOverride) -> Persona:
+    """Build a custom persona record from a persisted override."""
+    return Persona(
+        name=name,
+        voice=override.voice or personas_default_voice(),
+        voice_backend=override.voice_backend or cfg.TTS_BACKEND,
+        voice_model=override.voice_model,
+        tts_options=override.tts_options,
+        personality=override.personality or "",
+        blurb=override.blurb or "",
+        model=override.model,
+        tool_user=override.tool_user,
+    )
+
+
+def personas_default_voice() -> str:
+    """Default voice for new custom personas."""
+    return cfg.DEFAULT_VOICE if hasattr(cfg, "DEFAULT_VOICE") else "af_heart"
 
 
 def effective_by_name(name: str, bases: list[Persona], config: PersonaConfig) -> Persona:
@@ -99,6 +141,7 @@ def override_from_persona(persona: Persona) -> PersonaOverride:
         voice=persona.voice,
         voice_backend=persona.voice_backend,
         voice_model=persona.voice_model,
+        tts_options=persona.tts_options,
         personality=persona.personality,
         blurb=persona.blurb,
         model=persona.model,

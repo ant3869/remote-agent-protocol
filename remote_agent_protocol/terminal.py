@@ -18,8 +18,10 @@ Want the pretty control panel with live voice/persona switching instead?
 
 import asyncio
 
+from loguru import logger
+
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import logging_setup, persona_config, personas, process_guard
+from remote_agent_protocol import dashboard, logging_setup, persona_config, personas, process_guard
 from remote_agent_protocol.session import VoiceSession
 
 # Readable, filtered logging (drops giant context dumps; see logging_setup.py).
@@ -44,4 +46,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     finally:
+        try:
+            count = dashboard.stop_loaded_models(cfg.OLLAMA_HOST)
+            logger.info(f"Unloaded {count} Ollama model(s).")
+        except Exception as exc:
+            logger.warning(f"Could not unload models: {exc}")
         process_guard.release_lock()

@@ -204,3 +204,18 @@ def start_server_once() -> None:
         stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+
+
+def stop_server(timeout: float = 3.0) -> None:
+    """Stop the Voicebox server process started by this app, if any."""
+    global _SERVER_PROC
+    proc = _SERVER_PROC
+    _SERVER_PROC = None
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)

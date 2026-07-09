@@ -13,6 +13,7 @@ _INJECTED_PROMPTS = (
     config.DELEGATION_CONFIRM_PROMPT.format(agent="hermes-yolo", task="delete stuff"),
     config.AGENT_CONFIRM_APPROVED_PROMPT.format(agent="hermes-yolo", task="delete stuff"),
     config.AGENT_CONFIRM_DENIED_PROMPT.format(agent="hermes-yolo", task="delete stuff"),
+    "[Result returned by agent 'hermes' for the task 'find stuff'. This is the actual answer -- relay it to me when I ask about it; do not restate the task:]\nCurrent version: 0.0.614",
     # Retired marker-correction prompt; keep stripping old memory files.
     "[Correction -- your last reply promised agent work without dispatching.]",
 )

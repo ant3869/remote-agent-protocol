@@ -8,6 +8,34 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.7.0] - 2026-07-09
+
+### Added
+
+- Added a full web Agents screen with live job history, current move summaries,
+  raw output inspection, backend status, and editable agent prompt templates.
+- Added Coqui as an optional local TTS backend, including web controls for
+  provider, model, speaker, language, and device selection.
+- Added richer web runtime controls for personas, voice/model selection, wake
+  behavior, memory refresh, diagnostics, Ollama/VRAM status, chat restart, and
+  session reboot.
+
+### Changed
+
+- The application now cleans up web threads, owned Voicebox processes, PID locks,
+  and loaded Ollama models more consistently when stopping or rebooting.
+- Wake-word mode now reports clearer UI phases and a short follow-up window after
+  the assistant speaks.
+
+### Fixed
+
+- Agent results no longer relay system prompts, previous conversation text,
+  status-protocol guidance, or CLI startup/update banners as user-facing answers.
+- Product and shopping research that is misclassified as file/app work now routes
+  to the research agent instead of Code Puppy.
+- Previously persisted injected agent-result memory is stripped before it is
+  loaded back into the assistant context.
+
 ## [1.6.0] - 2026-07-08
 
 ### Added

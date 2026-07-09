@@ -695,6 +695,7 @@ _APPROVE_WORDS = {
     "ok",
 }
 _APPROVE_PHRASES = ("do it", "go ahead", "please do", "sounds good", "go for it")
+_APPROVE_OVERRIDES = ("no, do it", "no do it", "no, do that", "no do that", "want you to do that")
 _WORD_RE = re.compile(r"[a-z']+")
 
 
@@ -708,6 +709,8 @@ def classify_confirmation_reply(text: str) -> str | None:
     lowered = text.strip().lower().rstrip(_TRAILING_PUNCTUATION)
     if not lowered:
         return None
+    if any(phrase in lowered for phrase in _APPROVE_OVERRIDES):
+        return "approve"
     words = set(_WORD_RE.findall(lowered))
     if words & _DENY_WORDS or any(phrase in lowered for phrase in _DENY_PHRASES):
         return "deny"

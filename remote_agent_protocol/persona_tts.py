@@ -24,7 +24,7 @@ from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.tracing.service_decorators import traced_tts
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import voicebox
+from remote_agent_protocol import coqui_tts, voicebox, voices
 
 
 @dataclass
@@ -37,7 +37,7 @@ class PersonaTTSSettings(TTSSettings):
 
 
 class PersonaTTSService(TTSService):
-    """One Pipecat TTS processor that can speak Kokoro or Voicebox voices."""
+    """One Pipecat TTS processor that can speak Kokoro, Voicebox, or Coqui voices."""
 
     Settings = PersonaTTSSettings
     _settings: Settings
@@ -76,6 +76,7 @@ class PersonaTTSService(TTSService):
         self._http: aiohttp.ClientSession | None = None
         self._voicebox_ready = False
         self._voicebox_model_fallbacks: dict[str, str] = {}
+        self._coqui = coqui_tts.CoquiTTSProvider()
 
     def can_generate_metrics(self) -> bool:
         """This service reports TTFB and usage metrics."""
@@ -124,6 +125,10 @@ class PersonaTTSService(TTSService):
             async for frame in self._run_voicebox(text, context_id):
                 yield frame
             return
+        if self._uses_coqui():
+            async for frame in self._run_coqui(text, context_id):
+                yield frame
+            return
         async for frame in self._run_kokoro(text, context_id):
             yield frame
 
@@ -131,6 +136,10 @@ class PersonaTTSService(TTSService):
         backend = assert_given(self._settings.voice_backend) or "kokoro"
         voice = assert_given(self._settings.voice) or ""
         return backend == "voicebox" or voicebox.is_voicebox_ref(voice)
+
+    def _uses_coqui(self) -> bool:
+        backend = assert_given(self._settings.voice_backend) or "kokoro"
+        return backend == coqui_tts.COQUI_PROVIDER_ID
 
     async def _http_session(self) -> aiohttp.ClientSession:
         if self._http is None or self._http.closed:
@@ -142,11 +151,13 @@ class PersonaTTSService(TTSService):
             await self._http.close()
         self._http = None
 
-    async def _run_kokoro(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
+    async def _run_kokoro(
+        self, text: str, context_id: str, *, voice_override: str | None = None
+    ) -> AsyncGenerator[Frame | None, None]:
         logger.debug(f"{self}: Generating Kokoro TTS [{text}]")
         try:
             await self.start_tts_usage_metrics(text)
-            voice = assert_given(self._settings.voice)
+            voice = voice_override or assert_given(self._settings.voice)
             if voice is None:
                 raise ValueError("Kokoro TTS voice must be specified")
             stream = self._kokoro.create_stream(text, voice=voice, lang="en-us", speed=1.0)
@@ -166,6 +177,15 @@ class PersonaTTSService(TTSService):
             yield ErrorFrame(error=f"Kokoro TTS failed: {exc}")
         finally:
             await self.stop_ttfb_metrics()
+
+    def _fallback_kokoro_voice(self) -> str:
+        extra = assert_given(self._settings.extra) or {}
+        candidates = (
+            str(extra.get("fallback_voice") or ""),
+            str(assert_given(self._settings.voice) or ""),
+            "af_heart",
+        )
+        return next((voice for voice in candidates if voices.is_valid(voice)), "af_heart")
 
     async def _ensure_voicebox_ready(self) -> None:
         if self._voicebox_ready:
@@ -244,3 +264,36 @@ class PersonaTTSService(TTSService):
                     yield pcm, rate
             for pcm, rate in parser.finish():
                 yield pcm, rate
+
+    async def _run_coqui(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
+        logger.debug(f"{self}: Generating Coqui TTS [{text}]")
+        requested_model = assert_given(self._settings.model) or cfg.COQUI_TTS_MODEL
+        extra = assert_given(self._settings.extra) or {}
+        options = {
+            "model": requested_model,
+            "speaker": extra.get("speaker") or assert_given(self._settings.voice) or "",
+            "language": extra.get("language") or assert_given(self._settings.language) or "",
+            "device": extra.get("device") or cfg.COQUI_TTS_DEVICE,
+        }
+        try:
+            await self.start_tts_usage_metrics(text)
+            result = await self._coqui.synthesize(text, options)
+            await self.stop_ttfb_metrics()
+            audio_data = await self._resampler.resample(
+                result.pcm, result.sample_rate, self.sample_rate
+            )
+            yield TTSAudioRawFrame(
+                audio=audio_data,
+                sample_rate=self.sample_rate,
+                num_channels=1,
+                context_id=context_id,
+            )
+        except Exception as exc:
+            fallback_voice = self._fallback_kokoro_voice()
+            logger.warning(
+                f"Coqui TTS failed ({exc}); falling back to Kokoro voice {fallback_voice}"
+            )
+            async for frame in self._run_kokoro(text, context_id, voice_override=fallback_voice):
+                yield frame
+        finally:
+            await self.stop_ttfb_metrics()

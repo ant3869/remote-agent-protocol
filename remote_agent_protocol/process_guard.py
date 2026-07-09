@@ -64,6 +64,8 @@ def close_previous_instance(lock_file: Path = _LOCK_FILE) -> None:
     pid = _read_lock(lock_file)
     if pid is None:
         return
+    if pid == os.getpid():
+        return
     if _IDENTITY_MARKER not in _command_line(pid):
         return  # dead, or the PID was recycled by an unrelated process
     logger.warning(f"Closing leftover {_IDENTITY_MARKER} process from a previous run: PID {pid}")
@@ -75,11 +77,15 @@ def close_previous_instance(lock_file: Path = _LOCK_FILE) -> None:
 
 def write_lock(lock_file: Path = _LOCK_FILE) -> None:
     """Record this process's PID so the next launch can find it if this one crashes."""
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
     lock_file.write_text(str(os.getpid()))
 
 
 def release_lock(lock_file: Path = _LOCK_FILE) -> None:
     """Clear the lock on a clean shutdown, so the next launch has nothing to close."""
+    pid = _read_lock(lock_file)
+    if pid is not None and pid != os.getpid():
+        return
     try:
         lock_file.unlink()
     except FileNotFoundError:

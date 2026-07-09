@@ -75,6 +75,26 @@ class VoiceboxTests(unittest.TestCase):
         self.assertEqual(b"".join(chunk for chunk, _rate in chunks), raw)
         self.assertTrue(all(rate == 24000 for _chunk, rate in chunks))
 
+    def test_stop_server_terminates_process_started_by_app(self):
+        proc = FakeProcess()
+        voicebox._SERVER_PROC = proc
+
+        voicebox.stop_server()
+
+        self.assertTrue(proc.terminated)
+        self.assertFalse(proc.killed)
+        self.assertIsNone(voicebox._SERVER_PROC)
+
+    def test_stop_server_escalates_to_kill_when_process_hangs(self):
+        proc = FakeProcess(hang=True)
+        voicebox._SERVER_PROC = proc
+
+        voicebox.stop_server(timeout=0.01)
+
+        self.assertTrue(proc.terminated)
+        self.assertTrue(proc.killed)
+        self.assertIsNone(voicebox._SERVER_PROC)
+
 
 def _wav_bytes(raw: bytes) -> bytes:
     buf = io.BytesIO()
@@ -84,6 +104,28 @@ def _wav_bytes(raw: bytes) -> bytes:
         wav.setframerate(24000)
         wav.writeframes(raw)
     return buf.getvalue()
+
+
+class FakeProcess:
+    def __init__(self, *, hang: bool = False):
+        self.hang = hang
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+        self.hang = False
+
+    def wait(self, timeout=None):
+        if self.hang:
+            raise voicebox.subprocess.TimeoutExpired("voicebox", timeout)
+        return 0
 
 
 if __name__ == "__main__":

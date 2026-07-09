@@ -91,6 +91,17 @@ class ConfirmationGateTests(unittest.TestCase):
         self.assertEqual(self.bridge.started, [("hermes", "delete the old files", None)])
         self.assertEqual(self.session._pending_confirmations, {})
 
+    def test_no_do_that_approves_the_held_job(self):
+        async def scenario():
+            self.session._delegate_ack("hermes", "delete the old files")
+            ack = self.session._maybe_consume_confirmation("No, I want you to do that.")
+            await asyncio.sleep(0.01)
+            return ack
+
+        ack = asyncio.run(scenario())
+        self.assertIn("hermes", ack)
+        self.assertEqual(self.bridge.started, [("hermes", "delete the old files", None)])
+
     def test_non_confirmation_reply_falls_through(self):
         self.session._delegate_ack("hermes", "delete the old files")
         # A real question, not a yes/no -- must not resolve the pending job.

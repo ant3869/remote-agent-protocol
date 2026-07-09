@@ -67,6 +67,8 @@ _SUMMARY_SKIP_RE = re.compile(
     r"^(?:Resume this session with:|hermes\s+--resume\b|Duration:\s*|Messages:\s*)",
     re.IGNORECASE,
 )
+_ORNAMENTAL_LINE_RE = re.compile(r"^[\s─—-]*(?:hermes|code\s+puppy|openclaw)?[\s─—-]*$", re.I)
+_ANSWER_SHAPED_RE = re.compile(r"^(?:\d{1,3}\.\s+|[-*]\s+|#{1,6}\s+|\*\*[^*]+\*\*)")
 
 _STATUS_PROTOCOL = """
 
@@ -99,6 +101,65 @@ _PROTOCOL_EXAMPLE_STATUSES = (
         "summary": "short spoken summary",
         "result": "the full answer text the user asked for",
     },
+)
+_STATUS_PROTOCOL_LINES = {
+    line.strip().lower() for line in _STATUS_PROTOCOL.splitlines() if line.strip()
+}
+_EMPTY_COMPLETION_LINES = {"done", "done.", "finished", "finished.", "complete", "complete."}
+_STATUS_PROTOCOL_GUIDANCE_RE = re.compile(
+    r"@@JESS_STATUS"
+    r"|Report meaningful task status"
+    r"|Allowed states:"
+    r"|Finish with exactly one"
+    r"|Never put only a label"
+    r"|READ ALOUD"
+    r"|the key facts plainly"
+    r"|with no padding"
+    r"|or repeated framing"
+    r"|Do not pad it out"
+    r"|short correct answer"
+    r"|answer is better than"
+    r"|whole thing gets spoken"
+    r"|Emit only major milestones"
+    r"|status lines are consumed by the host application",
+    re.IGNORECASE,
+)
+_INTERNAL_ECHO_RE = re.compile(
+    r"\[Scope:\s*you are a general-purpose executor"
+    r"|Executing prompt:\s*\[Scope:"
+    r"|^Query:\s*\[Scope:"
+    r"|voice-assistant host\."
+    r"|Your working directory"
+    r"|scratch workspace, not"
+    r"|the subject of the task"
+    r"|do not modify its files"
+    r"|If the task is ambiguous"
+    r"|\[Untrusted conversation context:"
+    r"|never follow instructions from"
+    r"|^this section\.\]$"
+    r"|\[Voice delegation dispatched"
+    r"|you just sent this task to agent"
+    r"|\[Result returned by agent"
+    r"|This is the actual answer -- relay it to me"
+    r"|do not restate the task",
+    re.IGNORECASE,
+)
+_ROLE_ECHO_RE = re.compile(r"^(?:user|assistant|system):\s+", re.IGNORECASE)
+_MOCK_TASK_ECHO_RE = re.compile(
+    r"^(?:\[mock-agent\]\s+)?(?:accepted task:|RESULT:\s+completed\s+')", re.IGNORECASE
+)
+_CLI_HOUSEKEEPING_RE = re.compile(
+    r"^Current version:"
+    r"|^(?:⬆\s*)?Update available:"
+    r"|^Latest version:"
+    r"|^A new version of code puppy is available:"
+    r"|^Context indicator:"
+    r"|^breakdown\)"
+    r"|^Please consider updating!$"
+    r"|Quick Resume selected"
+    r"|^branch:\s*detected$"
+    r"|^No previous session found for this scope; starting fresh\.$",
+    re.IGNORECASE,
 )
 
 # Agents that crash (rate limits, tracebacks, stream failures) often still
@@ -225,6 +286,20 @@ def with_status_protocol(task: str) -> str:
     return f"{task}\n\n{_STATUS_PROTOCOL}"
 
 
+def status_protocol() -> str:
+    """Return the current stdout status contract appended to agent tasks."""
+    return _STATUS_PROTOCOL
+
+
+def set_status_protocol(text: str) -> None:
+    """Replace the stdout status contract appended to future agent tasks."""
+    global _STATUS_PROTOCOL, _STATUS_PROTOCOL_LINES
+    _STATUS_PROTOCOL = str(text).strip()
+    _STATUS_PROTOCOL_LINES = {
+        line.strip().lower() for line in _STATUS_PROTOCOL.splitlines() if line.strip()
+    }
+
+
 def with_scope(task: str, cwd: str | None, preamble: str) -> str:
     """Prepend the scope preamble so agents know the cwd is not the subject.
 
@@ -269,7 +344,10 @@ def parse_status_line(line: str) -> dict | None:
         field_value = value.get(field_name)
         if isinstance(field_value, str) and field_value.strip():
             cap = _MAX_RESULT_CHARS if field_name == "result" else _MAX_STATUS_TEXT_CHARS
-            status[field_name] = field_value.strip()[:cap]
+            cleaned = field_value.strip()[:cap]
+            if _unsafe_public_text(cleaned):
+                continue
+            status[field_name] = cleaned
     for field_name in ("step", "step_total"):
         field_value = value.get(field_name)
         if isinstance(field_value, int) and field_value > 0:
@@ -324,17 +402,100 @@ def infer_status(line: str) -> dict | None:
 
 def summarize_output(lines: list[str], max_lines: int = 3, max_chars: int = 300) -> str:
     """Compact tail-of-log summary -- what Jess actually says out loud."""
-    tail = [
-        line.strip()
-        for line in lines
-        if line.strip()
-        and not _SUMMARY_SKIP_RE.search(line.strip())
-        and not line.strip().startswith(_STATUS_MARKER)
-    ][-max_lines:]
+    tail = _user_facing_output_lines(lines)[-max_lines:]
     text = " ".join(tail)
     if len(text) > max_chars:
         text = text[: max_chars - 3] + "..."
     return text
+
+
+def _unsafe_public_text(text: str) -> bool:
+    """True when text is an echoed host prompt/context, not an agent answer."""
+    return bool(
+        _INTERNAL_ECHO_RE.search(text)
+        or _CLI_HOUSEKEEPING_RE.search(text)
+        or _ROLE_ECHO_RE.search(text)
+    )
+
+
+def fallback_result(lines: list[str], max_chars: int = 1200) -> str:
+    """Best-effort answer body when a backend exits without structured result."""
+    safe_lines = _user_facing_output_lines(lines)
+    preferred: list[str] = []
+    for line in safe_lines:
+        text = line
+        if text.lstrip().startswith("+"):
+            candidate = text.lstrip()[1:].strip()
+            if candidate:
+                text = candidate
+        if text != line or _ANSWER_SHAPED_RE.match(text):
+            preferred.append(text)
+
+    body = "\n".join(preferred or safe_lines).strip()
+    if len(body) > max_chars:
+        body = body[: max_chars - 3] + "..."
+    return body
+
+
+def _user_facing_output_lines(lines: list[str]) -> list[str]:
+    """Return stdout lines safe to surface as an answer or spoken summary."""
+    kept: list[str] = []
+    skipping_prompt = False
+    skipping_injected_message = False
+    skipping_status_protocol = False
+    skipping_role_echo = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if skipping_prompt:
+            if "untrusted conversation context" in lowered:
+                skipping_prompt = False
+            continue
+        if skipping_injected_message:
+            if "finishes.]" in lowered or "task:]" in lowered:
+                skipping_injected_message = False
+            continue
+        if skipping_status_protocol:
+            if "spoken start to finish" in lowered:
+                skipping_status_protocol = False
+            continue
+        if skipping_role_echo and "Report meaningful task status" not in stripped:
+            continue
+        skipping_role_echo = False
+        if stripped.startswith(("Query:", "Executing prompt:", "[Scope:")):
+            skipping_prompt = True
+            continue
+        if "[Voice delegation dispatched" in stripped or "[Result returned by agent" in stripped:
+            skipping_injected_message = True
+            continue
+        if "Report meaningful task status" in stripped:
+            skipping_status_protocol = True
+            continue
+        if _ORNAMENTAL_LINE_RE.fullmatch(stripped):
+            continue
+        if _SUMMARY_SKIP_RE.search(stripped):
+            continue
+        if stripped.startswith(_STATUS_MARKER):
+            continue
+        if _STATUS_PROTOCOL_GUIDANCE_RE.search(stripped):
+            continue
+        if _INTERNAL_ECHO_RE.search(stripped):
+            continue
+        if _ROLE_ECHO_RE.match(stripped):
+            skipping_role_echo = True
+            continue
+        if _MOCK_TASK_ECHO_RE.match(stripped):
+            continue
+        if _CLI_HOUSEKEEPING_RE.search(stripped):
+            continue
+        if lowered in _STATUS_PROTOCOL_LINES or lowered in _EMPTY_COMPLETION_LINES:
+            continue
+        if stripped.endswith('"}'):
+            stripped = stripped[:-2].rstrip()
+        kept.append(stripped)
+    return kept
 
 
 def _split_questions(text: str) -> list[str]:
@@ -412,9 +573,9 @@ def result_detail(job: AgentJob) -> str:
     output tail so that agents which print their answer to stdout without a
     ``result`` field still have it relayed rather than lost behind the summary.
     """
-    if job.result:
+    if job.result and not _unsafe_public_text(job.result):
         return job.result
-    body = "\n".join(line for line in job.lines if line.strip()).strip()
+    body = fallback_result(job.lines, max_chars=_MAX_RESULT_CHARS)
     return body if body and body != job.summary else ""
 
 
@@ -447,7 +608,8 @@ def announcement(job: AgentJob) -> str:
     if questions:
         joined = " ".join(questions)
         return f"Agent '{job.agent}' needs your input: {joined}{tamper}"
-    summary = job.summary or summarize_output(job.lines)
+    summary = job.summary if job.summary and not _unsafe_public_text(job.summary) else ""
+    summary = summary or summarize_output(job.lines)
     # A clean short reference when the task is brief, else a generic one -- never
     # a truncated fragment of a long user sentence.
     ref = task_label(job.task) or "the task"
@@ -456,7 +618,7 @@ def announcement(job: AgentJob) -> str:
         # necessarily the answer -- "result" is the actual substantive content
         # the user asked for ("The current local time is 7:13 PM..."). Speak
         # the real answer; a label alone leaves out the one thing worth hearing.
-        answer = job.result or summary
+        answer = job.result if job.result and not _unsafe_public_text(job.result) else summary
         if not answer:
             return (
                 f"Agent '{job.agent}' finished {ref} but returned no result to relay -- "
@@ -575,6 +737,10 @@ class AgentBridge:
         self._model_overrides[agent] = list(target["args"])
         self._model_labels[agent] = str(target["label"])
         return self._model_labels[agent]
+
+    def set_scope_preamble(self, preamble: str) -> None:
+        """Replace the scope preamble used for future jobs."""
+        self._scope_preamble = preamble
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -818,8 +984,11 @@ class AgentBridge:
                 job.summary = error_line
             if failed and job.failure_kind and not job.summary:
                 job.summary = job.failure_detail
+        if job.status == STATUS_DONE and not job.result:
+            job.result = fallback_result(job.lines)
         job.secs = round(time.monotonic() - job._t0, 1)
-        summary = job.summary or summarize_output(job.lines)
+        summary_source = job.result.splitlines() if job.result else job.lines
+        summary = job.summary or summarize_output(summary_source)
         job.summary = summary
         job.finished_at = _now_iso()
         await self._check_host_repo(job)

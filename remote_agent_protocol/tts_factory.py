@@ -1,7 +1,7 @@
 """TTS backend factory for Jess.
 
 Most personas use local Kokoro. PersonaTTSService routes per-persona voices so a
-single running pipeline can speak Kokoro or Voicebox profiles without rebuilding.
+single running pipeline can speak Kokoro, Voicebox, or Coqui without rebuilding.
 Cartesia support remains available for explicit global backend use.
 """
 
@@ -48,17 +48,21 @@ def is_uuid(value: str) -> bool:
 
 
 def create_tts(
-    persona_voice: str, voice_model: str | None = None, voice_backend: str | None = None
+    persona_voice: str,
+    voice_model: str | None = None,
+    voice_backend: str | None = None,
+    tts_options: dict | None = None,
 ):
     """Create the configured TTS service for a persona voice."""
     backend = (voice_backend or cfg.TTS_BACKEND).lower().strip()
-    if backend in {"kokoro", "voicebox"} or voicebox.is_voicebox_ref(persona_voice):
+    if backend in {"kokoro", "voicebox", "coqui"} or voicebox.is_voicebox_ref(persona_voice):
         return PersonaTTSService(
             settings=PersonaTTSService.Settings(
                 voice=persona_voice,
                 model=voice_model,
                 language="en-us",
                 voice_backend="voicebox" if voicebox.is_voicebox_ref(persona_voice) else backend,
+                extra=tts_options or {},
             )
         )
 
@@ -90,6 +94,6 @@ def create_tts(
 
 def voice_switch_supported(voice: str) -> bool:
     """Whether live voice switching can accept this voice under current backend."""
-    if cfg.TTS_BACKEND.lower().strip() in {"kokoro", "voicebox"}:
+    if cfg.TTS_BACKEND.lower().strip() in {"kokoro", "voicebox", "coqui"}:
         return True
     return is_uuid(voice)

@@ -68,6 +68,12 @@ copy env.example .env
 ollama list
 ```
 
+Optional Coqui TTS: select `coqui` in the web Settings page or set
+`TTS_BACKEND=coqui`. The app can use either an installed `TTS` package or the
+repo-local `TTS/` checkout via `COQUI_TTS_SOURCE_DIR`; Coqui upstream currently
+targets Python `<3.12`, so the status panel is the source of truth for whether
+the local environment can import and run it.
+
 ## Run
 
 | What | Command |

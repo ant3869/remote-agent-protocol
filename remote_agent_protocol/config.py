@@ -121,7 +121,7 @@ WAKE_WORD_ENABLED = _env_bool("WAKE_WORD_ENABLED", False)
 WAKE_WORD_ENGINE = _env("WAKE_WORD_ENGINE", "openwakeword")
 WAKE_WORD_MODEL = _env("WAKE_WORD_MODEL", "hey_jarvis")
 WAKE_WORD_THRESHOLD = float(_env("WAKE_WORD_THRESHOLD", "0.5"))
-WAKE_WORD_ACTIVE_WINDOW_SECS = float(_env("WAKE_WORD_ACTIVE_WINDOW_SECS", "12"))
+WAKE_WORD_ACTIVE_WINDOW_SECS = float(_env("WAKE_WORD_ACTIVE_WINDOW_SECS", "3"))
 # Optional model -> persona overrides. When empty, locally installed wake
 # models are matched to persona names (for example hey_jarvis -> Jarvis).
 WAKE_WORD_PERSONAS = _parse_string_map(
@@ -219,7 +219,7 @@ OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
 #
 # DEFAULT_PERSONA_NAME is who both the terminal demo and the GUI boot up as
 # when there's no remembered pick. Must match a `name` in personas.PERSONAS.
-DEFAULT_PERSONA_NAME = _env("DEFAULT_PERSONA_NAME", "Jess")
+DEFAULT_PERSONA_NAME = _env("DEFAULT_PERSONA_NAME", "Butler")
 
 # The GUI remembers your last persona/tool-user picks here so a restart boots
 # as the character you actually use. Set APP_STATE_FILE="" to always boot the
@@ -236,6 +236,7 @@ CONTEXT_DRAFT_TIMEOUT_SECS = float(_env("CONTEXT_DRAFT_TIMEOUT_SECS", "300"))
 # "kokoro"   = local/offline, current familiar voice catalog (fast, no API cost)
 # "cartesia" = cloud neural TTS via Cartesia (API key in .env as CARTESIA_API_KEY)
 # "voicebox" = local Voicebox app REST TTS, including cloned voice profiles
+# "coqui"   = local Coqui TTS (installed package or repo-local TTS checkout)
 TTS_BACKEND = _env("TTS_BACKEND", "kokoro")
 CARTESIA_MODEL = "sonic-3.5"
 # "http" is safest/validated for new accounts; "websocket" is lower-latency but
@@ -262,6 +263,14 @@ VOICEBOX_SAMPLE_RATE = int(_env("VOICEBOX_SAMPLE_RATE", "24000"))
 VOICEBOX_WARMUP_ENABLED = _env("VOICEBOX_WARMUP_ENABLED", "1").lower() not in {"0", "false", "no"}
 VOICEBOX_WARMUP_TEXT = _env("VOICEBOX_WARMUP_TEXT", "hi")
 VOICEBOX_WARMUP_DELAY_SECS = float(_env("VOICEBOX_WARMUP_DELAY_SECS", "8"))
+
+COQUI_TTS_SOURCE_DIR = _env("COQUI_TTS_SOURCE_DIR", str(_ROOT / "TTS"))
+COQUI_TTS_MODEL = _env("COQUI_TTS_MODEL", "tts_models/en/ljspeech/vits")
+COQUI_TTS_SPEAKER = _env("COQUI_TTS_SPEAKER", "")
+COQUI_TTS_LANGUAGE = _env("COQUI_TTS_LANGUAGE", "")
+COQUI_TTS_DEVICE = _env("COQUI_TTS_DEVICE", "cpu")
+COQUI_TTS_SAMPLE_RATE = int(_env("COQUI_TTS_SAMPLE_RATE", str(VOICEBOX_SAMPLE_RATE)))
+COQUI_TTS_MODEL_CACHE_SECS = float(_env("COQUI_TTS_MODEL_CACHE_SECS", "300"))
 
 # ---------------------------------------------------------------------------
 # VAD (Voice Activity Detection) -- how the bot knows when you've stopped talking
@@ -648,6 +657,7 @@ MEM0_MEMORY_HEADER = "Here's what I remember about you from past chats:"
 # across restarts. Enforced by tests/test_memory_strip.py.
 EPHEMERAL_PROMPT_PREFIXES = (
     "[Voice delegation dispatched",
+    "[Result returned by agent",
     "[Background task update",
     "[A background agent needs the user's input",
     "[A delegation needs the user's confirmation",

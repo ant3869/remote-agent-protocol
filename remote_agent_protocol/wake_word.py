@@ -292,25 +292,43 @@ class WakeWordGate(FrameProcessor):
         state: str,
         target: WakeWordTarget | None = None,
         *,
+        phase: str = "",
         score: float | None = None,
         error: str = "",
     ) -> None:
         if self._on_event is None:
             return
+        current = target or self._active_target
+        active_until = self._awake_until if self._awake_until else 0.0
         try:
             self._on_event(
                 {
                     "type": "wake",
                     "state": state,
-                    "model": target.model if target else self._settings.model,
-                    "persona": target.persona if target else "",
-                    "score": score,
+                    "phase": phase or self._phase_for_state(state),
+                    "model": current.model if current else self._settings.model,
+                    "model_path": current.model_path if current else "",
+                    "persona": current.persona if current else "",
+                    "score": float(score) if score is not None else None,
                     "error": error,
                     "window_secs": self._settings.active_window_secs,
+                    "remaining_secs": max(0.0, active_until - time.monotonic()),
+                    "detector_loaded": self._detector is not None and not self._bypass,
+                    "passive": state in {"armed", "inactive"},
                 }
             )
         except Exception as exc:
             logger.warning(f"WakeWordGate on_event raised: {exc}")
+
+    @staticmethod
+    def _phase_for_state(state: str) -> str:
+        return {
+            "inactive": "idle",
+            "armed": "waiting_for_wake_word",
+            "awake": "follow_up_window",
+            "bypass": "error",
+            "switch_failed": "error",
+        }.get(state, "idle")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         """Gate input audio; pass every other frame through untouched."""
@@ -378,7 +396,7 @@ class WakeWordGate(FrameProcessor):
         except Exception as exc:
             self._bypass = True
             logger.warning(f"Wake word engine unavailable ({exc}); staying always-listening")
-            self._emit("bypass")
+            self._emit("bypass", error=str(exc))
             return
         self._emit("armed" if self.enabled else "inactive")
         models = ", ".join(target.model for target in self._settings.effective_targets)
@@ -417,7 +435,12 @@ class WakeWordGate(FrameProcessor):
         was_awake = self.awake
         self._awake_until = time.monotonic() + self._settings.active_window_secs
         if not was_awake:
-            self._emit("awake", target or self._active_target, score=score)
+            self._emit(
+                "awake",
+                target or self._active_target,
+                phase="wake_word_detected" if score is not None else "follow_up_window",
+                score=score,
+            )
 
     def _rearm(self) -> None:
         self._buffer.clear()

@@ -76,9 +76,22 @@ class LockFileTests(unittest.TestCase):
         lock_file.unlink()
 
     def test_release_lock_removes_the_file(self) -> None:
-        lock_file = _write("999")
+        lock_file = _write(str(os.getpid()))
         process_guard.release_lock(lock_file=lock_file)
         self.assertFalse(lock_file.exists())
+
+    def test_release_lock_does_not_remove_another_process_lock(self) -> None:
+        lock_file = _write("999")
+        process_guard.release_lock(lock_file=lock_file)
+        self.assertTrue(lock_file.exists())
+        lock_file.unlink()
+
+    def test_close_previous_instance_does_not_kill_current_process(self) -> None:
+        lock_file = _write(str(os.getpid()))
+        with _win32(), patch("subprocess.run") as run:
+            process_guard.close_previous_instance(lock_file=lock_file)
+        run.assert_not_called()
+        lock_file.unlink()
 
     def test_release_lock_is_a_no_op_when_already_gone(self) -> None:
         process_guard.release_lock(lock_file=_missing_path())  # must not raise

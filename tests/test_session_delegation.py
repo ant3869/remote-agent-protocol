@@ -128,6 +128,22 @@ class SessionDelegationTests(unittest.TestCase):
         self.assertEqual(spawned, [f"delegate-{voice_session._default_agent_backend}"])
         self.assertEqual(voice_session._pending_confirmations, {})
 
+    def test_late_llm_delegate_does_not_repeat_recent_voice_dispatch(self):
+        # Regression from the 2026-07-09 runtime log: the router dispatched the
+        # spoken research request, then a later LLM marker dispatched the same
+        # task again after the ack-turn flag had already been consumed.
+        voice_session, spawned = self._session_with_recorders()
+        task = "find 10 popular github open source projects for this project"
+        initial_agent = voice_session._default_agent_backend
+
+        voice_session._delegate_ack(initial_agent, task)
+        voice_session._agent_ack_turn = False
+        voice_session._default_agent_backend = "hermes"
+        voice_session._llm_delegate(task)
+
+        self.assertEqual(spawned, [f"delegate-{initial_agent}"])
+        self.assertEqual(voice_session._pending_confirmations, {})
+
 
 class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_events_are_published_to_lifecycle_server_without_announcements(self):

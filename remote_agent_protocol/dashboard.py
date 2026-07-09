@@ -199,6 +199,14 @@ def tts_health(
             has_cartesia_key,
             "Cartesia (key set)" if has_cartesia_key else "Cartesia: NO KEY",
         )
+    if b == "coqui":
+        from remote_agent_protocol import coqui_tts
+
+        status = coqui_tts.availability()
+        return TTSHealth(
+            status.available,
+            "Coqui OK" if status.available else f"Coqui: {status.error or 'missing'}",
+        )
     return TTSHealth(True, f"{backend} ?")
 
 

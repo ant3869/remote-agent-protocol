@@ -67,5 +67,38 @@ class RuntimeContextTests(unittest.TestCase):
         self.assertIn("Saturday, July 04, 2026, 01:59 PM", second)
 
 
+class SemanticMemoryStartupTests(unittest.TestCase):
+    def test_mem0_startup_failure_degrades_without_blocking_session(self):
+        events: list[dict] = []
+        voice_session = session_mod.VoiceSession(personas.DEFAULT_PERSONA, on_event=events.append)
+
+        with (
+            patch.object(session_mod.cfg, "MEM0_ENABLED", True),
+            patch.object(
+                session_mod.mem0_setup,
+                "create_memory_service",
+                side_effect=ConnectionError("ollama offline"),
+            ),
+        ):
+            voice_session._initialize_mem0_service()
+
+        self.assertIsNone(voice_session._mem0_service)
+        self.assertTrue(
+            any("semantic memory unavailable" in event.get("text", "") for event in events)
+        )
+
+    def test_mem0_startup_success_keeps_service(self):
+        voice_session = session_mod.VoiceSession(personas.DEFAULT_PERSONA)
+        service = object()
+
+        with (
+            patch.object(session_mod.cfg, "MEM0_ENABLED", True),
+            patch.object(session_mod.mem0_setup, "create_memory_service", return_value=service),
+        ):
+            voice_session._initialize_mem0_service()
+
+        self.assertIs(voice_session._mem0_service, service)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,7 @@ class WakeWordConfigTests(unittest.TestCase):
     def test_wake_word_disabled_by_default_config(self):
         self.assertFalse(config.WAKE_WORD_ENABLED)
         self.assertEqual(config.WAKE_WORD_ENGINE, "openwakeword")
+        self.assertEqual(config.WAKE_WORD_ACTIVE_WINDOW_SECS, 3.0)
 
     def test_settings_from_config_mirrors_config_values(self):
         settings = wake_word.settings_from_config(config)
@@ -150,7 +151,34 @@ class WakeWordGateTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual([e["state"] for e in events], ["armed", "awake"])
+        self.assertEqual(events[-1]["phase"], "wake_word_detected")
+        self.assertEqual(events[-1]["model"], "hey_jarvis")
+        self.assertEqual(events[-1]["window_secs"], SETTINGS.active_window_secs)
+        self.assertGreater(events[-1]["remaining_secs"], 0)
         self.assertEqual(detector.resets, 1)  # trigger resets the model buffer
+
+    async def test_wake_score_event_is_plain_float(self):
+        class ScalarScore:
+            def __float__(self):
+                return 0.81
+
+            def __ge__(self, _other):
+                return True
+
+        events: list[dict] = []
+        detector = FakeDetector(scores=[ScalarScore()])
+        gate = wake_word.WakeWordGate(
+            SETTINGS, detector_factory=lambda _s: detector, on_event=events.append
+        )
+
+        await run_test(
+            gate,
+            frames_to_send=[audio_frame(), audio_frame()],
+            expected_down_frames=[InputAudioRawFrame],
+        )
+
+        self.assertEqual(events[-1]["score"], 0.81)
+        self.assertIs(type(events[-1]["score"]), float)
 
     async def test_window_expiry_rearms_and_drops_again(self):
         events: list[dict] = []

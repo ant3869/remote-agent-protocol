@@ -34,6 +34,8 @@
         <nav class="nav-links" aria-label="Application panels">
           <p class="section-label nav-label">Workspace</p>
           <button class="nav-link active" data-view="control" type="button"><span>⌁</span>Control Center</button>
+          <button class="nav-link" data-view="agents" type="button"><span>⌬</span>Agents</button>
+          <button class="nav-link" data-view="personas" type="button"><span>◈</span>Personas</button>
           <button class="nav-link" data-view="memory" type="button"><span>◫</span>Memory</button>
           <button class="nav-link" data-view="setup" type="button"><span>◇</span>Setup</button>
           <button class="nav-link" data-view="status" type="button"><span>◉</span>Status</button>
@@ -161,6 +163,145 @@
           </div>
         </section>
 
+        <section id="agentsView" class="view">
+          <header class="section-page-header">
+            <div>
+              <p class="section-label">Delegation trace</p>
+              <h3>Agents</h3>
+              <p class="muted">Inspect agent context, actions, tool output, responses, and prompt wrappers.</p>
+            </div>
+            <button id="agentRefreshBtn" class="button quiet" type="button">Refresh</button>
+          </header>
+
+          <div class="agents-layout">
+            <aside class="agent-roster-panel">
+              <div class="panel-header compact">
+                <div><p class="section-label">Backends</p><h3>Roster</h3></div>
+              </div>
+              <section id="agentRoster" class="agent-roster"></section>
+            </aside>
+
+            <section class="agent-jobs-panel">
+              <div class="panel-header compact">
+                <div><p class="section-label">Activity</p><h3>Jobs</h3></div>
+                <span id="agentJobCount" class="panel-meta">0 jobs</span>
+              </div>
+              <section id="agentJobList" class="agent-job-list"></section>
+            </section>
+
+            <section class="agent-detail-panel">
+              <div class="panel-header compact">
+                <div><p class="section-label">Selected job</p><h3 id="agentDetailTitle">No job selected</h3></div>
+                <span id="agentDetailStatus" class="accent-agent-label">idle</span>
+              </div>
+              <div class="agent-detail-summary">
+                <article><span>Agent</span><strong id="agentDetailAgent">--</strong></article>
+                <article><span>Machine</span><strong id="agentDetailMachine">--</strong></article>
+                <article><span>State</span><strong id="agentDetailState">--</strong></article>
+                <article><span>Elapsed</span><strong id="agentDetailElapsed">--</strong></article>
+              </div>
+              <section id="agentDetailNow" class="agent-now-card">
+                <span>Current move</span>
+                <strong>Nothing running.</strong>
+                <p class="muted">Select a live job to see what the agent is doing now.</p>
+              </section>
+              <div class="agent-log-head"><span>Move timeline</span><span id="agentMoveCount">0 moves</span></div>
+              <ol id="agentMoveTimeline" class="agent-move-timeline"></ol>
+              <label>Task context<textarea id="agentDetailTask" rows="5" readonly></textarea></label>
+              <label>Result<textarea id="agentDetailResult" rows="4" readonly></textarea></label>
+              <div class="agent-log-head"><span>Tool calls and responses</span><span id="agentLineCount">0 lines</span></div>
+              <pre id="agentDetail" class="agent-raw-log">Select a job to inspect its output.</pre>
+            </section>
+          </div>
+
+          <section class="agent-prompts-panel">
+            <div class="panel-header compact">
+              <div><p class="section-label">Meta prompts</p><h3>Agent prompt controls</h3></div>
+              <button id="agentPromptSaveBtn" class="button primary-action" type="button">Save prompts</button>
+            </div>
+            <div id="agentPromptNotice" class="persona-notice hidden" role="status"></div>
+            <div id="agentPromptEditors" class="prompt-editor-grid"></div>
+          </section>
+        </section>
+
+        <section id="personasView" class="view">
+          <header class="section-page-header">
+            <div>
+              <p class="section-label">Identity and routing</p>
+              <h3>Personas</h3>
+              <p class="muted">Configure assistant identity, voice, model, memory posture, and default agent routing.</p>
+            </div>
+            <button id="newPersonaBtn" class="button primary-action" type="button">New Persona</button>
+          </header>
+
+          <div class="persona-layout">
+            <aside class="persona-list-panel">
+              <label>Search<input id="personaSearch" type="search" placeholder="Filter personas" /></label>
+              <section id="personaList" class="persona-list"></section>
+            </aside>
+
+            <section class="persona-editor-panel">
+              <div id="personaNotice" class="persona-notice hidden" role="status"></div>
+              <div class="editor-grid">
+                <label>Name<input id="personaEditName" type="text" autocomplete="off" /></label>
+                <label>Description<input id="personaEditDescription" type="text" /></label>
+              </div>
+              <label>System prompt / role instructions<textarea id="personaEditPrompt" rows="10"></textarea></label>
+              <div class="editor-grid">
+                <label>Tone and speaking style<input id="personaTone" type="text" disabled /></label>
+                <label>Default model<select id="personaEditModel"></select></label>
+                <label>Default voice<select id="personaEditVoice"></select></label>
+                <label>Voice backend<select id="personaEditVoiceBackend"></select></label>
+                <label>Voice model<select id="personaEditVoiceModel"></select></label>
+                <label>Coqui speaker<select id="personaEditCoquiSpeaker"></select></label>
+                <label>Coqui language<select id="personaEditCoquiLanguage"></select></label>
+                <label>Coqui device<select id="personaEditCoquiDevice"></select></label>
+                <label>Tool user / agent backend<select id="personaEditToolUser"></select></label>
+              </div>
+
+              <details class="advanced-block" open>
+                <summary>Memory and context</summary>
+                <div class="summary-grid">
+                  <article><span>Memory behavior</span><strong id="personaMemoryMode">--</strong></article>
+                  <article><span>Can write memory</span><strong id="personaCanWrite">--</strong></article>
+                  <article><span>Can retrieve memory</span><strong id="personaCanRetrieve">--</strong></article>
+                  <article><span>Context handling</span><strong id="personaContextHandling">--</strong></article>
+                </div>
+              </details>
+
+              <details class="advanced-block">
+                <summary>Advanced routing and safety</summary>
+                <div class="summary-grid">
+                  <article><span>Agent routing</span><strong id="personaRouting">--</strong></article>
+                  <article><span>Wake / voice default</span><strong id="personaVoiceDefault">--</strong></article>
+                  <article><span>Enabled tools</span><strong id="personaTools">--</strong></article>
+                  <article><span>Safety behavior</span><strong id="personaSafety">--</strong></article>
+                  <article><span>Response format</span><strong id="personaResponseFormat">--</strong></article>
+                </div>
+              </details>
+            </section>
+
+            <aside class="persona-preview-panel">
+              <p class="section-label">Preview</p>
+              <h4 id="personaPreviewName">--</h4>
+              <p id="personaPreviewDescription" class="muted"></p>
+              <div class="telemetry-table">
+                <div><span>Model</span><strong id="personaPreviewModel">--</strong></div>
+                <div><span>Voice</span><strong id="personaPreviewVoice">--</strong></div>
+                <div><span>Tool user</span><strong id="personaPreviewTool">--</strong></div>
+                <div><span>Memory</span><strong id="personaPreviewMemory">--</strong></div>
+              </div>
+              <div id="personaWarnings" class="warning-list"></div>
+              <div class="persona-actions">
+                <button id="duplicatePersonaBtn" class="button quiet" type="button">Duplicate</button>
+                <button id="deletePersonaBtn" class="button destructive" type="button">Delete</button>
+                <button id="revertPersonaBtn" class="button quiet" type="button">Revert</button>
+                <button id="savePersonaBtn" class="button primary-action" type="button">Save</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
         <section id="memoryView" class="view">
           <header class="memory-header">
             <div><p class="section-label">Recall browser</p><h3>Memory</h3></div>
@@ -207,6 +348,8 @@
               <div class="section-heading"><span>03</span><div><h4>Requirements</h4><p>Local runtime dependencies.</p></div></div>
               <div class="requirement-row"><span>FFmpeg</span><strong class="status-success">Installed</strong></div>
               <div class="requirement-row"><span>MLX Whisper</span><strong class="status-success">Installed</strong></div>
+              <div class="requirement-row"><span>Coqui TTS</span><strong id="setupCoquiStatus" class="status-warning">Checking</strong></div>
+              <div class="requirement-row"><span>Coqui model</span><strong id="setupCoquiModel">--</strong></div>
             </section>
             <footer class="wizard-footer"><span class="status-success">Ready for local transcription</span><button class="button quiet" type="button">Back</button><button class="button primary-action" type="button">Next</button></footer>
           </div>
@@ -218,12 +361,67 @@
         </section>
 
         <section id="settingsView" class="view">
-          <header class="section-page-header"><div><p class="section-label">Local configuration</p><h3>Settings</h3></div></header>
-          <div class="settings-list">
-            <article><div><h4>Persona</h4><p>Active assistant identity</p></div><strong id="settingsPersona">--</strong></article>
-            <article><div><h4>Voice backend</h4><p>Current speech output profile</p></div><strong id="settingsVoice">--</strong></article>
-            <article><div><h4>Default agent</h4><p>Delegation target</p></div><strong id="settingsAgent">--</strong></article>
-            <article><div><h4>Diagnostics</h4><p>Write a local runtime report from the sidebar.</p></div><span class="muted">Local only</span></article>
+          <header class="section-page-header">
+            <div>
+              <p class="section-label">Local configuration</p>
+              <h3>Settings</h3>
+              <p class="muted">Live runtime controls. These defaults are restored on the next app launch.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <section class="settings-panel">
+              <div class="panel-header compact"><div><p class="section-label">Application defaults</p><h3>Startup and live identity</h3></div></div>
+              <div class="settings-form">
+                <label>Persona<select id="settingsPersonaSelect"></select></label>
+                <label>Tool user / agent backend<select id="settingsToolSelect"></select></label>
+                <label>Voice mode / wake behavior<select id="settingsVoiceModeSelect"></select></label>
+                <label>Default model<select id="settingsModelSelect"></select></label>
+                <label>TTS provider<select id="settingsTtsProviderSelect"></select></label>
+                <label>Default voice<select id="settingsVoiceSelect"></select></label>
+                <label>Coqui model<select id="settingsCoquiModelSelect"></select></label>
+                <label>Coqui speaker<select id="settingsCoquiSpeakerSelect"></select></label>
+                <label>Coqui language<select id="settingsCoquiLanguageSelect"></select></label>
+                <label>Coqui device<select id="settingsCoquiDeviceSelect"></select></label>
+              </div>
+              <div class="settings-actions compact-actions">
+                <button id="settingsCoquiRefreshBtn" class="button quiet" type="button">Refresh models</button>
+                <button id="settingsTestVoiceBtn" class="button primary-action" type="button">Test voice</button>
+              </div>
+            </section>
+
+            <section class="settings-panel">
+              <div class="panel-header compact"><div><p class="section-label">Runtime controls</p><h3>Session actions</h3></div></div>
+              <div class="settings-actions">
+                <button id="settingsMuteBtn" class="button quiet" type="button">Toggle mic</button>
+                <button id="settingsRestartBtn" class="button quiet" type="button">New chat</button>
+                <button id="settingsMemoryBtn" class="button quiet" type="button">Refresh memory</button>
+                <button id="settingsDiagnosticsBtn" class="button quiet" type="button">Export diagnostics</button>
+                <button id="settingsOllamaBtn" class="button quiet" type="button">Start Ollama</button>
+                <button id="settingsVramBtn" class="button quiet" type="button">Free VRAM</button>
+                <button id="settingsRebootBtn" class="button destructive" type="button">Reboot session</button>
+              </div>
+            </section>
+
+            <section class="settings-panel">
+              <div class="panel-header compact"><div><p class="section-label">Current state</p><h3>What is active now</h3></div></div>
+              <div class="summary-grid">
+                <article><span>Persona</span><strong id="settingsPersona">--</strong></article>
+                <article><span>TTS provider</span><strong id="settingsTtsProvider">--</strong></article>
+                <article><span>Voice</span><strong id="settingsVoice">--</strong></article>
+                <article><span>Coqui status</span><strong id="settingsCoquiStatus">--</strong></article>
+                <article><span>Coqui device</span><strong id="settingsCoquiDevice">--</strong></article>
+                <article><span>Model</span><strong id="settingsModel">--</strong></article>
+                <article><span>Default agent</span><strong id="settingsAgent">--</strong></article>
+                <article><span>Voice mode</span><strong id="settingsMode">--</strong></article>
+                <article><span>Wake word</span><strong id="settingsWake">--</strong></article>
+                <article><span>Active wake</span><strong id="settingsWakeWord">--</strong></article>
+                <article><span>Wake model</span><strong id="settingsWakeModel">--</strong></article>
+                <article><span>Model file</span><strong id="settingsWakeFile">--</strong></article>
+                <article><span>Detector</span><strong id="settingsWakeDetector">--</strong></article>
+                <article><span>Passive state</span><strong id="settingsWakePassive">--</strong></article>
+                <article><span>Responsive window</span><strong id="settingsWakeCountdown">--</strong></article>
+              </div>
+            </section>
           </div>
         </section>
       </main>

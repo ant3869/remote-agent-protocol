@@ -189,6 +189,38 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.source, "classifier")
         self.assertEqual(decision.agent, "code-puppy")
 
+    async def test_product_research_misclassified_as_files_uses_research_agent(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="files_or_apps",
+                task="Search for top-rated MetaQuest 3S head straps",
+                conf=0.9,
+                reason="User is looking for a specific VR accessory",
+            )
+        )
+
+        decision = await make_router(classify).route(
+            "find me some top rated, most bought MetaQuest 3S head straps",
+            "code-puppy",
+        )
+
+        self.assertEqual(decision.source, "classifier")
+        self.assertEqual(decision.category, "web_research")
+        self.assertEqual(decision.agent, "hermes")
+
+    async def test_web_research_uses_research_agent_when_default_is_code_puppy(self):
+        classify = FakeClassify(
+            result=verdict(
+                category="web_research",
+                task="Compare current VR head strap reviews",
+                conf=0.9,
+            )
+        )
+
+        decision = await make_router(classify).route("look up VR head strap reviews", "code-puppy")
+
+        self.assertEqual(decision.agent, "hermes")
+
     async def test_capability_audit_short_circuits_the_classifier(self):
         classify = FakeClassify(exc=TimeoutError())
         decision = await self.route(
@@ -217,6 +249,14 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(decision.source, "heuristic")
         self.assertEqual(decision.action, "dispatch")
+        self.assertEqual(classify.calls, [])
+
+    async def test_fragmentary_wake_window_text_never_reaches_classifier(self):
+        classify = FakeClassify(result=verdict(category="files_or_apps", task="please have"))
+        for text in ("Can you...", "please have", "system"):
+            decision = await self.route(classify, text)
+            self.assertEqual(decision.source, "noise")
+            self.assertEqual(decision.action, "none")
         self.assertEqual(classify.calls, [])
 
     async def test_classifier_timeout_keeps_unmatched_utterance_in_chat(self):
