@@ -640,6 +640,12 @@ def announcement(job: AgentJob) -> str:
     return f"{job.agent} FAILED {ref}. Last output: {summary}{tamper}"
 
 
+# Shared across every AgentBridge instance in the process so that rebuilding
+# a VoiceSession (which constructs a fresh bridge) cannot reissue an ID a
+# live GUI panel already holds from the previous bridge.
+_JOB_ID_COUNTER = itertools.count(1)
+
+
 class AgentBridge:
     """Owns delegated jobs. Lives on the VoiceSession asyncio loop."""
 
@@ -702,7 +708,6 @@ class AgentBridge:
         # references, so an untracked task can be garbage-collected mid-job --
         # silently dropping the agent output and the completion announcement.
         self._tasks: set[asyncio.Task] = set()
-        self._counter = itertools.count(1)
 
     # -- queries ------------------------------------------------------------
 
@@ -749,7 +754,7 @@ class AgentBridge:
     ) -> str:
         """Spawn a job and return its id immediately; output streams via events."""
         job = AgentJob(
-            job_id=f"job-{next(self._counter)}",
+            job_id=f"job-{next(_JOB_ID_COUNTER)}",
             agent=agent,
             task=task.partition("\n\n[Untrusted conversation context:")[0],
             machine=self.machine_for(agent),

@@ -800,6 +800,17 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
         self.assertEqual(events[-1]["event"], "finished")
 
+    def test_two_bridges_in_one_process_cannot_collide_on_job_id(self):
+        async def scenario():
+            first_bridge = agent_bridge.AgentBridge(MOCK_BACKEND, lambda _event: None)
+            second_bridge = agent_bridge.AgentBridge(MOCK_BACKEND, lambda _event: None)
+            first_id = await first_bridge.start("hermes-9000", "anything")
+            second_id = await second_bridge.start("hermes-9000", "anything")
+            return first_id, second_id
+
+        first_id, second_id = self._run(scenario())
+        self.assertNotEqual(first_id, second_id)
+
     def test_unknown_backend_runs_finished_callback(self):
         finished: list[str] = []
 

@@ -9,7 +9,7 @@ executor must read its plan fully, honor its STOP conditions, and update its row
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
 | 001 | Serialize agent-history writes | P1 | S | — | DONE |
-| 002 | Keep job IDs unique across session rebuilds | P1 | S | — | TODO |
+| 002 | Keep job IDs unique across session rebuilds | P1 | S | — | DONE |
 | 003 | Make Clear finished delete persisted history | P2 | S | 001 | TODO |
 | 004 | Package and continuously test the desktop app | P1 | M | — | TODO |
 | 005 | Add a side-effect-free startup doctor | P2 | M | 004 | TODO |
