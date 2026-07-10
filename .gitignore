@@ -85,3 +85,10 @@ data/
 .github/copilot-instructions.md
 .github/instructions/
 .github/skills/
+
+# Vendored/nested tooling and scratch artifacts -- not part of this app,
+# not submodules, and too large/foreign to track here.
+/TTS/
+/output/
+.playwright-cli/
+.playwright-mcp/
