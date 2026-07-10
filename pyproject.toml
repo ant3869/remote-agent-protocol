@@ -178,10 +178,16 @@ docs = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["pipecat*", "remote_agent_protocol*"]
 
 [tool.setuptools.package-data]
 "pipecat" = ["py.typed"]
+"remote_agent_protocol" = [
+    "web_app/app.js",
+    "web_app/index.html",
+    "web_app/styles.css",
+]
 "pipecat.audio.dtmf" = [
     "src/pipecat/audio/dtmf/dtmf-0.wav",
     "src/pipecat/audio/dtmf/dtmf-1.wav",
@@ -250,7 +256,7 @@ convention = "google"
 
 [tool.coverage.run]
 command_line = "--module pytest"
-source = ["src"]
+source = ["src", "remote_agent_protocol"]
 omit = ["*/tests/*"]
 
 [tool.towncrier]

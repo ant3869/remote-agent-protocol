@@ -42,6 +42,7 @@ jobs:
             --extra daily \
             --extra deepgram \
             --extra google \
+            --extra kokoro \
             --extra langchain \
             --extra livekit \
             --extra pgmq \
@@ -61,4 +62,4 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          slug: pipecat-ai/pipecat
+          slug: ant3869/remote-agent-protocol

@@ -68,6 +68,14 @@ copy env.example .env
 ollama list
 ```
 
+The editable install (`pip install -e .`) now includes the `remote_agent_protocol`
+package itself, not just the vendored `pipecat` framework -- a built wheel
+contains both. `kokoro` is one of the extras selected above, since
+`persona_tts.py` imports it at module load; it is not something you can skip
+by omitting it from the extras list. Note that neither the wheel nor the
+editable install bundles Ollama models or agent CLIs (`hermes`, `code-puppy`,
+etc.) -- those remain external tools you install and configure separately.
+
 Optional Coqui TTS: select `coqui` in the web Settings page or set
 `TTS_BACKEND=coqui`. The app can use either an installed `TTS` package or the
 repo-local `TTS/` checkout via `COQUI_TTS_SOURCE_DIR`; Coqui upstream currently
