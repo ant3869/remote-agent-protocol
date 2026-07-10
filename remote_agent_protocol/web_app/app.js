@@ -14,6 +14,7 @@ const state = {
   agentHistory: [],
   agentPrompts: null,
   selectedAgentJobId: null,
+  selectedMemory: null,
   sending: false,
 };
 
@@ -167,7 +168,7 @@ function handleEvent(event) {
     storeAgentEvent(event);
     renderAgentEvent(event);
   } else if (event.type === "memory") {
-    state.memories[event.scope === "semantic" ? "semantic" : "short"] = event.rows || [];
+    state.memories[event.scope === "semantic" ? "semantic" : "short"] = (event.rows || []).map((row) => normalizeMemoryRow(row, event.scope));
     renderMemory();
   } else if (event.type === "agent_confirm") {
     state.activeConfirm = event;
@@ -758,26 +759,87 @@ function renderMemory() {
   $("nodeCount").textContent = state.memories.semantic.length;
   const list = $("memoryList");
   list.innerHTML = "";
+  if (state.selectedMemory && !rows.some((row) => row.id === state.selectedMemory?.id && row.scope === state.selectedMemory?.scope)) {
+    state.selectedMemory = null;
+  }
+  renderMemoryDetail();
   if (!rows.length) {
-    list.innerHTML = '<div class="empty-state"><strong>No memories loaded.</strong><span>Refresh or search to load memory rows.</span></div>';
+    list.innerHTML = '<div class="empty-state"><strong>No memories match.</strong><span>Change tab, tree filter, or search text.</span></div>';
     return;
   }
-  rows.forEach((row, index) => {
-    const text = row.text || row.content || row.summary || JSON.stringify(row);
+  rows.forEach((row) => {
     const card = document.createElement("article");
-    card.className = "memory-card";
-    card.innerHTML = `<h4>${row.role || row.id || `Memory ${index + 1}`}</h4><p>${escapeHtml(text)}</p><div class="tag-row"><span class="tag">${row.score ?? "local"}</span></div>`;
+    const selected = state.selectedMemory?.id === row.id && state.selectedMemory?.scope === row.scope;
+    card.className = `memory-card${selected ? " active" : ""}`;
+    card.innerHTML = `<h4>${escapeHtml(memoryTitle(row))}</h4><p>${escapeHtml(row.text)}</p><div class="tag-row"><span class="tag">${escapeHtml(memoryScopeLabel(row))}</span><span class="tag">${escapeHtml(memoryScore(row))}</span></div>`;
     card.addEventListener("click", () => {
-      $("memoryDetailTitle").textContent = row.role || row.id || `Memory ${index + 1}`;
-      $("memoryDetailText").textContent = text;
+      state.selectedMemory = row;
+      renderMemory();
     });
     list.appendChild(card);
   });
 }
 
 function currentMemoryRows() {
-  const active = document.querySelector(".tab.active")?.dataset.memoryTab;
-  return active === "knowledge" ? state.memories.semantic : state.memories.short;
+  const active = document.querySelector(".tab.active")?.dataset.memoryTab || "transcript";
+  const filter = document.querySelector(".tree-item.active")?.dataset.memoryFilter || "all";
+  const query = ($("memorySearch")?.value || "").trim().toLowerCase();
+  let rows = active === "knowledge" || active === "pinned" ? state.memories.semantic : state.memories.short;
+  if (active === "pinned") rows = rows.filter(isPinnedMemory);
+  if (filter === "short") rows = rows.filter((row) => row.scope === "short");
+  if (filter === "semantic") rows = rows.filter((row) => row.scope === "semantic");
+  if (filter === "pinned") rows = rows.filter(isPinnedMemory);
+  if (query) rows = rows.filter((row) => `${row.label || ""} ${row.text || ""} ${row.source || ""}`.toLowerCase().includes(query));
+  return rows;
+}
+
+function normalizeMemoryRow(row, scope) {
+  if (typeof row === "string") {
+    return { id: row, scope: scope === "semantic" ? "semantic" : "short", source: scope === "semantic" ? "semantic" : "transcript", label: scope === "semantic" ? "Memory" : "Transcript", text: row, score: null };
+  }
+  const source = row.source || row.metadata?.source || (scope === "semantic" ? "semantic" : "transcript");
+  return {
+    id: row.id || row.memory_id || `${scope || "memory"}-${row.text || row.content || row.summary || ""}`,
+    scope: row.scope || (scope === "semantic" ? "semantic" : "short"),
+    source,
+    role: row.role || "",
+    label: row.label || row.role || row.id || "",
+    text: String(row.text || row.memory || row.content || row.summary || ""),
+    score: row.score ?? null,
+    metadata: row.metadata || {},
+  };
+}
+
+function isPinnedMemory(row) {
+  return ["manual_gui", "multimodal_prompt"].includes(row.source);
+}
+
+function memoryTitle(row) {
+  if (row.scope === "short") return row.label || "Transcript";
+  return row.label || row.id || "Semantic memory";
+}
+
+function memoryScopeLabel(row) {
+  if (row.scope === "short") return "Transcript";
+  if (isPinnedMemory(row)) return "Pinned fact";
+  return row.source === "session" ? "Unavailable" : "Knowledge";
+}
+
+function memoryScore(row) {
+  return typeof row.score === "number" ? row.score.toFixed(2) : "local";
+}
+
+function renderMemoryDetail() {
+  if (!state.selectedMemory) {
+    $("memoryDetailTitle").textContent = "Memory";
+    $("memoryDetailText").textContent = "Select a row to inspect its source, scope, and text.";
+    $("memoryDeleteBtn").disabled = true;
+    return;
+  }
+  const row = state.selectedMemory;
+  $("memoryDetailTitle").textContent = memoryTitle(row);
+  $("memoryDetailText").textContent = `${row.text}\n\nScope: ${memoryScopeLabel(row)}\nSource: ${row.source || "local"}${row.id ? `\nID: ${row.id}` : ""}`;
+  $("memoryDeleteBtn").disabled = row.scope !== "semantic" || !row.id;
 }
 
 function escapeHtml(text) {
@@ -863,6 +925,53 @@ function hasContextDraft() {
   return Boolean($("messageInput").value.trim() || $("notesInput").value.trim() || state.attachments.length);
 }
 
+async function fetchCliDiagnostics() {
+  const codex = $("setupCodexStatus");
+  const claude = $("setupClaudeStatus");
+  if (!codex || !claude) return;
+  codex.textContent = "Checking...";
+  claude.textContent = "Checking...";
+  codex.className = "status-warning";
+  claude.className = "status-warning";
+  try {
+    const response = await fetch('/api/cli-diagnostics');
+    const data = await response.json();
+    
+    const codexData = data.cli_agents["codex"];
+    if (codexData && codexData.status.available) {
+        if (codexData.status.auth_ok) {
+            codex.textContent = `Ready (${codexData.status.version})`;
+            codex.className = "status-success";
+        } else {
+            codex.textContent = codexData.status.error || "Auth failed";
+            codex.className = "status-error";
+        }
+    } else {
+        codex.textContent = codexData?.status?.error || "Not found";
+        codex.className = "status-error";
+    }
+
+    const claudeData = data.cli_agents["claude-code"];
+    if (claudeData && claudeData.status.available) {
+        if (claudeData.status.auth_ok) {
+            claude.textContent = `Ready (${claudeData.status.version})`;
+            claude.className = "status-success";
+        } else {
+            claude.textContent = claudeData.status.error || "Auth failed";
+            claude.className = "status-error";
+        }
+    } else {
+        claude.textContent = claudeData?.status?.error || "Not found";
+        claude.className = "status-error";
+    }
+  } catch (e) {
+    codex.textContent = "Error";
+    codex.className = "status-error";
+    claude.textContent = "Error";
+    claude.className = "status-error";
+  }
+}
+
 function bind() {
   document.querySelectorAll(".nav-link").forEach((button) => {
     button.addEventListener("click", () => {
@@ -935,7 +1044,34 @@ function bind() {
   $("settingsRebootBtn").addEventListener("click", () => post("reboot_session"));
   $("agentRefreshBtn").addEventListener("click", () => loadAgentsPage().catch((error) => showAgentPromptNotice(`Agents refresh failed: ${error.message}`, false)));
   $("agentPromptSaveBtn").addEventListener("click", saveAgentPrompts);
-  $("memorySearch").addEventListener("input", (event) => post("refresh_memory", { query: event.target.value }));
+  $("refreshCliBtn").addEventListener("click", fetchCliDiagnostics);
+
+  $("memorySearch").addEventListener("input", (event) => { renderMemory(); post("refresh_memory", { query: event.target.value }); });
+  $("memoryPinBtn").addEventListener("click", async () => {
+    const text = $("memoryPinInput").value.trim();
+    if (!text) return;
+    $("memoryPinInput").value = "";
+    await post("memory_add", { text });
+  });
+  $("memoryPinInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      $("memoryPinBtn").click();
+    }
+  });
+  $("memoryDeleteBtn").addEventListener("click", () => {
+    if (state.selectedMemory?.scope === "semantic" && state.selectedMemory.id && confirm("Delete selected semantic memory?")) {
+      post("memory_delete", { id: state.selectedMemory.id });
+      state.selectedMemory = null;
+      renderMemory();
+    }
+  });
+  $("memoryForgetShortBtn").addEventListener("click", () => {
+    if (confirm("Clear short-term transcript memory?")) post("memory_forget_short");
+  });
+  $("memoryForgetSemanticBtn").addEventListener("click", () => {
+    if (confirm("Delete all semantic memories?")) post("memory_forget_semantic");
+  });
   $("personaSearch").addEventListener("input", () => renderPersonaList(state.status || { personas: [] }));
   ["personaEditName", "personaEditDescription", "personaEditPrompt", "personaEditModel", "personaEditVoice", "personaEditVoiceBackend", "personaEditVoiceModel", "personaEditCoquiSpeaker", "personaEditCoquiLanguage", "personaEditCoquiDevice", "personaEditToolUser"].forEach((id) => {
     $(id).addEventListener("input", renderPersonaPreview);
@@ -964,6 +1100,22 @@ function bind() {
     tab.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
       tab.classList.add("active");
+      if (tab.dataset.memoryTab === "transcript") {
+        document.querySelector('.tree-item[data-memory-filter="short"]')?.click();
+      } else if (tab.dataset.memoryTab === "pinned") {
+        document.querySelector('.tree-item[data-memory-filter="pinned"]')?.click();
+      } else {
+        document.querySelector('.tree-item[data-memory-filter="semantic"]')?.click();
+      }
+      state.selectedMemory = null;
+      renderMemory();
+    });
+  });
+  document.querySelectorAll(".tree-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      document.querySelectorAll(".tree-item").forEach((row) => row.classList.remove("active"));
+      item.classList.add("active");
+      state.selectedMemory = null;
       renderMemory();
     });
   });
@@ -976,3 +1128,4 @@ function bind() {
 bind();
 poll();
 setInterval(renderWakeStatus, 250);
+fetchCliDiagnostics();

@@ -524,7 +524,7 @@ class VoiceSession:
                 {
                     "type": "memory",
                     "scope": "short",
-                    "rows": memory_manager.transcript_rows(short),
+                    "rows": memory_manager.transcript_memory_rows(short),
                 }
             )
             self._emit(
@@ -534,6 +534,8 @@ class VoiceSession:
                     "rows": [
                         {
                             "id": "",
+                            "scope": "semantic",
+                            "source": "session",
                             "text": "Semantic memory unavailable: voice session is stopped.",
                             "score": None,
                         }
@@ -749,7 +751,7 @@ class VoiceSession:
             {
                 "type": "memory",
                 "scope": "short",
-                "rows": memory_manager.transcript_rows(short),
+                "rows": memory_manager.transcript_memory_rows(short),
             }
         )
 
@@ -769,18 +771,49 @@ class VoiceSession:
             }
         )
 
-    async def _add_semantic_memory(self, text: str) -> None:
+    async def _semantic_memory_keys(self) -> set[str]:
         if self._mem0_service is None:
-            return
-        message = memory_manager.manual_memory_message(text)
+            return set()
+        try:
+            raw = await self._mem0_service.get_memories()
+        except Exception as exc:
+            logger.warning(f"Semantic memory dedupe scan failed; storing anyway: {exc}")
+            return set()
+        return memory_manager.fact_keys(raw)
+
+    async def _store_semantic_fact(
+        self,
+        text: str,
+        *,
+        source: str,
+        existing_keys: set[str] | None = None,
+    ) -> bool:
+        if self._mem0_service is None:
+            return False
+        key = memory_manager.fact_key(text)
+        keys = existing_keys if existing_keys is not None else await self._semantic_memory_keys()
+        if key in keys:
+            logger.info(f"Skipped duplicate semantic memory: {key}")
+            return False
+        message = {"role": "user", "content": memory_manager.cleaned_fact_text(text)}
+        metadata = memory_manager.semantic_memory_metadata(text, source=source)
         await asyncio.to_thread(
             lambda: self._mem0_service.memory_client.add(
                 messages=[message],
                 user_id=cfg.MEM0_USER_ID,
-                metadata={"source": "manual_gui"},
+                metadata=metadata,
+                infer=False,
             )
         )
-        logger.info("Added manual semantic memory")
+        keys.add(key)
+        return True
+
+    async def _add_semantic_memory(self, text: str) -> None:
+        if self._mem0_service is None:
+            return
+        added = await self._store_semantic_fact(text, source="manual_gui")
+        if added:
+            logger.info("Added manual semantic memory")
         await self._refresh_memories()
 
     async def _delete_semantic_memory(self, memory_id: str) -> None:
@@ -1209,14 +1242,12 @@ class VoiceSession:
     ) -> None:
         if self._mem0_service is None:
             return
+        existing_keys = await self._semantic_memory_keys()
         for text in bundle.preference_candidates():
-            message = memory_manager.manual_memory_message(text)
-            await asyncio.to_thread(
-                lambda message=message: self._mem0_service.memory_client.add(
-                    messages=[message],
-                    user_id=cfg.MEM0_USER_ID,
-                    metadata={"source": "multimodal_prompt"},
-                )
+            await self._store_semantic_fact(
+                text,
+                source="multimodal_prompt",
+                existing_keys=existing_keys,
             )
 
     async def _announce_agent_job(self, job: agent_bridge.AgentJob) -> None:
@@ -1382,9 +1413,11 @@ class VoiceSession:
     async def _forget_semantic_memory(self) -> None:
         if self._mem0_service is None:
             return
-        await asyncio.to_thread(
-            lambda: self._mem0_service.memory_client.delete_all(user_id=cfg.MEM0_USER_ID)
-        )
+        client = self._mem0_service.memory_client
+        if hasattr(client, "reset"):
+            await asyncio.to_thread(client.reset)
+        else:
+            await asyncio.to_thread(lambda: client.delete_all(user_id=cfg.MEM0_USER_ID))
         self._emit({"type": "memory", "scope": "semantic", "rows": []})
         logger.info("Forgot all semantic mem0 memories for configured user")
 

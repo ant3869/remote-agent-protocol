@@ -67,6 +67,26 @@ class JobStoreTests(unittest.TestCase):
             path.write_text("{not json", encoding="utf-8")
             self.assertEqual(job_store.load_history(path), [])
 
+    def test_concurrent_appends_do_not_lose_jobs(self):
+        import concurrent.futures
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "hist.json"
+
+            def append_many(index):
+                for i in range(20):
+                    job_store.append_job(
+                        path, job_store.job_to_row(FakeJob(f"job-{index}-{i}")), limit=200
+                    )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(append_many, i) for i in range(10)]
+                concurrent.futures.wait(futures)
+            rows = job_store.load_history(path, limit=200)
+            self.assertEqual(len(rows), 200)
+            ids = {r["job_id"] for r in rows}
+            self.assertEqual(len(ids), 200)
+
     def test_lines_are_bounded_on_disk(self):
         job = FakeJob("job-big")
         job.lines = [str(i) for i in range(200)]

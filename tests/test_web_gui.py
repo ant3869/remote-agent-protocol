@@ -48,6 +48,37 @@ def test_web_shell_restores_chat_and_subtle_context_drawer():
     assert 'id="settingsWakeDetector"' in html
 
 
+def test_memory_page_uses_real_memory_scopes_and_actions():
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+    css = (WEB_APP / "styles.css").read_text(encoding="utf-8")
+
+    assert 'data-memory-tab="transcript"' in html
+    assert 'data-memory-tab="knowledge"' in html
+    assert 'data-memory-tab="pinned"' in html
+    assert "Meals" not in html
+    assert "Creative and Personal" not in html
+    assert 'data-memory-filter="short"' in html
+    assert 'data-memory-filter="semantic"' in html
+    assert 'data-memory-filter="pinned"' in html
+    for marker in [
+        "memoryPinInput",
+        "memoryPinBtn",
+        "memoryDeleteBtn",
+        "memoryForgetShortBtn",
+        "memoryForgetSemanticBtn",
+    ]:
+        assert marker in html
+
+    assert "function normalizeMemoryRow" in script
+    assert "function isPinnedMemory" in script
+    assert 'post("memory_add"' in script
+    assert 'post("memory_delete"' in script
+    assert 'post("memory_forget_short"' in script
+    assert 'post("memory_forget_semantic"' in script
+    assert ".memory-actions" in css
+
+
 def test_web_shell_has_no_obsolete_cyan_first_motif():
     combined = "\n".join(
         path.read_text(encoding="utf-8").lower()
@@ -229,6 +260,34 @@ def test_reboot_session_unloads_models_before_new_session(monkeypatch):
     assert events == ["shutdown", cfg.OLLAMA_HOST, "muted:True", "start"]
 
 
+def test_web_memory_actions_call_session_methods():
+    app = WebVoiceApp()
+    session = FakeMemorySession()
+    app._session = session
+
+    assert app._action("memory_add", {"text": "  User likes dashboards.  "})["ok"] is True
+    assert app._action("memory_delete", {"id": "mem-7"})["ok"] is True
+    assert app._action("memory_forget_short", {})["ok"] is True
+    assert app._action("memory_forget_semantic", {})["ok"] is True
+
+    assert session.calls == [
+        ("add", "User likes dashboards."),
+        ("delete", "mem-7"),
+        ("forget_short",),
+        ("forget_semantic",),
+    ]
+
+
+def test_web_memory_add_rejects_empty_text():
+    app = WebVoiceApp()
+    app._session = FakeMemorySession()
+
+    result = app._action("memory_add", {"text": "   "})
+
+    assert result["ok"] is False
+    assert "empty" in result["error"]
+
+
 class FakeSession:
     def __init__(self, events):
         self.events = events
@@ -238,6 +297,29 @@ class FakeSession:
 
     def set_muted(self, muted):
         self.events.append(f"muted:{muted}")
+
+
+class FakeMemorySession:
+    def __init__(self):
+        self.calls = []
+
+    def add_semantic_memory(self, text):
+        self.calls.append(("add", text))
+
+    def delete_semantic_memory(self, memory_id):
+        self.calls.append(("delete", memory_id))
+
+    def forget_short_term_memory(self):
+        self.calls.append(("forget_short",))
+
+    def forget_semantic_memory(self):
+        self.calls.append(("forget_semantic",))
+
+    def default_agent_backend(self):
+        return "code-puppy"
+
+    def agent_backends(self):
+        return []
 
 
 class FakeThread:
@@ -553,6 +635,20 @@ def test_saved_model_and_voice_defaults_are_loaded_at_boot(monkeypatch, tmp_path
     assert app._session._startup_voice == "speaker-a"
     assert app._session._startup_tts_backend == "coqui"
     assert app._session._startup_tts_model == "tts_models/en/ljspeech/vits"
+
+
+def test_tool_user_action_survives_session_rebuild(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(cfg, "APP_STATE_FILE", str(state_path))
+    app = WebVoiceApp()
+
+    result = app._action("tool_user", {"backend": "mock"})
+    rebuilt = app._new_session()
+
+    assert result["status"]["toolUser"] == "mock"
+    assert app_state.load_state(state_path).tool_user == "mock"
+    assert app._app_state.tool_user == "mock"
+    assert rebuilt.default_agent_backend() == "mock"
 
 
 def test_persona_page_has_full_editor_and_actions():

@@ -8,6 +8,7 @@ Special task prefixes (for tests):
   fail ...           -> exit non-zero after printing an error line
 """
 
+import json
 import sys
 import time
 
@@ -29,7 +30,13 @@ def main() -> int:
         print("[mock-agent] ERROR: simulated failure", flush=True)
         return 1
 
-    print(f"[mock-agent] RESULT: completed '{task}' successfully", flush=True)
+    result = f"Mock agent simulated completion for: {task}"
+    print(f"[mock-agent] RESULT: {result}", flush=True)
+    print(
+        "@@JESS_STATUS "
+        + json.dumps({"state": "completed", "summary": "Mock task completed", "result": result}),
+        flush=True,
+    )
     return 0
 
 

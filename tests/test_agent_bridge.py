@@ -50,6 +50,26 @@ class PureHelperTests(unittest.TestCase):
             ],
         )
 
+    def test_build_command_for_codex(self):
+        cmd = agent_bridge.build_command(
+            ["codex", "exec", "--sandbox", "danger-full-access", "{task}"],
+            "build a thing"
+        )
+        self.assertEqual(
+            cmd,
+            ["codex", "exec", "--sandbox", "danger-full-access", "build a thing"],
+        )
+
+    def test_build_command_for_claude_code(self):
+        cmd = agent_bridge.build_command(
+            ["claude", "-p", "{task}"],
+            "write some tests"
+        )
+        self.assertEqual(
+            cmd,
+            ["claude", "-p", "write some tests"],
+        )
+
     def test_provider_failure_detection_distinguishes_quota_and_rate_limit(self):
         self.assertEqual(
             agent_bridge.detect_provider_failure("usage_limit_reached: plan exhausted"),
@@ -701,6 +721,7 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertIn("output", kinds)
         self.assertIn("finished", kinds)
         self.assertEqual(job.status, agent_bridge.STATUS_DONE)
+        self.assertEqual(job.result, "Mock agent simulated completion for: say hello")
         self.assertEqual(len(finished), 1)
         finished_evt = next(e for e in events if e["event"] == "finished")
         self.assertGreaterEqual(finished_evt["secs"], 0.0)

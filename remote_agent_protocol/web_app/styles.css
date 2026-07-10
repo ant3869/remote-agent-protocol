@@ -740,6 +740,12 @@ textarea { resize: vertical; line-height: 1.5; }
 .tab-row { display: flex; gap: 6px; margin-bottom: 10px; }
 .tab { background: transparent; }
 .tab.active { border-color: rgba(167, 139, 250, 0.35); background: rgba(167, 139, 250, 0.07); color: var(--accent-agent); }
+.memory-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+  gap: 8px;
+  margin-bottom: 10px;
+}
 .memory-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr) 300px; min-height: 620px; overflow: hidden; box-shadow: none; }
 .memory-tree, .memory-list, .memory-detail { min-width: 0; padding: 14px; overflow: auto; }
 .memory-tree, .memory-list { border-right: 1px solid var(--border-subtle); }
@@ -747,8 +753,9 @@ textarea { resize: vertical; line-height: 1.5; }
 .tree-item.active { border-color: var(--border-subtle); background: var(--surface-elevated); color: var(--text-primary); }
 .memory-card { padding: 13px; border-bottom: 1px solid var(--border-subtle); color: var(--text-muted); cursor: pointer; }
 .memory-card:hover { background: var(--surface-elevated); }
+.memory-card.active { background: var(--surface-elevated); box-shadow: inset 3px 0 0 var(--accent-agent); }
 .memory-card h4 { margin: 0 0 7px; color: var(--text-secondary); }
-.memory-card p { margin: 0; line-height: 1.5; }
+.memory-card p { margin: 0; line-height: 1.5; white-space: pre-wrap; }
 .tag-row { display: flex; gap: 5px; margin-top: 9px; }
 .tag { color: var(--accent-agent); font-family: var(--mono); }
 .memory-detail h4 { margin: 10px 0; font-size: 18px; }
@@ -840,6 +847,7 @@ textarea { resize: vertical; line-height: 1.5; }
   .system-strip article:nth-child(2n) { border-right: 0; }
   .system-strip article:last-child { grid-column: 1 / -1; border-bottom: 0; }
   .memory-header { grid-template-columns: 1fr; }
+  .memory-actions { grid-template-columns: 1fr; }
   .persona-layout { grid-template-columns: 1fr; }
   .persona-preview-panel { position: static; }
   .agents-layout, .prompt-editor-grid, .agent-detail-summary, .editor-grid, .summary-grid { grid-template-columns: 1fr; }

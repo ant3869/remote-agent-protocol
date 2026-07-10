@@ -11,9 +11,11 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
+_APPEND_LOCK = threading.Lock()
 _MAX_PERSISTED_LINES = 50  # keep the on-disk log tail small
 
 
@@ -64,16 +66,17 @@ def append_job(path: str | Path, row: dict[str, Any], limit: int = 100) -> None:
 
     Written via temp file + swap so a crash mid-write can't corrupt history.
     """
-    history = load_history(path, 0)
-    history.append(row)
-    if limit > 0 and len(history) > limit:
-        history = history[-limit:]
-    p = Path(path)
-    tmp = p.with_name(p.name + ".tmp")
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, p)
-    except OSError:
-        with contextlib.suppress(OSError):  # persistence is a nicety, never a hard dependency
-            tmp.unlink(missing_ok=True)
+    with _APPEND_LOCK:
+        history = load_history(path, 0)
+        history.append(row)
+        if limit > 0 and len(history) > limit:
+            history = history[-limit:]
+        p = Path(path)
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except OSError:
+            with contextlib.suppress(OSError):  # persistence is a nicety, never a hard dependency
+                tmp.unlink(missing_ok=True)

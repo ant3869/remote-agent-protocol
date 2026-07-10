@@ -309,18 +309,24 @@
             <div class="memory-counts"><span><b id="diaryCount">0</b> diary</span><span><b id="nodeCount">0</b> nodes</span></div>
           </header>
           <div class="tab-row">
-            <button class="tab active" data-memory-tab="diary" type="button">Diary</button>
+            <button class="tab active" data-memory-tab="transcript" type="button">Transcript</button>
             <button class="tab" data-memory-tab="knowledge" type="button">Knowledge</button>
-            <button class="tab" data-memory-tab="meals" type="button">Meals</button>
+            <button class="tab" data-memory-tab="pinned" type="button">Pinned facts</button>
+          </div>
+          <div class="memory-actions">
+            <input id="memoryPinInput" type="text" placeholder="Pin a durable fact Jess should remember" />
+            <button id="memoryPinBtn" class="button primary-action" type="button">Remember</button>
+            <button id="memoryDeleteBtn" class="button quiet" type="button">Delete selected</button>
+            <button id="memoryForgetShortBtn" class="button quiet" type="button">Clear transcript</button>
+            <button id="memoryForgetSemanticBtn" class="button destructive" type="button">Clear semantic</button>
           </div>
           <div class="memory-layout">
             <aside class="memory-tree">
               <p class="section-label">Memory tree</p>
-              <button class="tree-item active" type="button">Root</button>
-              <button class="tree-item" type="button">Local and Events</button>
-              <button class="tree-item" type="button">Creative and Personal</button>
-              <button class="tree-item" type="button">Technology and AI</button>
-              <button class="tree-item" type="button">Health and Wellness</button>
+              <button class="tree-item active" data-memory-filter="all" type="button">All memory</button>
+              <button class="tree-item" data-memory-filter="short" type="button">Short-term transcript</button>
+              <button class="tree-item" data-memory-filter="semantic" type="button">Semantic knowledge</button>
+              <button class="tree-item" data-memory-filter="pinned" type="button">Pinned facts</button>
             </aside>
             <section id="memoryList" class="memory-list"></section>
             <aside class="memory-detail">
@@ -350,6 +356,10 @@
               <div class="requirement-row"><span>MLX Whisper</span><strong class="status-success">Installed</strong></div>
               <div class="requirement-row"><span>Coqui TTS</span><strong id="setupCoquiStatus" class="status-warning">Checking</strong></div>
               <div class="requirement-row"><span>Coqui model</span><strong id="setupCoquiModel">--</strong></div>
+              <div class="section-heading" style="margin-top: 2rem;"><span>04</span><div><h4>CLI Integrations</h4><p>Background coding agents.</p></div></div>
+              <div class="requirement-row"><span>Codex CLI</span><strong id="setupCodexStatus" class="status-warning">Checking...</strong></div>
+              <div class="requirement-row"><span>Claude Code CLI</span><strong id="setupClaudeStatus" class="status-warning">Checking...</strong></div>
+              <button id="refreshCliBtn" class="button quiet" type="button" style="margin-top: 1rem;">Refresh CLI Diagnostics</button>
             </section>
             <footer class="wizard-footer"><span class="status-success">Ready for local transcription</span><button class="button quiet" type="button">Back</button><button class="button primary-action" type="button">Next</button></footer>
           </div>

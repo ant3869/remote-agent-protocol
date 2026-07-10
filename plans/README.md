@@ -8,11 +8,12 @@ executor must read its plan fully, honor its STOP conditions, and update its row
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---|---|---|---|
-| 001 | Serialize agent-history writes | P1 | S | — | TODO |
+| 001 | Serialize agent-history writes | P1 | S | — | DONE |
 | 002 | Keep job IDs unique across session rebuilds | P1 | S | — | TODO |
 | 003 | Make Clear finished delete persisted history | P2 | S | 001 | TODO |
 | 004 | Package and continuously test the desktop app | P1 | M | — | TODO |
 | 005 | Add a side-effect-free startup doctor | P2 | M | 004 | TODO |
+| 006 | Add a global command and search palette | P1 | M | — | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with reason) | REJECTED (with rationale)
 
@@ -26,6 +27,7 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with reason) | REJECTED (wit
 | 4 | The distributable and CI omit the app | packaging / DX | HIGH | M | MED | `pyproject.toml` discovers packages only under `src`; a clean wheel contained `pipecat` but no `remote_agent_protocol`. CI omits the `kokoro` extra even though `persona_tts.py:12` imports it at module load, coverage measures only `src`, and Codecov still targets `pipecat-ai/pipecat`. |
 | 5 | There is no preflight command for a dependency-heavy local stack | direction | MED | M | LOW | README setup requires Ollama, audio, several optional Python packages, local models, and agent CLIs; existing checks are split across `dashboard.py`, `ollama_models.py`, and factories and are available only after GUI startup. |
 | 6 | App type checking has no clean baseline | DX | LOW | M | MED | `pyright remote_agent_protocol` reports 70 errors and one warning; many are Tk `**kwargs` false positives, while others expose unmodeled optional resources and callback types. Defer until Plan 004 gives the app a reliable CI/package boundary. |
+| 7 | Dense web surfaces need a global command/search affordance | direction / UX correctness | MED | M | LOW | `README.md:39-42` promises `Ctrl+K` opens the agent task console, while `remote_agent_protocol/web_app/app.js:970-973` only handles `Ctrl+L` and `Ctrl+M`; the current topbar in `remote_agent_protocol/web_app/index.html:58-69` has status pills but no search/control entry point despite the graphite UI spec calling for one. |
 
 ## Dependency notes
 

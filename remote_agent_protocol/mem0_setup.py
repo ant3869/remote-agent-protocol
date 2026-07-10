@@ -15,11 +15,13 @@ Everything runs locally:
 No API keys, no cloud.
 """
 
+import asyncio
 import logging
 import os
 import re
 
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol import memory_manager
 
 # mem0 still imports the OpenAI SDK internally even when fully local; give it a
 # dummy key so nothing hangs probing for one. And opt out of telemetry.
@@ -31,6 +33,7 @@ os.environ.setdefault("MEM0_TELEMETRY", "False")
 # installed" warnings -- those are optional NLP extras; semantic recall works
 # fine without them. Bump to ERROR so real problems still surface.
 logging.getLogger("mem0").setLevel(logging.ERROR)
+_LOGGER = logging.getLogger(__name__)
 
 # nomic-embed-text produces 768-dimensional vectors. The embedder and the vector
 # store must agree on this number or Qdrant rejects the inserts.
@@ -215,7 +218,32 @@ def create_memory_service():
             filtered = filter_messages_for_storage(messages)
             if not filtered:
                 return
-            await super()._store_messages(filtered)
+            try:
+                known_keys = memory_manager.fact_keys(await self.get_memories())
+            except Exception as exc:
+                _LOGGER.warning("Semantic memory dedupe scan failed; storing anyway: %s", exc)
+                known_keys = set()
+
+            for message in filtered:
+                content = str(message.get("content") or "")
+                key = memory_manager.fact_key(content)
+                if key in known_keys:
+                    continue
+                metadata = memory_manager.semantic_memory_metadata(
+                    content,
+                    source="conversation",
+                    platform="pipecat",
+                )
+                params = {
+                    "messages": [message],
+                    "metadata": metadata,
+                }
+                for id_name in ["user_id", "agent_id", "run_id"]:
+                    value = getattr(self, id_name)
+                    if value:
+                        params[id_name] = value
+                await asyncio.to_thread(lambda params=params: self.memory_client.add(**params))
+                known_keys.add(key)
 
         async def _enhance_context_with_memories(self, context, query):
             # Mirror the parent's no-op guard so we don't strip a live block on

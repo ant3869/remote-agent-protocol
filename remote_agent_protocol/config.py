@@ -368,6 +368,18 @@ AGENT_BACKENDS = {
         "-p",
         "{task}",
     ],
+    "codex": [
+        "codex",
+        "exec",
+        "--sandbox",
+        "danger-full-access",
+        "{task}"
+    ],
+    "claude-code": [
+        "claude",
+        "-p",
+        "{task}"
+    ],
     **_parse_command_map(_env("AGENT_BACKENDS_JSON", ""), "AGENT_BACKENDS_JSON"),
 }
 # Deterministic voice targets. Provider names are not guessed at runtime: each

@@ -413,22 +413,21 @@ class WebVoiceApp:
         return [self._persona_payload(persona) for persona in self._personas]
 
     def _save_state(self) -> None:
-        app_state.save_state(
-            cfg.APP_STATE_FILE,
-            app_state.AppState(
-                persona=self._persona.name,
-                tool_user=self._session.default_agent_backend(),
-                voice_mode=self._voice_mode,
-                model=self._model,
-                voice=self._voice,
-                tts_provider=self._tts_provider,
-                coqui_model=self._coqui_model,
-                coqui_speaker=self._coqui_speaker,
-                coqui_language=self._coqui_language,
-                coqui_device=self._coqui_device,
-                agent_prompts=self._app_state.agent_prompts,
-            ),
+        state = app_state.AppState(
+            persona=self._persona.name,
+            tool_user=self._session.default_agent_backend(),
+            voice_mode=self._voice_mode,
+            model=self._model,
+            voice=self._voice,
+            tts_provider=self._tts_provider,
+            coqui_model=self._coqui_model,
+            coqui_speaker=self._coqui_speaker,
+            coqui_language=self._coqui_language,
+            coqui_device=self._coqui_device,
+            agent_prompts=self._app_state.agent_prompts,
         )
+        app_state.save_state(cfg.APP_STATE_FILE, state)
+        self._app_state = state
 
     def _agent_prompt_current(self) -> dict[str, str]:
         return {
@@ -463,6 +462,16 @@ class WebVoiceApp:
             "history": self._session.agent_history(),
             "prompts": self._agent_prompt_payload(),
             "status": self._status_payload(),
+        }
+
+    def _cli_diagnostics_payload(self) -> dict:
+        from remote_agent_protocol.cli_agents import get_all_cli_agents
+        agents = get_all_cli_agents()
+        return {
+            "cli_agents": {
+                agent.id: {"label": agent.label, "status": agent.get_status().to_dict()}
+                for agent in agents
+            }
         }
 
     def _apply_agent_prompt_overrides(self) -> None:
@@ -672,6 +681,17 @@ class WebVoiceApp:
             self._session.restart_conversation()
         elif name == "refresh_memory":
             self._session.refresh_memories(str(payload.get("query", "")))
+        elif name == "memory_add":
+            text = str(payload.get("text", "")).strip()
+            if not text:
+                return {"ok": False, "error": "memory text is empty"}
+            self._session.add_semantic_memory(text)
+        elif name == "memory_delete":
+            self._session.delete_semantic_memory(str(payload.get("id", "")))
+        elif name == "memory_forget_short":
+            self._session.forget_short_term_memory()
+        elif name == "memory_forget_semantic":
+            self._session.forget_semantic_memory()
         elif name == "approve":
             self._session.approve_agent_task(str(payload.get("token", "")))
         elif name == "deny":
@@ -901,6 +921,9 @@ class WebVoiceApp:
                 if parsed.path == "/api/events":
                     after = int(parse_qs(parsed.query).get("after", ["0"])[0] or 0)
                     self._send_json(app._events_after(after))
+                    return
+                if parsed.path == "/api/cli-diagnostics":
+                    self._send_json(app._cli_diagnostics_payload())
                     return
                 self._send_static(parsed.path)
 

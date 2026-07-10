@@ -23,14 +23,22 @@ class FakeWorker:
 class FakeMemoryClient:
     def __init__(self):
         self.added = []
+        self.reset_count = 0
 
     def add(self, **kwargs):
         self.added.append(kwargs)
 
+    def reset(self):
+        self.reset_count += 1
+
 
 class FakeMem0:
-    def __init__(self):
+    def __init__(self, memories=None):
         self.memory_client = FakeMemoryClient()
+        self._memories = list(memories or [])
+
+    async def get_memories(self):
+        return list(self._memories)
 
 
 class MultimodalPromptBundleTests(unittest.TestCase):
@@ -162,7 +170,29 @@ class SessionMultimodalPromptTests(unittest.IsolatedAsyncioTestCase):
 
         added = voice_session._mem0_service.memory_client.added
         self.assertEqual(len(added), 3)
-        self.assertTrue(all(row["metadata"] == {"source": "multimodal_prompt"} for row in added))
+        self.assertTrue(all(row["metadata"]["source"] == "multimodal_prompt" for row in added))
+        self.assertTrue(all(row["metadata"]["fact_key"] for row in added))
+        self.assertTrue(all(row["infer"] is False for row in added))
+        self.assertFalse(any("Remember that" in row["messages"][0]["content"] for row in added))
+
+    async def test_manual_memory_skips_alias_duplicate(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        voice_session._mem0_service = FakeMem0(
+            [{"id": "existing", "memory": "User's GPU is an RTX 5060 Ti."}]
+        )
+
+        await voice_session._add_semantic_memory("Ant's GPU is an RTX 5060 Ti.")
+
+        added = voice_session._mem0_service.memory_client.added
+        self.assertEqual(added, [])
+
+    async def test_forget_semantic_resets_mem0_store(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        voice_session._mem0_service = FakeMem0()
+
+        await voice_session._forget_semantic_memory()
+
+        self.assertEqual(voice_session._mem0_service.memory_client.reset_count, 1)
 
 
 if __name__ == "__main__":
