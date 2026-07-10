@@ -94,6 +94,31 @@ class JobStoreTests(unittest.TestCase):
         self.assertLessEqual(len(row["lines"]), 50)
         self.assertEqual(row["lines"][-1], "199")
 
+    def test_clear_history_deletes_existing_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "hist.json"
+            job_store.append_job(path, job_store.job_to_row(FakeJob("job-1")))
+            self.assertTrue(job_store.clear_history(path))
+            self.assertFalse(path.exists())
+            self.assertEqual(job_store.load_history(path), [])
+
+    def test_clear_history_missing_file_is_a_successful_no_op(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "does-not-exist.json"
+            self.assertTrue(job_store.clear_history(path))
+
+    def test_clear_history_reports_failure_on_oserror(self):
+        import unittest.mock
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "hist.json"
+            job_store.append_job(path, job_store.job_to_row(FakeJob("job-1")))
+            with unittest.mock.patch.object(
+                Path, "unlink", side_effect=OSError("disk unavailable")
+            ):
+                self.assertFalse(job_store.clear_history(path))
+            self.assertTrue(path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

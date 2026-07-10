@@ -4,6 +4,18 @@ from remote_agent_protocol.gui import agent_stream_line
 from remote_agent_protocol.gui_agents import AgentsPanel
 
 
+class FakeSession:
+    """Stand-in for VoiceSession that only tracks clear_agent_history calls."""
+
+    def __init__(self, clear_succeeds: bool = True):
+        self.clear_succeeds = clear_succeeds
+        self.clear_calls = 0
+
+    def clear_agent_history(self) -> bool:
+        self.clear_calls += 1
+        return self.clear_succeeds
+
+
 class AgentsPanelStatusTests(unittest.TestCase):
     def setUp(self):
         self.messages = []
@@ -12,6 +24,7 @@ class AgentsPanelStatusTests(unittest.TestCase):
         self.panel._order = []
         self.panel._window = None
         self.panel._append_sys = self.messages.append
+        self.panel._session = FakeSession()
 
     def test_progress_event_tracks_rich_status(self):
         self.panel.handle_event(
@@ -91,6 +104,29 @@ class AgentsPanelStatusTests(unittest.TestCase):
         self.panel._jobs["j"] = dict(job, status="running", state=None)
         self.panel._order = ["j"]
         self.assertIn("RUNNING", self.panel.active_summary())
+
+    def test_clear_finished_deletes_persisted_history_once(self):
+        self.panel._jobs = {"job-1": {"status": "done"}}
+        self.panel._order = ["job-1"]
+
+        self.panel._clear_finished()
+
+        self.assertEqual(self.panel._session.clear_calls, 1)
+        self.assertEqual(self.panel._order, [])
+        self.assertEqual(self.messages, [])
+
+    def test_clear_finished_warns_on_disk_failure_without_restoring_rows(self):
+        self.panel._session = FakeSession(clear_succeeds=False)
+        self.panel._jobs = {"job-1": {"status": "done"}}
+        self.panel._order = ["job-1"]
+
+        self.panel._clear_finished()
+
+        self.assertEqual(self.panel._session.clear_calls, 1)
+        # The user asked to hide these rows; a disk failure must not bring them back.
+        self.assertEqual(self.panel._order, [])
+        self.assertEqual(len(self.messages), 1)
+        self.assertIn("history", self.messages[0].lower())
 
     def test_panel_no_longer_writes_progress_to_transcript(self):
         # Progress narration is streamed into the conversation by the GUI now,

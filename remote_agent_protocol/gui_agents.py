@@ -270,6 +270,8 @@ class AgentsPanel:
                 self._jobs.pop(job_id, None)
         self._order = keep
         self._refresh_list()
+        if not self._session.clear_agent_history():
+            self._append_sys("Could not delete agent history from disk.")
 
     def _copy_output(self) -> None:
         job_id = self._selected_job_id()

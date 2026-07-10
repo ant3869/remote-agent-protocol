@@ -61,6 +61,21 @@ def load_history(path: str | Path, limit: int = 100) -> list[dict[str, Any]]:
     return rows[-limit:] if limit > 0 else rows
 
 
+def clear_history(path: str | Path) -> bool:
+    """Delete the persisted history file. Missing file counts as success.
+
+    Returns False on an OSError so the caller can tell the user deletion
+    actually failed, rather than silently claiming it worked.
+    """
+    with _APPEND_LOCK:
+        p = Path(path)
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            return False
+        return True
+
+
 def append_job(path: str | Path, row: dict[str, Any], limit: int = 100) -> None:
     """Append one job row, trimming the file to the last ``limit`` rows.
 

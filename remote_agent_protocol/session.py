@@ -1158,6 +1158,12 @@ class VoiceSession:
             return []
         return job_store.load_history(cfg.AGENT_HISTORY_FILE, cfg.AGENT_HISTORY_MAX)
 
+    def clear_agent_history(self) -> bool:
+        """Delete persisted job history from disk. False means deletion failed."""
+        if not cfg.AGENT_HISTORY_FILE:
+            return True
+        return job_store.clear_history(cfg.AGENT_HISTORY_FILE)
+
     async def _persist_job(self, job: agent_bridge.AgentJob) -> None:
         await asyncio.to_thread(
             job_store.append_job,
