@@ -282,6 +282,14 @@ Prefer to wire things up yourself?
 
 From here, the code examples below are the best way to learn — agents you can run, read, and adapt.
 
+## Animated companion
+
+The web Control Center includes an optional local Three.js butler companion. It reacts to wake-word detection, user speech, transcription and thinking, agent jobs, errors, and TTS speaking. Mouth movement uses a normalized envelope calculated from local TTS output; raw audio never reaches the browser.
+
+Configure it under **Settings → Animated avatar**. Disabling the feature removes the WebGL renderer and audio-envelope connection. Motion can follow the operating-system reduced-motion preference or be explicitly set to reduced or normal.
+
+Avatar assets live under `remote_agent_protocol/web_app/assets/avatars/<avatar-id>/`. The bundled `butler` metadata intentionally selects the procedural fallback. A future local `.glb` or `.gltf` model can be enabled by setting the metadata `model` field to a safe relative filename. Missing, unsafe, or malformed models fall back to the procedural butler without blocking the rest of the application.
+
 ## 🧪 Code examples
 
 - [Focused examples](https://github.com/pipecat-ai/pipecat/tree/main/examples) — small agents that each illustrate one or two specific services or concepts

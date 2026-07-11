@@ -1,3 +1,4 @@
+import inspect
 import json
 from pathlib import Path
 
@@ -198,9 +199,7 @@ def test_direct_web_launcher_releases_lock_after_failure(monkeypatch):
 def test_direct_web_launcher_refuses_a_second_instance(monkeypatch):
     calls = []
 
-    monkeypatch.setattr(
-        web_gui.process_guard, "acquire_single_instance_lock", lambda: False
-    )
+    monkeypatch.setattr(web_gui.process_guard, "acquire_single_instance_lock", lambda: False)
     monkeypatch.setattr(
         web_gui.process_guard, "close_previous_instance", lambda: calls.append("close")
     )
@@ -877,3 +876,196 @@ def _restore_agent_prompts(snapshot: dict[str, str]) -> None:
     cfg.DELEGATION_CONFIRM_PROMPT = snapshot["confirm"]
     cfg.AGENT_CONFIRM_APPROVED_PROMPT = snapshot["confirmApproved"]
     cfg.AGENT_CONFIRM_DENIED_PROMPT = snapshot["confirmDenied"]
+
+
+def test_new_session_receives_avatar_audio_callback(monkeypatch):
+    captured = {}
+
+    class FakeSession:
+        def __init__(self, persona, on_event=None, on_avatar_audio=None):
+            captured["callback"] = on_avatar_audio
+
+        def set_manual_prompt_mode(self, value):
+            return None
+
+        def set_voice_mode(self, value):
+            return None
+
+        def set_muted(self, value):
+            return None
+
+        def set_startup_defaults(self, **kwargs):
+            return None
+
+        def set_voicebox_warmup_personas(self, personas):
+            return None
+
+        def set_default_agent_backend(self, backend):
+            return None
+
+    monkeypatch.setattr(web_gui, "VoiceSession", FakeSession)
+    app = WebVoiceApp()
+
+    assert captured["callback"] == app._avatar_audio.publish
+
+
+def test_stop_app_closes_avatar_hub(monkeypatch):
+    app = WebVoiceApp()
+    closed = []
+    monkeypatch.setattr(app._avatar_audio, "close", lambda: closed.append(True))
+    monkeypatch.setattr(app, "_stop_session", lambda **kwargs: None)
+    monkeypatch.setattr(app, "_join_thread", lambda *args, **kwargs: None)
+
+    app._stop_app()
+
+    assert closed == [True]
+
+
+def test_avatar_audio_route_calls_streamer():
+    app = WebVoiceApp()
+    handler_class = app._handler_class()
+
+    assert "/api/avatar-audio" in inspect.getsource(handler_class.do_GET)
+
+
+def test_avatar_audio_tap_sits_between_tts_and_local_output():
+    source = Path("remote_agent_protocol/session.py").read_text(encoding="utf-8")
+    output_block = source.split('TranscriptTap(self._on_event, role="assistant")', 1)[1]
+
+    assert output_block.index("self._tts") < output_block.index("AvatarAudioTap(")
+    assert output_block.index("AvatarAudioTap(") < output_block.index("transport.output()")
+
+
+def test_avatar_vendor_and_metadata_files_are_declared():
+    metadata = json.loads(
+        (WEB_APP / "assets/avatars/butler/metadata.json").read_text(encoding="utf-8")
+    )
+    version = (WEB_APP / "vendor/three/VERSION").read_text(encoding="utf-8").strip()
+    project = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    assert metadata["id"] == "butler"
+    assert metadata["model"] is None
+    assert metadata["fallback"] == "procedural-butler"
+    assert version == "0.180.0"
+    assert '"web_app/**/*"' in project
+    assert (WEB_APP / "vendor/three/LICENSE").is_file()
+    assert (WEB_APP / "vendor/three/three.module.min.js").is_file()
+    assert (WEB_APP / "vendor/three/addons/loaders/GLTFLoader.js").is_file()
+    assert (WEB_APP / "vendor/three/addons/utils/BufferGeometryUtils.js").is_file()
+
+
+def test_web_shell_contains_avatar_panel_import_map_and_settings():
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+    css = (WEB_APP / "styles.css").read_text(encoding="utf-8")
+
+    for marker in [
+        'id="avatarPanel"',
+        'id="avatarCanvasHost"',
+        'id="avatarFallback"',
+        'id="avatarPersonaName"',
+        'id="avatarStateLabel"',
+        'id="avatarEmotionLabel"',
+        'id="avatarCollapseBtn"',
+        'id="avatarSettingEnabled"',
+        'id="avatarSettingQuality"',
+        'id="avatarSettingMotion"',
+        'id="avatarSettingsSaveBtn"',
+    ]:
+        assert marker in html
+    assert 'type="importmap"' in html
+    assert '"three": "/vendor/three/three.module.min.js"' in html
+    assert 'src="/avatar/avatar-entry.js"' in html
+    assert "function syncAvatarRuntime" in script
+    assert "post('avatar_settings'" in script
+    assert ".avatar-panel" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css
+
+
+def test_procedural_butler_exposes_required_control_contract():
+    source = (WEB_APP / "avatar/procedural-butler.js").read_text(encoding="utf-8")
+    scene = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
+
+    for control in [
+        "root",
+        "bust",
+        "neck",
+        "head",
+        "jaw",
+        "mouthUpper",
+        "mouthLower",
+        "mouthCornerLeft",
+        "mouthCornerRight",
+        "cheekLeft",
+        "cheekRight",
+        "browLeft",
+        "browRight",
+        "eyeLeft",
+        "eyeRight",
+        "pupilLeft",
+        "pupilRight",
+        "lidLeft",
+        "lidRight",
+    ]:
+        assert control in source
+    assert "new THREE.WebGLRenderer" in scene
+    assert "ResizeObserver" in scene
+    assert "renderer.dispose()" in scene
+    assert "renderer.forceContextLoss()" in scene
+
+
+def test_avatar_scene_respects_reduced_motion_and_idle_gate():
+    source = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
+    assert "effectiveReducedMotion" in source
+    assert "idleMotion" in source
+    assert "GazeController" in source
+    assert "expressionFor" in source
+
+
+def test_avatar_scene_has_visibility_context_loss_and_complete_cleanup():
+    source = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
+    entry = (WEB_APP / "avatar/avatar-entry.js").read_text(encoding="utf-8")
+    panel = (WEB_APP / "avatar/avatar-panel.js").read_text(encoding="utf-8")
+
+    assert "IntersectionObserver" in entry
+    assert "webglcontextlost" in source
+    assert "webglcontextrestored" in source
+    assert "attemptedContextRestore" in source
+    assert "aria-label" in panel
+    for marker in [
+        "observer.disconnect()",
+        "stream.dispose()",
+        "rig.dispose()",
+        "renderer.renderLists.dispose()",
+        "renderer.dispose()",
+        "renderer.forceContextLoss()",
+        "cancelAnimationFrame(animationFrame)",
+    ]:
+        assert marker in source
+
+
+def test_package_data_covers_nested_avatar_assets():
+    project = Path("pyproject.toml").read_text(encoding="utf-8")
+    assert '"web_app/**/*"' in project
+    for relative in [
+        "avatar/avatar-entry.js",
+        "avatar/avatar-scene.js",
+        "assets/avatars/butler/metadata.json",
+        "vendor/three/three.module.min.js",
+        "vendor/three/addons/loaders/GLTFLoader.js",
+        "vendor/three/addons/utils/BufferGeometryUtils.js",
+    ]:
+        assert (WEB_APP / relative).is_file(), relative
+
+
+def test_avatar_review_gaps_are_covered():
+    app = (WEB_APP / "app.js").read_text(encoding="utf-8")
+    entry = (WEB_APP / "avatar/avatar-entry.js").read_text(encoding="utf-8")
+    scene = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
+
+    assert "lastActivityAt" in app and "sleeping:" in app
+    assert "previousKey" in entry and "nextKey" in entry
+    assert "AnimationMixer" in scene
+    assert "morphTargetInfluences" in scene
+    assert "cameraTarget" in scene
+    assert "rap:avatar-recovered" in scene

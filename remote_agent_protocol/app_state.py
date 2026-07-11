@@ -12,7 +12,9 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-from dataclasses import asdict, dataclass, field
+import re
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from loguru import logger
@@ -35,6 +37,133 @@ class AppState:
     coqui_language: str | None = None
     coqui_device: str | None = None
     agent_prompts: dict[str, str] = field(default_factory=dict)
+    avatar_enabled: bool = True
+    avatar_id: str = "butler"
+    avatar_quality: str = "high"
+    avatar_lip_sync: bool = True
+    avatar_gaze: bool = True
+    avatar_idle_motion: bool = True
+    avatar_expression_intensity: float = 0.62
+    avatar_reduced_motion: bool | None = None
+    avatar_show_state: bool = True
+    avatar_panel_collapsed: bool = False
+
+
+AVATAR_QUALITIES = frozenset({"low", "medium", "high"})
+_AVATAR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _pick(raw: Mapping[str, object], snake: str, camel: str, default: object) -> object:
+    if snake in raw:
+        return raw[snake]
+    if camel in raw:
+        return raw[camel]
+    return default
+
+
+def _bool_or(value: object, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _tri_bool_or(value: object, default: bool | None) -> bool | None:
+    return value if value is None or isinstance(value, bool) else default
+
+
+def _avatar_id_or(value: object, default: str) -> str:
+    return value if isinstance(value, str) and _AVATAR_ID_RE.fullmatch(value) else default
+
+
+def _quality_or(value: object, default: str) -> str:
+    return value if isinstance(value, str) and value in AVATAR_QUALITIES else default
+
+
+def _intensity_or(value: object, default: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return default
+    return max(0.0, min(1.0, float(value)))
+
+
+def normalize_avatar_settings(
+    raw: Mapping[str, object] | object,
+    base: AppState | None = None,
+) -> AppState:
+    """Normalize browser or persisted avatar settings against an existing state."""
+    current = base or AppState()
+    values = raw if isinstance(raw, Mapping) else {}
+    return replace(
+        current,
+        avatar_enabled=_bool_or(
+            _pick(values, "avatar_enabled", "enabled", current.avatar_enabled),
+            current.avatar_enabled,
+        ),
+        avatar_id=_avatar_id_or(
+            _pick(values, "avatar_id", "avatarId", current.avatar_id),
+            current.avatar_id,
+        ),
+        avatar_quality=_quality_or(
+            _pick(values, "avatar_quality", "quality", current.avatar_quality),
+            current.avatar_quality,
+        ),
+        avatar_lip_sync=_bool_or(
+            _pick(values, "avatar_lip_sync", "lipSync", current.avatar_lip_sync),
+            current.avatar_lip_sync,
+        ),
+        avatar_gaze=_bool_or(
+            _pick(values, "avatar_gaze", "gaze", current.avatar_gaze),
+            current.avatar_gaze,
+        ),
+        avatar_idle_motion=_bool_or(
+            _pick(values, "avatar_idle_motion", "idleMotion", current.avatar_idle_motion),
+            current.avatar_idle_motion,
+        ),
+        avatar_expression_intensity=_intensity_or(
+            _pick(
+                values,
+                "avatar_expression_intensity",
+                "expressionIntensity",
+                current.avatar_expression_intensity,
+            ),
+            current.avatar_expression_intensity,
+        ),
+        avatar_reduced_motion=_tri_bool_or(
+            _pick(
+                values,
+                "avatar_reduced_motion",
+                "reducedMotion",
+                current.avatar_reduced_motion,
+            ),
+            current.avatar_reduced_motion,
+        ),
+        avatar_show_state=_bool_or(
+            _pick(values, "avatar_show_state", "showState", current.avatar_show_state),
+            current.avatar_show_state,
+        ),
+        avatar_panel_collapsed=_bool_or(
+            _pick(
+                values,
+                "avatar_panel_collapsed",
+                "panelCollapsed",
+                current.avatar_panel_collapsed,
+            ),
+            current.avatar_panel_collapsed,
+        ),
+    )
+
+
+def avatar_settings_payload(state: AppState) -> dict[str, object]:
+    """Return the camelCase avatar settings contract consumed by the browser."""
+    return {
+        "enabled": state.avatar_enabled,
+        "avatarId": state.avatar_id,
+        "quality": state.avatar_quality,
+        "lipSync": state.avatar_lip_sync,
+        "gaze": state.avatar_gaze,
+        "idleMotion": state.avatar_idle_motion,
+        "expressionIntensity": state.avatar_expression_intensity,
+        "reducedMotion": state.avatar_reduced_motion,
+        "showState": state.avatar_show_state,
+        "panelCollapsed": state.avatar_panel_collapsed,
+    }
 
 
 def load_state(path: str | Path) -> AppState:
@@ -54,7 +183,7 @@ def load_state(path: str | Path) -> AppState:
     agent_prompts = raw.get("agent_prompts")
     if not isinstance(agent_prompts, dict):
         agent_prompts = {}
-    return AppState(
+    state = AppState(
         persona=raw.get("persona") if isinstance(raw.get("persona"), str) else None,
         tool_user=raw.get("tool_user") if isinstance(raw.get("tool_user"), str) else None,
         voice_mode=multimodal_prompt.normalize_voice_mode(raw.get("voice_mode")),
@@ -73,6 +202,7 @@ def load_state(path: str | Path) -> AppState:
             str(key): value for key, value in agent_prompts.items() if isinstance(value, str)
         },
     )
+    return normalize_avatar_settings(raw, state)
 
 
 def save_state(path: str | Path, state: AppState) -> None:

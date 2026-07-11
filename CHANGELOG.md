@@ -25,6 +25,12 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- The web Control Center now includes an optional, local-first animated butler
+  companion with listening, thinking, speaking, agent-work, completion, and
+  error states; natural blinking, gaze, restrained idle motion, and facial
+  expressions; amplitude-driven lip-sync for every TTS backend including
+  Coqui; persisted quality and motion controls; safe GLB/GLTF loading; and an
+  accessible static fallback when Three.js, WebGL, or a model is unavailable.
 - Closing the console window (the documented way to quit -- "Close the
   window to quit") now shuts everything down cleanly instead of Windows
   force-killing the process a few seconds later. That force-kill used to

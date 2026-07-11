@@ -9,6 +9,7 @@ const state = {
   selectedPersona: null,
   personaOriginal: null,
   connectionLost: false,
+  avatar: { speaking: false, userSpeaking: false, completedAt: 0, failedAt: 0, latestAssistantText: "", lastActivityAt: Date.now() },
   wake: null,
   agentJobs: {},
   agentHistory: [],
@@ -157,6 +158,16 @@ async function poll() {
 }
 
 function handleEvent(event) {
+  if (["transcript", "draft_voice", "turn", "speaking", "wake", "agent_job", "agent_confirm"].includes(event.type)) {
+    state.avatar.lastActivityAt = Date.now();
+  }
+  if (event.type === "transcript" && event.role !== "user") state.avatar.latestAssistantText = event.text || "";
+  if (event.type === "speaking") state.avatar.speaking = Boolean(event.value);
+  if (event.type === "turn" && event.event === "user_started") state.avatar.userSpeaking = true;
+  if (event.type === "turn" && event.event === "user_stopped") state.avatar.userSpeaking = false;
+  if (event.type === "agent_job" && event.event === "finished" && event.status === "done") state.avatar.completedAt = Date.now();
+  if (event.type === "agent_job" && ["failed", "timeout", "cancelled"].includes(event.status)) state.avatar.failedAt = Date.now();
+
   if (event.type === "transcript") {
     addMessage(event.role || "assistant", event.role === "user" ? "You" : currentPersona(), event.text || "");
   } else if (event.type === "draft_voice") {
@@ -193,6 +204,7 @@ function handleEvent(event) {
     if (event.phase === "wake_word_detected") playWakeChime();
     renderWakeStatus();
   }
+  syncAvatarRuntime();
 }
 
 function updateWakePhase(phase) {
@@ -221,6 +233,75 @@ function playWakeChime() {
 
 function currentPersona() {
   return state.status?.persona || "Assistant";
+}
+
+function avatarRuntimeSnapshot() {
+  const s = state.status || {};
+  const wake = currentWake();
+  return {
+    persona: s.persona,
+    session: s.session,
+    speaking: state.avatar.speaking,
+    userSpeaking: state.avatar.userSpeaking,
+    thinking: wake.phase === "transcribing" || wake.phase === "agent_responding",
+    wakePhase: wake.phase,
+    activeAgentCount: s.activeAgentCount || 0,
+    pendingConfirmation: Boolean(state.activeConfirm || s.pendingConfirms?.length),
+    completedAt: state.avatar.completedAt,
+    sleeping: Date.now() - state.avatar.lastActivityAt > 120_000
+      && !state.avatar.speaking
+      && !state.avatar.userSpeaking
+      && (s.activeAgentCount || 0) === 0,
+    error: s.session === "failed" || Boolean(state.avatar.failedAt && Date.now() - state.avatar.failedAt < 5000),
+    latestAssistantText: state.avatar.latestAssistantText,
+  };
+}
+
+function syncAvatarRuntime() {
+  const api = window.remoteAgentAvatar;
+  if (!api || !state.status?.avatar) return;
+  api.updateSettings(state.status.avatar);
+  api.updateRuntime(avatarRuntimeSnapshot());
+}
+
+function populateAvatarSettings(avatar = {}) {
+  if (!$('avatarSettingEnabled')) return;
+  $('avatarSettingEnabled').value = String(avatar.enabled ?? true);
+  $('avatarSettingAvatar').value = avatar.avatarId || 'butler';
+  $('avatarSettingQuality').value = avatar.quality || 'high';
+  $('avatarSettingLipSync').value = String(avatar.lipSync ?? true);
+  $('avatarSettingGaze').value = String(avatar.gaze ?? true);
+  $('avatarSettingIdle').value = String(avatar.idleMotion ?? true);
+  $('avatarSettingIntensity').value = String(avatar.expressionIntensity ?? 0.62);
+  $('avatarSettingShowState').value = String(avatar.showState ?? true);
+  $('avatarSettingCollapsed').value = String(avatar.panelCollapsed ?? false);
+  $('avatarSettingMotion').value = avatar.reducedMotion === null || avatar.reducedMotion === undefined
+    ? 'system'
+    : avatar.reducedMotion ? 'reduced' : 'normal';
+}
+
+function avatarSettingsPayload(overrides = {}) {
+  const motion = $('avatarSettingMotion').value;
+  return {
+    enabled: $('avatarSettingEnabled').value === 'true',
+    avatarId: $('avatarSettingAvatar').value,
+    quality: $('avatarSettingQuality').value,
+    lipSync: $('avatarSettingLipSync').value === 'true',
+    gaze: $('avatarSettingGaze').value === 'true',
+    idleMotion: $('avatarSettingIdle').value === 'true',
+    expressionIntensity: Number($('avatarSettingIntensity').value),
+    reducedMotion: motion === 'system' ? null : motion === 'reduced',
+    showState: $('avatarSettingShowState').value === 'true',
+    panelCollapsed: $('avatarSettingCollapsed').value === 'true',
+    ...overrides,
+  };
+}
+
+async function saveAvatarSettings(overrides = {}) {
+  const result = await post('avatar_settings', { settings: avatarSettingsPayload(overrides) });
+  const notice = $('avatarSettingsNotice');
+  notice.textContent = result.ok ? 'Avatar settings saved.' : result.error;
+  notice.classList.remove('hidden');
 }
 
 function addMessage(role, name, text) {
@@ -294,6 +375,8 @@ function renderStatus() {
   renderAgents(s);
   renderAgentsPage();
   renderStatusDashboard(s);
+  populateAvatarSettings(s.avatar);
+  syncAvatarRuntime();
   if (!state.activeConfirm && s.pendingConfirms?.length) {
     state.activeConfirm = s.pendingConfirms[0];
     renderConfirm();
@@ -1118,6 +1201,13 @@ function isCommandPaletteOpen() {
 }
 
 function bind() {
+  window.addEventListener("rap:avatar-ready", syncAvatarRuntime);
+  window.addEventListener("rap:avatar-collapse", (event) => {
+    const collapsed = Boolean(event.detail?.collapsed);
+    $('avatarSettingCollapsed').value = String(collapsed);
+    void saveAvatarSettings({ panelCollapsed: collapsed });
+  });
+  $('avatarSettingsSaveBtn').addEventListener('click', () => void saveAvatarSettings());
   document.querySelectorAll(".nav-link").forEach((button) => {
     button.addEventListener("click", () => {
       document.querySelectorAll(".nav-link").forEach((item) => item.classList.remove("active"));

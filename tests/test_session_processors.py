@@ -10,13 +10,16 @@ from pipecat.frames.frames import (
     LLMUpdateSettingsFrame,
     MetricsFrame,
     TranscriptionFrame,
+    TTSAudioRawFrame,
     TTSSpeakFrame,
+    UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import TTFBMetricsData
 from pipecat.tests.utils import run_test
 from remote_agent_protocol import multimodal_prompt
 from remote_agent_protocol.session_processors import (
+    AvatarAudioTap,
     DelegationTap,
     LLMDelegateTap,
     ManualPromptDraftTap,
@@ -290,6 +293,66 @@ class LLMDelegateTapTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_placeholder_task("Clear task description."))
         self.assertTrue(is_placeholder_task("..."))
         self.assertFalse(is_placeholder_task("get weather for Bentonville"))
+
+
+class AvatarAudioTapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tts_audio_passes_through_unchanged_and_emits_envelope(self):
+        events = []
+        frame = TTSAudioRawFrame(audio=b"\xff\x7f" * 80, sample_rate=24000, num_channels=1)
+        tap = AvatarAudioTap(
+            events.append,
+            publish_interval_secs=0.05,
+            clock=lambda: 1.0,
+            wall_clock=lambda: 10.0,
+        )
+
+        frames, _ = await run_test(tap, frames_to_send=[frame])
+
+        self.assertIs(frames[0], frame)
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0].voiced)
+        self.assertEqual(events[0].timestamp, 10.0)
+
+    async def test_rate_limit_drops_intermediate_envelopes(self):
+        events = []
+        ticks = iter([0.0, 0.01, 0.06])
+        tap = AvatarAudioTap(events.append, clock=lambda: next(ticks), wall_clock=lambda: 20.0)
+        frames = [
+            TTSAudioRawFrame(audio=b"\x00\x20" * 40, sample_rate=24000, num_channels=1)
+            for _ in range(3)
+        ]
+
+        await run_test(tap, frames_to_send=frames)
+
+        self.assertEqual(len(events), 2)
+
+    async def test_callback_failure_does_not_block_audio(self):
+        frame = TTSAudioRawFrame(audio=b"\x00\x20" * 40, sample_rate=24000, num_channels=1)
+
+        def fail(_envelope):
+            raise RuntimeError("telemetry unavailable")
+
+        frames, _ = await run_test(AvatarAudioTap(fail), frames_to_send=[frame])
+
+        self.assertIs(frames[0], frame)
+
+
+class TranscriptTapUserStartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_telemetry_tap_reports_user_started(self):
+        events = []
+
+        await run_test(
+            TranscriptTap(events.append, role="telemetry"),
+            frames_to_send=[UserStartedSpeakingFrame(), UserStoppedSpeakingFrame()],
+        )
+
+        self.assertEqual(
+            events,
+            [
+                {"type": "turn", "event": "user_started"},
+                {"type": "turn", "event": "user_stopped"},
+            ],
+        )
 
 
 class TranscriptTapRoleTests(unittest.IsolatedAsyncioTestCase):

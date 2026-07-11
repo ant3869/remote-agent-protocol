@@ -53,6 +53,7 @@ from remote_agent_protocol import personas as persona_catalog
 from remote_agent_protocol.persona_tts import PersonaTTSService
 from remote_agent_protocol.personas import Persona
 from remote_agent_protocol.session_processors import (
+    AvatarAudioTap,
     DelegationTap,
     EventCallback,
     LLMDelegateTap,
@@ -67,16 +68,23 @@ from remote_agent_protocol.session_processors import (
 class VoiceSession:
     """Owns the pipeline and exposes a thread-safe control surface."""
 
-    def __init__(self, persona: Persona, on_event: EventCallback | None = None):
+    def __init__(
+        self,
+        persona: Persona,
+        on_event: EventCallback | None = None,
+        on_avatar_audio=None,
+    ):
         """Initialize the session.
 
         Args:
             persona: The character to boot as (its tool_user, if any, becomes
                 the default delegation backend).
             on_event: Callback receiving GUI event dicts from any thread.
+            on_avatar_audio: Callback receiving normalized outgoing TTS envelopes.
         """
         self._persona = persona
         self._on_event = on_event
+        self._on_avatar_audio = on_avatar_audio
 
         # Populated by build():
         self._gate: MicGate | None = None
@@ -261,6 +269,7 @@ class VoiceSession:
         processors += [
             TranscriptTap(self._on_event, role="assistant"),
             self._tts,
+            AvatarAudioTap(self._on_avatar_audio),
             transport.output(),
             # After the output transport so it sees every service's metrics
             # (including TTS) plus the bot speaking / turn markers, exactly once.
