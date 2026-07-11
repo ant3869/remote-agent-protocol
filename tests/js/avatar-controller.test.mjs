@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveAvatarEmotion, resolveAvatarState } from "../../remote_agent_protocol/web_app/avatar/avatar-controller.js";
 import { profileForPersona } from "../../remote_agent_protocol/web_app/avatar/persona-profiles.js";
+import { GazeController } from "../../remote_agent_protocol/web_app/avatar/gaze-controller.js";
 
 test("error outranks speaking and listening", () => {
   assert.equal(resolveAvatarState({ error: true, speaking: true, userSpeaking: true }, 100), "error");
@@ -32,4 +33,20 @@ test("apology language creates a low-intensity apologetic emotion", () => {
   const emotion = resolveAvatarEmotion({ latestAssistantText: "I’m sorry, that failed." }, profile, 100);
   assert.equal(emotion.name, "apologetic");
   assert.equal(emotion.intensity, 0.35);
+});
+
+
+test("listening gaze remains close to camera and reduces saccades", () => {
+  const gaze = new GazeController({ random: () => 0.5 });
+  const result = gaze.update(0.016, "listening", true, false);
+  assert.equal(result.enabled, true);
+  assert.ok(Math.abs(result.x) <= 0.03);
+  assert.ok(Math.abs(result.y) <= 0.03);
+});
+
+test("reduced motion keeps blink but suppresses large gaze offsets", () => {
+  const gaze = new GazeController({ random: () => 1 });
+  const result = gaze.update(8, "thinking", true, true);
+  assert.ok(Math.abs(result.x) <= 0.04);
+  assert.ok(Math.abs(result.y) <= 0.04);
 });

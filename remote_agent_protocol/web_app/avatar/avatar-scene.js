@@ -1,4 +1,7 @@
 import * as THREE from "three";
+import { expressionFor, blendTargets } from "./expressions.js";
+import { GazeController } from "./gaze-controller.js";
+import { damp } from "./math.js";
 import { createProceduralButler } from "./procedural-butler.js";
 
 export async function createAvatarScene(host, settings) {
@@ -27,12 +30,17 @@ export async function createAvatarScene(host, settings) {
 
   const rig = createProceduralButler(THREE);
   scene.add(rig.object);
+  const gazeController = new GazeController();
+  const currentTargets = Object.fromEntries(
+    Object.keys(expressionFor("neutral")).map((keyName) => [keyName, 0]),
+  );
 
   let visible = true;
   let disposed = false;
   let lastFrame = 0;
+  let lastAnimatedAt = 0;
   let latest = null;
-  const targetInterval = 1000 / settings.targetFps;
+  let targetInterval = 1000 / settings.targetFps;
 
   const resize = () => {
     const width = Math.max(1, host.clientWidth);
@@ -49,14 +57,21 @@ export async function createAvatarScene(host, settings) {
     if (disposed) return;
     requestAnimationFrame(animate);
     if (!visible || document.hidden || time - lastFrame < targetInterval) return;
+    const delta = Math.min(0.1, Math.max(0.001, (time - (lastAnimatedAt || time - 16)) / 1000));
+    lastAnimatedAt = time;
     lastFrame = time;
-    if (latest) applyAvatarFrame(rig.controls, latest, time / 1000);
+    if (latest) applyAvatarFrame(rig.controls, latest, time / 1000, delta, gazeController, currentTargets);
     renderer.render(scene, camera);
   };
   requestAnimationFrame(animate);
 
   return {
-    update(value) { latest = value; },
+    update(value) {
+      latest = value;
+      targetInterval = 1000 / value.settings.targetFps;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, value.settings.maxPixelRatio));
+      renderer.shadowMap.enabled = value.settings.shadows;
+    },
     setVisible(value) { visible = Boolean(value); },
     dispose() {
       if (disposed) return;
@@ -72,9 +87,45 @@ export async function createAvatarScene(host, settings) {
   };
 }
 
-function applyAvatarFrame(controls, frame, seconds) {
-  const reduced = frame.settings.effectiveReducedMotion;
-  const breathing = reduced || !frame.settings.idleMotion ? 0 : Math.sin(seconds * 1.35) * 0.008 * frame.profile.idleIntensity;
+function applyAvatarFrame(controls, frame, seconds, delta, gazeController, currentTargets) {
+  const expression = expressionFor(frame.resolved.emotion.name);
+  const base = expressionFor(frame.profile.defaultExpression);
+  const amount = frame.resolved.emotion.intensity * frame.settings.expressionIntensity;
+  const target = blendTargets(base, expression, amount);
+  for (const key of Object.keys(currentTargets)) {
+    currentTargets[key] = damp(currentTargets[key], target[key], 8, delta);
+  }
+
+  const gaze = gazeController.update(
+    delta,
+    frame.resolved.state,
+    frame.settings.gaze,
+    frame.settings.effectiveReducedMotion,
+  );
+  controls.pupilLeft.position.x = gaze.x;
+  controls.pupilRight.position.x = gaze.x;
+  controls.pupilLeft.position.y = gaze.y;
+  controls.pupilRight.position.y = gaze.y;
+  controls.lidLeft.scale.y = Math.max(0.04, 0.74 * (1 - gaze.blink));
+  controls.lidRight.scale.y = Math.max(0.04, 0.74 * (1 - gaze.blink * 0.96));
+  controls.browLeft.position.y = 0.22 + currentTargets.browInner * 0.035 + currentTargets.browAsymmetry * 0.02;
+  controls.browRight.position.y = 0.22 + currentTargets.browInner * 0.035 - currentTargets.browAsymmetry * 0.02;
+  controls.browLeft.rotation.z = currentTargets.browOuter * -0.15;
+  controls.browRight.rotation.z = currentTargets.browOuter * 0.15;
+  controls.mouthCornerLeft.position.y = -0.01 + currentTargets.mouthCorner * 0.035;
+  controls.mouthCornerRight.position.y = -0.01 + currentTargets.mouthCorner * 0.035;
+  controls.mouthUpper.scale.x = 1 + currentTargets.mouthWidth * 0.2;
+  controls.mouthLower.scale.x = 1 + currentTargets.mouthWidth * 0.18;
+  controls.cheekLeft.position.y = -0.04 + currentTargets.cheekRaise * 0.025;
+  controls.cheekRight.position.y = -0.04 + currentTargets.cheekRaise * 0.025;
+  controls.jaw.rotation.x = currentTargets.jawOpen * 0.18;
+  controls.head.rotation.x = currentTargets.headPitch;
+  controls.head.rotation.y = currentTargets.headYaw;
+  controls.head.rotation.z = currentTargets.headRoll;
+
+  const canIdle = frame.settings.idleMotion && !frame.settings.effectiveReducedMotion;
+  const breathing = canIdle ? Math.sin(seconds * 1.35) * 0.008 * frame.profile.idleIntensity : 0;
+  const stabilization = canIdle ? Math.sin(seconds * 0.41) * 0.006 * frame.profile.idleIntensity : 0;
   controls.bust.scale.y = 0.72 + breathing;
-  controls.head.rotation.y = frame.resolved.state === "thinking" ? -0.05 : 0;
+  controls.root.rotation.y = stabilization;
 }

@@ -1012,3 +1012,11 @@ def test_procedural_butler_exposes_required_control_contract():
     assert "ResizeObserver" in scene
     assert "renderer.dispose()" in scene
     assert "renderer.forceContextLoss()" in scene
+
+
+def test_avatar_scene_respects_reduced_motion_and_idle_gate():
+    source = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
+    assert "effectiveReducedMotion" in source
+    assert "idleMotion" in source
+    assert "GazeController" in source
+    assert "expressionFor" in source
