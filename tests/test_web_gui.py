@@ -980,3 +980,35 @@ def test_web_shell_contains_avatar_panel_import_map_and_settings():
     assert "post('avatar_settings'" in script
     assert ".avatar-panel" in css
     assert "@media (prefers-reduced-motion: reduce)" in css
+
+
+def test_procedural_butler_exposes_required_control_contract():
+    source = (WEB_APP / "avatar/procedural-butler.js").read_text(encoding="utf-8")
+    scene = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
+
+    for control in [
+        "root",
+        "bust",
+        "neck",
+        "head",
+        "jaw",
+        "mouthUpper",
+        "mouthLower",
+        "mouthCornerLeft",
+        "mouthCornerRight",
+        "cheekLeft",
+        "cheekRight",
+        "browLeft",
+        "browRight",
+        "eyeLeft",
+        "eyeRight",
+        "pupilLeft",
+        "pupilRight",
+        "lidLeft",
+        "lidRight",
+    ]:
+        assert control in source
+    assert "new THREE.WebGLRenderer" in scene
+    assert "ResizeObserver" in scene
+    assert "renderer.dispose()" in scene
+    assert "renderer.forceContextLoss()" in scene
