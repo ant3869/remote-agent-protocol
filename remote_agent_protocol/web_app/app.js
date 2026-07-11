@@ -16,6 +16,7 @@ const state = {
   selectedAgentJobId: null,
   selectedMemory: null,
   sending: false,
+  paletteIndex: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -972,6 +973,150 @@ async function fetchCliDiagnostics() {
   }
 }
 
+function navigateTo(view) {
+  document.querySelector(`.nav-link[data-view="${view}"]`)?.click();
+}
+
+function commandPaletteItems() {
+  const items = [];
+
+  [
+    ["control", "Control Center"],
+    ["agents", "Agents"],
+    ["personas", "Personas"],
+    ["memory", "Memory"],
+    ["setup", "Setup"],
+    ["status", "Status"],
+    ["settings", "Settings"],
+  ].forEach(([view, label]) => {
+    items.push({ id: `nav:${view}`, group: "Navigate", label, hint: "Open panel", action: () => navigateTo(view) });
+  });
+
+  items.push(
+    { id: "action:focus-message", group: "Actions", label: "Focus message", hint: "Ctrl L", action: () => $("messageInput").focus() },
+    { id: "action:toggle-mic", group: "Actions", label: "Toggle mic", hint: "Ctrl M", action: () => post("mute", { muted: !state.status?.muted }) },
+    { id: "action:cycle-voice-mode", group: "Actions", label: "Cycle voice mode", hint: "", action: () => post("voice_mode", { mode: nextMode(state.status?.voiceMode) }) },
+    { id: "action:new-chat", group: "Actions", label: "New chat", hint: "", action: () => { state.messages = []; renderChat(); post("restart_chat"); } },
+    { id: "action:refresh-memory", group: "Actions", label: "Refresh memory", hint: "", action: () => { navigateTo("memory"); post("refresh_memory", { query: $("memorySearch").value }); } },
+    { id: "action:export-diagnostics", group: "Actions", label: "Export diagnostics", hint: "", action: () => post("export_diagnostics") },
+    { id: "action:start-ollama", group: "Actions", label: "Start Ollama", hint: "", action: () => post("start_ollama") },
+    { id: "action:free-vram", group: "Actions", label: "Free VRAM", hint: "", action: () => post("free_vram") },
+  );
+
+  (state.status?.personas || []).forEach((persona) => {
+    items.push({
+      id: `persona:${persona.name}`,
+      group: "Personas",
+      label: persona.name,
+      hint: compactText(persona.description || persona.effectiveModel || "", "Persona"),
+      action: () => {
+        navigateTo("personas");
+        state.selectedPersona = persona.name;
+        state.personaOriginal = null;
+        loadPersonaEditor(persona);
+        post("persona", { name: persona.name });
+      },
+    });
+  });
+
+  allAgentJobs().slice(0, 20).forEach((job) => {
+    items.push({
+      id: `agent-job:${job.job_id}`,
+      group: "Agent Jobs",
+      label: compactText(job.task || job.summary || job.agent || "Agent job", "Agent job"),
+      hint: `${job.agent || "agent"} · ${job.status || job.state || "unknown"}`,
+      action: () => {
+        navigateTo("agents");
+        state.selectedAgentJobId = job.job_id;
+        renderAgentJobList();
+        renderAgentDetail();
+      },
+    });
+  });
+
+  [...state.memories.short, ...state.memories.semantic].slice(0, 20).forEach((row, index) => {
+    const label = compactText(row.text || row.label || "", "Memory");
+    if (!label) return;
+    items.push({
+      id: `memory:${row.scope || "short"}:${row.id ?? index}`,
+      group: "Memory",
+      label,
+      hint: row.scope === "semantic" ? "Semantic memory" : "Short-term memory",
+      action: () => {
+        navigateTo("memory");
+        const query = (row.label || row.text || "").slice(0, 60);
+        $("memorySearch").value = query;
+        renderMemory();
+        post("refresh_memory", { query });
+      },
+    });
+  });
+
+  return items;
+}
+
+function filteredPaletteItems() {
+  const query = ($("paletteInput")?.value || "").trim().toLowerCase();
+  const items = commandPaletteItems();
+  if (!query) return items;
+  return items.filter((item) => `${item.label} ${item.hint || ""} ${item.group}`.toLowerCase().includes(query));
+}
+
+function renderCommandPalette() {
+  const results = $("paletteResults");
+  if (!results) return;
+  const items = filteredPaletteItems();
+  if (state.paletteIndex >= items.length) state.paletteIndex = Math.max(0, items.length - 1);
+  results.innerHTML = "";
+  if (!items.length) {
+    results.innerHTML = '<div class="empty-state"><strong>No matches.</strong><span>Try a different search.</span></div>';
+    return;
+  }
+  let currentGroup = null;
+  items.forEach((item, index) => {
+    if (item.group !== currentGroup) {
+      currentGroup = item.group;
+      const heading = document.createElement("p");
+      heading.className = "palette-group";
+      heading.textContent = currentGroup;
+      results.appendChild(heading);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `palette-result${index === state.paletteIndex ? " active" : ""}`;
+    button.innerHTML = `<span>${escapeHtml(item.label)}</span>${item.hint ? `<em>${escapeHtml(item.hint)}</em>` : ""}`;
+    button.addEventListener("mouseenter", () => { state.paletteIndex = index; renderCommandPalette(); });
+    button.addEventListener("click", () => runPaletteItem(item));
+    results.appendChild(button);
+  });
+}
+
+function runPaletteItem(item) {
+  closeCommandPalette();
+  item.action();
+}
+
+function openCommandPalette(initialQuery = "") {
+  const palette = $("commandPalette");
+  if (!palette) return;
+  palette.classList.remove("hidden");
+  state.paletteIndex = 0;
+  $("paletteInput").value = initialQuery;
+  renderCommandPalette();
+  $("paletteInput").focus();
+}
+
+function closeCommandPalette() {
+  const palette = $("commandPalette");
+  if (!palette || palette.classList.contains("hidden")) return;
+  palette.classList.add("hidden");
+  $("paletteOpenBtn")?.focus();
+}
+
+function isCommandPaletteOpen() {
+  return !$("commandPalette")?.classList.contains("hidden");
+}
+
 function bind() {
   document.querySelectorAll(".nav-link").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1119,7 +1264,29 @@ function bind() {
       renderMemory();
     });
   });
+  $("paletteOpenBtn").addEventListener("click", () => openCommandPalette());
+  $("paletteInput").addEventListener("input", () => { state.paletteIndex = 0; renderCommandPalette(); });
+  $("commandPalette").addEventListener("click", (event) => {
+    if (event.target === $("commandPalette")) closeCommandPalette();
+  });
   document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      isCommandPaletteOpen() ? closeCommandPalette() : openCommandPalette();
+      return;
+    }
+    if (isCommandPaletteOpen()) {
+      if (event.key === "Escape") { event.preventDefault(); closeCommandPalette(); return; }
+      if (event.key === "ArrowDown") { event.preventDefault(); state.paletteIndex += 1; renderCommandPalette(); return; }
+      if (event.key === "ArrowUp") { event.preventDefault(); state.paletteIndex = Math.max(0, state.paletteIndex - 1); renderCommandPalette(); return; }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        const item = filteredPaletteItems()[state.paletteIndex];
+        if (item) runPaletteItem(item);
+        return;
+      }
+      return;
+    }
     if (event.ctrlKey && event.key.toLowerCase() === "l") $("messageInput").focus();
     if (event.ctrlKey && event.key.toLowerCase() === "m") post("mute", { muted: !state.status?.muted });
   });

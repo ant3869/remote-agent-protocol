@@ -90,6 +90,41 @@ def test_web_shell_has_no_obsolete_cyan_first_motif():
     assert "radial-gradient" not in combined
 
 
+def test_web_shell_has_a_global_command_palette():
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+    css = (WEB_APP / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="paletteOpenBtn"' in html
+    assert 'id="commandPalette"' in html
+    assert "Ctrl K" in html
+
+    assert "function openCommandPalette" in script
+    assert "function renderCommandPalette" in script
+    assert 'event.key.toLowerCase() === "k"' in script
+    for label in [
+        "Control Center",
+        "Agents",
+        "Personas",
+        "Memory",
+        "Settings",
+        "focus message",
+        "toggle mic",
+        "new chat",
+        "refresh memory",
+        "export diagnostics",
+        "start Ollama",
+        "free VRAM",
+    ]:
+        assert label.lower() in script.lower()
+
+    assert ".command-palette" in css
+    assert ".palette-result" in css
+    assert "@media (max-width: 760px)" in css
+    palette_mobile_rule = css.split("@media (max-width: 760px)", 1)[1]
+    assert ".command-palette" in palette_mobile_rule
+
+
 def test_web_shell_uses_dense_mission_control_structure():
     html = (WEB_APP / "index.html").read_text(encoding="utf-8")
 

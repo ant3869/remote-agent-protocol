@@ -51,7 +51,7 @@
           <button id="rebootBtn" class="side-action destructive" type="button">Reboot session</button>
         </section>
 
-        <footer class="shortcuts"><kbd>Ctrl L</kbd> Message <kbd>Ctrl M</kbd> Mic</footer>
+        <footer class="shortcuts"><kbd>Ctrl L</kbd> Message <kbd>Ctrl M</kbd> Mic <kbd>Ctrl K</kbd> Search</footer>
       </aside>
 
       <main class="workspace">
@@ -60,11 +60,16 @@
             <span class="section-label">Remote Agent Protocol</span>
             <h2 id="appTitle">Control Center</h2>
           </div>
-          <div class="status-pills" aria-live="polite">
-            <div class="status-pill"><span></span><b>Session</b><em id="sessionPill">starting</em></div>
-            <div class="status-pill"><span></span><b>Ollama</b><em id="ollamaPill">checking</em></div>
-            <div class="status-pill"><span></span><b>TTS</b><em id="ttsPill">checking</em></div>
-            <div class="status-pill agent-state"><span></span><b>Agents</b><em id="agentsPill">idle</em></div>
+          <div class="topbar-actions">
+            <button id="paletteOpenBtn" class="button quiet palette-open" type="button">
+              Search / Command <kbd>Ctrl K</kbd>
+            </button>
+            <div class="status-pills" aria-live="polite">
+              <div class="status-pill"><span></span><b>Session</b><em id="sessionPill">starting</em></div>
+              <div class="status-pill"><span></span><b>Ollama</b><em id="ollamaPill">checking</em></div>
+              <div class="status-pill"><span></span><b>TTS</b><em id="ttsPill">checking</em></div>
+              <div class="status-pill agent-state"><span></span><b>Agents</b><em id="agentsPill">idle</em></div>
+            </div>
           </div>
         </header>
 
@@ -436,6 +441,27 @@
         </section>
       </main>
     </div>
+
+    <section
+      id="commandPalette"
+      class="command-palette hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Search and command palette"
+    >
+      <div class="palette-panel">
+        <input
+          id="paletteInput"
+          class="palette-input"
+          type="text"
+          placeholder="Search commands, agents, personas, memory..."
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div id="paletteResults" class="palette-results"></div>
+      </div>
+    </section>
+
     <script src="/app.js"></script>
   </body>
 </html>
