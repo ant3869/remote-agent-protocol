@@ -8,6 +8,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.8.0] - 2026-07-10
+
+### Added
+
+- `python -m remote_agent_protocol.doctor` runs read-only startup checks --
+  Python version, Ollama reachability and whether the configured chat/intent
+  models are actually registered, the TTS backend, STT/TTS/wake-word package
+  availability, configured audio device indices, and each agent backend's
+  executable -- before you ever open the GUI.
+- The web control center has a global command palette (`Ctrl+K` / `Meta+K`)
+  for jumping to any panel, running runtime actions (mute, new chat, refresh
+  memory, export diagnostics, start Ollama, free VRAM), or opening a persona,
+  agent job, or memory row by search.
+- Added status checks for the Codex and Claude Code CLIs (availability,
+  version, and whether each appears authenticated).
+
+### Changed
+
+- The distributable wheel now includes the `remote_agent_protocol` package
+  and the web UI's static assets, not just the vendored Pipecat framework;
+  CI installs the `kokoro` extra and measures app coverage alongside it.
+
+### Fixed
+
+- Rebuilding a session no longer reissues a job ID a still-visible row in the
+  Agents panel already holds.
+- "Clear finished" in the Agents panel now actually deletes the persisted
+  job history from disk, instead of only hiding it until the next restart.
+- Fixed a set of circular symlinks in the shared Claude Code skill
+  directories that silently broke skill loading from every tool integration
+  except the one location the loop happened to resolve through.
+
 ## [1.7.0] - 2026-07-09
 
 ### Added
