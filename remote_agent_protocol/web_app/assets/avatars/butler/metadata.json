@@ -1,0 +1,80 @@
+{
+  "id": "butler",
+  "label": "Butler",
+  "model": null,
+  "fallback": "procedural-butler",
+  "scale": 1.0,
+  "cameraTarget": [
+    0,
+    1.55,
+    0
+  ],
+  "controls": {
+    "jaw": [
+      "jawOpen",
+      "JawOpen"
+    ],
+    "blinkLeft": [
+      "eyeBlinkLeft",
+      "Blink_L"
+    ],
+    "blinkRight": [
+      "eyeBlinkRight",
+      "Blink_R"
+    ],
+    "head": [
+      "Head",
+      "head"
+    ],
+    "neck": [
+      "Neck",
+      "neck"
+    ],
+    "bust": [
+      "Bust",
+      "Chest",
+      "Spine2"
+    ],
+    "eyeLeft": [
+      "EyeLeft",
+      "LeftEye",
+      "eyeLeft"
+    ],
+    "eyeRight": [
+      "EyeRight",
+      "RightEye",
+      "eyeRight"
+    ],
+    "smileLeft": [
+      "mouthSmileLeft",
+      "Smile_L"
+    ],
+    "smileRight": [
+      "mouthSmileRight",
+      "Smile_R"
+    ],
+    "frownLeft": [
+      "mouthFrownLeft",
+      "Frown_L"
+    ],
+    "frownRight": [
+      "mouthFrownRight",
+      "Frown_R"
+    ],
+    "browInnerUp": [
+      "browInnerUp"
+    ],
+    "browDownLeft": [
+      "browDownLeft"
+    ],
+    "browDownRight": [
+      "browDownRight"
+    ],
+    "eyeWideLeft": [
+      "eyeWideLeft"
+    ],
+    "eyeWideRight": [
+      "eyeWideRight"
+    ]
+  }
+}

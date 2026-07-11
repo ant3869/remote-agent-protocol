@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import time
 from collections.abc import Callable
 
 from loguru import logger
@@ -18,12 +19,15 @@ from pipecat.frames.frames import (
     LLMTextFrame,
     MetricsFrame,
     TranscriptionFrame,
+    TTSAudioRawFrame,
     TTSSpeakFrame,
+    UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import dashboard, multimodal_prompt, voice_commands
+from remote_agent_protocol.avatar_audio import compute_pcm16_envelope
 
 EventCallback = Callable[[dict], None]
 
@@ -362,6 +366,49 @@ class LLMDelegateTap(FrameProcessor):
         return len(self._buffer)
 
 
+class AvatarAudioTap(FrameProcessor):
+    """Observe outgoing TTS PCM without mutating or delaying audio frames."""
+
+    def __init__(
+        self,
+        on_envelope,
+        *,
+        publish_interval_secs: float = 0.05,
+        clock=time.monotonic,
+        wall_clock=time.time,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self._on_envelope = on_envelope
+        self._publish_interval_secs = max(0.01, float(publish_interval_secs))
+        self._monotonic = clock
+        self._wall_time = wall_clock
+        self._last_publish = float("-inf")
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        """Publish a rate-limited envelope and always pass the original frame."""
+        await super().process_frame(frame, direction)
+        if (
+            direction is FrameDirection.DOWNSTREAM
+            and isinstance(frame, TTSAudioRawFrame)
+            and self._on_envelope is not None
+        ):
+            now = self._monotonic()
+            if now - self._last_publish >= self._publish_interval_secs:
+                envelope = compute_pcm16_envelope(
+                    frame.audio,
+                    frame.sample_rate,
+                    frame.num_channels,
+                    timestamp=self._wall_time(),
+                )
+                try:
+                    self._on_envelope(envelope)
+                except Exception as exc:
+                    logger.warning(f"Avatar audio envelope callback failed: {exc}")
+                self._last_publish = now
+        await self.push_frame(frame, direction)
+
+
 class TranscriptTap(FrameProcessor):
     """Pass-through observer that reports pipeline activity as GUI events.
 
@@ -417,6 +464,8 @@ class TranscriptTap(FrameProcessor):
                 self._emit({"type": "transcript", "role": "assistant", "text": frame.text.strip()})
         elif isinstance(frame, MetricsFrame):
             self._emit_metrics(frame)
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            self._emit({"type": "turn", "event": "user_started"})
         elif isinstance(frame, UserStoppedSpeakingFrame):
             self._emit({"type": "turn", "event": "user_stopped"})
         elif isinstance(frame, BotStartedSpeakingFrame):

@@ -160,6 +160,23 @@
             </div>
 
             <aside class="activity-panel">
+              <section id="avatarPanel" class="avatar-panel" aria-label="Animated assistant companion">
+                <div class="avatar-panel-head">
+                  <div><p class="section-label">Companion</p><strong id="avatarPersonaName">Assistant</strong></div>
+                  <button id="avatarCollapseBtn" class="icon-button" type="button" aria-expanded="true" aria-controls="avatarPanelBody" aria-label="Collapse companion">−</button>
+                </div>
+                <div id="avatarPanelBody" class="avatar-panel-body">
+                  <div id="avatarCanvasHost" class="avatar-canvas-host" role="img" aria-label="Animated assistant face"></div>
+                  <div id="avatarFallback" class="avatar-fallback" aria-hidden="true">
+                    <span class="avatar-fallback-head"></span>
+                    <span class="avatar-fallback-collar"></span>
+                  </div>
+                  <div class="avatar-status-row" aria-live="polite">
+                    <span id="avatarStateLabel">idle</span>
+                    <span id="avatarEmotionLabel">attentive</span>
+                  </div>
+                </div>
+              </section>
               <div class="panel-header">
                 <div><p class="section-label">Live activity</p><h3>Agents</h3></div>
                 <span class="accent-agent-label">research & tasks</span>
@@ -432,6 +449,26 @@
               </div>
             </section>
 
+            <section class="settings-panel avatar-settings-card">
+              <div class="panel-header compact">
+                <div><p class="section-label">Visual companion</p><h3>Animated avatar</h3></div>
+                <button id="avatarSettingsSaveBtn" class="button primary-action" type="button">Save avatar</button>
+              </div>
+              <div id="avatarSettingsNotice" class="persona-notice hidden" role="status"></div>
+              <div class="settings-form avatar-settings-grid">
+                <label>Enabled<select id="avatarSettingEnabled"><option value="true">On</option><option value="false">Off</option></select></label>
+                <label>Avatar<select id="avatarSettingAvatar"><option value="butler">Butler</option></select></label>
+                <label>Quality<select id="avatarSettingQuality"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label>
+                <label>Motion<select id="avatarSettingMotion"><option value="system">System preference</option><option value="reduced">Reduced</option><option value="normal">Normal</option></select></label>
+                <label>Lip-sync<select id="avatarSettingLipSync"><option value="true">On</option><option value="false">Off</option></select></label>
+                <label>Eye movement<select id="avatarSettingGaze"><option value="true">On</option><option value="false">Off</option></select></label>
+                <label>Idle motion<select id="avatarSettingIdle"><option value="true">On</option><option value="false">Off</option></select></label>
+                <label>State labels<select id="avatarSettingShowState"><option value="true">Show</option><option value="false">Hide</option></select></label>
+                <label>Panel<select id="avatarSettingCollapsed"><option value="false">Expanded</option><option value="true">Collapsed</option></select></label>
+                <label>Expression intensity<input id="avatarSettingIntensity" type="range" min="0" max="1" step="0.05" value="0.62" /></label>
+              </div>
+            </section>
+
             <section class="settings-panel">
               <div class="panel-header compact"><div><p class="section-label">Current state</p><h3>What is active now</h3></div></div>
               <div class="summary-grid">
@@ -477,6 +514,15 @@
       </div>
     </section>
 
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "/vendor/three/three.module.min.js",
+        "three/addons/": "/vendor/three/addons/"
+      }
+    }
+    </script>
+    <script type="module" src="/avatar/avatar-entry.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
