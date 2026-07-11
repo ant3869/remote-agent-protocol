@@ -92,3 +92,12 @@ data/
 /output/
 .playwright-cli/
 .playwright-mcp/
+
+# Personal AI-tool skill symlinks and scratch planning notes -- .claude/skills/
+# is the real, tracked source; these are per-machine mirrors/notes and never
+# meant to be committed.
+/.agents/
+/.cline/
+/.roo/
+/skills/
+/tasks/
