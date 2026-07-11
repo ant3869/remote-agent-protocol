@@ -3,6 +3,7 @@ import { expressionFor, blendTargets } from "./expressions.js";
 import { GazeController } from "./gaze-controller.js";
 import { AvatarEnvelopeStream, LipSyncController } from "./lip-sync.js";
 import { damp } from "./math.js";
+import { loadAvatarModel } from "./model-loader.js";
 import { createProceduralButler } from "./procedural-butler.js";
 
 export async function createAvatarScene(host, settings) {
@@ -29,7 +30,27 @@ export async function createAvatarScene(host, settings) {
   const ambient = new THREE.HemisphereLight(0xb9c6dc, 0x111113, 0.9);
   scene.add(key, fill, rim, ambient);
 
-  const rig = createProceduralButler(THREE);
+  const avatarBase = `/assets/avatars/${settings.avatarId}/`;
+  let metadata = { model: null, fallback: "procedural-butler", scale: 1 };
+  let loaded = { kind: "procedural" };
+  try {
+    const response = await fetch(`${avatarBase}metadata.json`, { cache: "no-cache" });
+    if (!response.ok) throw new Error(`Avatar metadata HTTP ${response.status}`);
+    metadata = await response.json();
+    loaded = await loadAvatarModel({
+      metadata,
+      baseUrl: avatarBase,
+      loadGltf: async (url) => {
+        const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
+        return new GLTFLoader().loadAsync(url);
+      },
+    });
+  } catch (error) {
+    console.warn("Avatar metadata unavailable; using procedural fallback", error);
+  }
+  const rig = loaded.kind === "gltf"
+    ? adaptLoadedRig(loaded, metadata, THREE)
+    : createProceduralButler(THREE);
   scene.add(rig.object);
   const gazeController = new GazeController();
   const lipSync = new LipSyncController();
@@ -138,4 +159,33 @@ function applyAvatarFrame(controls, frame, seconds, delta, gazeController, lipSy
   const stabilization = canIdle ? Math.sin(seconds * 0.41) * 0.006 * frame.profile.idleIntensity : 0;
   controls.bust.scale.y = 0.72 + breathing;
   controls.root.rotation.y = stabilization;
+}
+
+
+function adaptLoadedRig(loaded, metadata, THREE) {
+  const safe = () => new THREE.Object3D();
+  const objectControl = (value) => value?.isObject3D ? value : null;
+  loaded.object.scale.setScalar(Number.isFinite(metadata.scale) ? metadata.scale : 1);
+  const controls = {
+    root: loaded.object,
+    bust: objectControl(loaded.controls.bust) || safe(),
+    neck: objectControl(loaded.controls.neck) || safe(),
+    head: objectControl(loaded.controls.head) || safe(),
+    jaw: objectControl(loaded.controls.jaw) || safe(),
+    mouthUpper: objectControl(loaded.controls.mouthUpper) || safe(),
+    mouthLower: objectControl(loaded.controls.mouthLower) || safe(),
+    mouthCornerLeft: objectControl(loaded.controls.mouthCornerLeft) || safe(),
+    mouthCornerRight: objectControl(loaded.controls.mouthCornerRight) || safe(),
+    cheekLeft: objectControl(loaded.controls.cheekLeft) || safe(),
+    cheekRight: objectControl(loaded.controls.cheekRight) || safe(),
+    browLeft: objectControl(loaded.controls.browLeft) || safe(),
+    browRight: objectControl(loaded.controls.browRight) || safe(),
+    eyeLeft: objectControl(loaded.controls.eyeLeft) || safe(),
+    eyeRight: objectControl(loaded.controls.eyeRight) || safe(),
+    pupilLeft: objectControl(loaded.controls.pupilLeft) || safe(),
+    pupilRight: objectControl(loaded.controls.pupilRight) || safe(),
+    lidLeft: objectControl(loaded.controls.blinkLeft) || safe(),
+    lidRight: objectControl(loaded.controls.blinkRight) || safe(),
+  };
+  return { object: loaded.object, controls, dispose: loaded.dispose };
 }
