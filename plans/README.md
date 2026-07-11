@@ -12,7 +12,7 @@ executor must read its plan fully, honor its STOP conditions, and update its row
 | 002 | Keep job IDs unique across session rebuilds | P1 | S | — | DONE |
 | 003 | Make Clear finished delete persisted history | P2 | S | 001 | DONE |
 | 004 | Package and continuously test the desktop app | P1 | M | — | DONE |
-| 005 | Add a side-effect-free startup doctor | P2 | M | 004 | TODO |
+| 005 | Add a side-effect-free startup doctor | P2 | M | 004 | DONE |
 | 006 | Add a global command and search palette | P1 | M | — | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with reason) | REJECTED (with rationale)

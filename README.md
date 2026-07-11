@@ -88,8 +88,17 @@ the local environment can import and run it.
 | --- | --- |
 | Web control center | `start_gui.bat` or `.venv\Scripts\python -m remote_agent_protocol` |
 | Terminal mode (no GUI) | `start_terminal.bat` or `.venv\Scripts\python -m remote_agent_protocol.terminal` |
+| Startup doctor (read-only checks) | `.venv\Scripts\python -m remote_agent_protocol.doctor` |
 | List audio devices | `.venv\Scripts\python scripts\list_audio_devices.py` |
 | App tests | `.venv\Scripts\python -m pytest tests\test_agent_bridge.py tests\test_session_controls.py ...` |
+
+The startup doctor checks Python version, Ollama reachability and whether the
+configured chat/intent models are actually registered, the selected TTS
+backend, the STT/TTS/wake-word Python packages, any explicitly configured
+audio device indices, and each agent backend's executable -- all read-only.
+It never installs a package, downloads a model, launches a service, or edits
+configuration; it only reports what it finds. Exit code `0` means everything
+configured is healthy, `1` means at least one check failed.
 
 ## Repository layout
 
