@@ -2,6 +2,14 @@
 
 Read-only: reports whether each CLI is on PATH, its version, and whether it
 appears authenticated. Never installs, configures, or logs anything in.
+
+Every subprocess.run() below pins encoding="utf-8", errors="replace" --
+without it, Python decodes captured output with the OS locale codec (cp1252
+on this app's target platform), and a CLI that prints any character outside
+that codec crashes subprocess's internal reader thread with an unhandled
+UnicodeDecodeError (2026-07-11: happened via Codex/Claude's own rich
+terminal output, silently corrupting the status check instead of raising
+where get_status()'s own try/except could catch it).
 """
 
 import shutil
@@ -65,13 +73,22 @@ class CodexCliBackend:
             )
 
         try:
-            proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5)
+            proc = subprocess.run(
+                [exe, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
             version = proc.stdout.strip() if proc.returncode == 0 else None
 
             auth_proc = subprocess.run(
                 [exe, "exec", "--sandbox", "danger-full-access", "echo ping"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
             auth_out_str = auth_proc.stdout.lower() + auth_proc.stderr.lower()
@@ -113,11 +130,23 @@ class ClaudeCodeCliBackend:
             )
 
         try:
-            proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=5)
+            proc = subprocess.run(
+                [exe, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
             version = proc.stdout.strip() if proc.returncode == 0 else None
 
             auth_proc = subprocess.run(
-                [exe, "-p", "echo ping"], capture_output=True, text=True, timeout=10
+                [exe, "-p", "echo ping"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
             )
             auth_out_str = auth_proc.stdout.lower() + auth_proc.stderr.lower()
 

@@ -99,6 +99,55 @@ class SingleInstanceLockTests(unittest.TestCase):
             self.assertTrue(process_guard.acquire_single_instance_lock("test-mutex"))
 
 
+class CloseHandlerTests(unittest.TestCase):
+    def _install(self, on_close):
+        """Install the handler against a fake kernel32 and return the raw callback."""
+        registered: list = []
+        kernel32 = SimpleNamespace(
+            SetConsoleCtrlHandler=lambda handler, add: registered.append(handler) or True,
+        )
+        with _win32(), patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)):
+            process_guard.install_close_handler(on_close)
+        self.assertEqual(len(registered), 1)
+        return registered[0]
+
+    def test_close_event_runs_the_callback_and_reports_handled(self) -> None:
+        calls: list[int] = []
+        handler = self._install(lambda: calls.append(1))
+        self.assertTrue(handler(process_guard._CTRL_CLOSE_EVENT))
+        self.assertEqual(calls, [1])
+
+    def test_logoff_and_shutdown_events_also_run_the_callback(self) -> None:
+        calls: list[int] = []
+        handler = self._install(lambda: calls.append(1))
+        self.assertTrue(handler(process_guard._CTRL_LOGOFF_EVENT))
+        self.assertTrue(handler(process_guard._CTRL_SHUTDOWN_EVENT))
+        self.assertEqual(calls, [1, 1])
+
+    def test_ctrl_c_event_is_left_to_pythons_own_handler(self) -> None:
+        # CTRL_C_EVENT (0) is already KeyboardInterrupt via CPython's handler;
+        # forwarding it here too would run cleanup twice.
+        calls: list[int] = []
+        handler = self._install(lambda: calls.append(1))
+        self.assertFalse(handler(0))
+        self.assertEqual(calls, [])
+
+    def test_callback_exception_is_logged_not_raised(self) -> None:
+        def _boom():
+            raise RuntimeError("boom")
+
+        handler = self._install(_boom)
+        self.assertTrue(handler(process_guard._CTRL_CLOSE_EVENT))  # must not raise
+
+    def test_no_op_on_non_windows_platforms(self) -> None:
+        with (
+            patch.object(process_guard.sys, "platform", "linux"),
+            patch.object(process_guard.ctypes, "windll", create=True) as windll,
+        ):
+            process_guard.install_close_handler(lambda: None)
+        windll.kernel32.SetConsoleCtrlHandler.assert_not_called()
+
+
 class LockFileTests(unittest.TestCase):
     def test_write_lock_records_our_own_pid(self) -> None:
         lock_file = _missing_path()

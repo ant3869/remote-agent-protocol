@@ -18,6 +18,7 @@ Want the pretty control panel with live voice/persona switching instead?
 
 import asyncio
 import sys
+import threading
 
 from loguru import logger
 
@@ -29,15 +30,8 @@ from remote_agent_protocol.session import VoiceSession
 logging_setup.setup_logging(cfg.DEBUG_MODE)
 
 
-async def main() -> None:
-    """Boot the default persona and run the voice session until exit."""
-    config = persona_config.load_config()
-    persona = persona_config.effective_by_name(cfg.DEFAULT_PERSONA_NAME, personas.PERSONAS, config)
-    session = VoiceSession(persona)
-    session.set_voicebox_warmup_personas(
-        persona_config.voicebox_personas(personas.PERSONAS, config)
-    )
-    session.build()
+async def main(session: VoiceSession) -> None:
+    """Run the voice session until exit."""
     await session.run()
 
 
@@ -47,9 +41,37 @@ if __name__ == "__main__":
         sys.exit(1)
     process_guard.close_previous_instance()
     process_guard.write_lock()
+
+    _config = persona_config.load_config()
+    _persona = persona_config.effective_by_name(cfg.DEFAULT_PERSONA_NAME, personas.PERSONAS, _config)
+    _session = VoiceSession(_persona)
+    _session.set_voicebox_warmup_personas(
+        persona_config.voicebox_personas(personas.PERSONAS, _config)
+    )
+    _session.build()
+
+    # Built before installing the handler so a close during build() (unlikely,
+    # but build() does I/O) can't reach a session that isn't ready to shut down.
+    _cleanup_done = threading.Event()
+
+    def _on_console_close() -> None:
+        # Closing the console window sends CTRL_CLOSE_EVENT, which CPython
+        # does not turn into KeyboardInterrupt the way it does Ctrl+C; left
+        # unhandled, Windows force-kills this process a few seconds later,
+        # skipping the finally block below entirely and leaving the session's
+        # delegated agent subprocesses and the Voicebox server running.
+        # session.shutdown() is documented safe to call from any thread; wait
+        # here (on Windows' own console-control thread) so Windows doesn't
+        # kill mid-cleanup.
+        _session.shutdown()
+        _cleanup_done.wait(timeout=10.0)
+
+    process_guard.install_close_handler(_on_console_close)
+
     try:
-        asyncio.run(main())
+        asyncio.run(main(_session))
     finally:
+        _cleanup_done.set()
         try:
             count = dashboard.stop_loaded_models(cfg.OLLAMA_HOST)
             logger.info(f"Unloaded {count} Ollama model(s).")

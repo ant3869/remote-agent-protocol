@@ -31,6 +31,7 @@ import ctypes
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from loguru import logger
@@ -73,6 +74,58 @@ def acquire_single_instance_lock(name: str = _MUTEX_NAME) -> bool:
     return True
 
 
+# Console control events (wincon.h). CTRL_C_EVENT/CTRL_BREAK_EVENT are
+# already delivered to Python as KeyboardInterrupt by CPython's own handler
+# (registered ahead of ours), so this app's normal Ctrl+C path is untouched;
+# these are the events Python does NOT translate on its own.
+_CTRL_CLOSE_EVENT = 2
+_CTRL_LOGOFF_EVENT = 5
+_CTRL_SHUTDOWN_EVENT = 6
+_FORWARDED_CTRL_EVENTS = {_CTRL_CLOSE_EVENT, _CTRL_LOGOFF_EVENT, _CTRL_SHUTDOWN_EVENT}
+# Must outlive the process (same reason as _mutex_handle above): ctypes frees
+# a callback the moment nothing references it, and Windows calling into a
+# freed callback crashes the process instead of raising a catchable error.
+_console_handler_ref = None
+
+
+def install_close_handler(on_close: Callable[[], None]) -> None:
+    """Run ``on_close`` on window close, logoff, or shutdown -- not just Ctrl+C.
+
+    Why this exists: start_gui.bat's own instructions say "Close the window
+    to quit", but clicking that X sends CTRL_CLOSE_EVENT, which CPython does
+    not turn into KeyboardInterrupt the way it does Ctrl+C. Left unhandled,
+    Windows gives the process a few seconds and then force-terminates it --
+    skipping WebVoiceApp.run()'s ``finally`` entirely, so the voice session,
+    its delegated agent subprocesses, and the Voicebox server never get torn
+    down and are left running until the next launch's close_previous_
+    instance() reaps them. Wiring this event to the same graceful-shutdown
+    path used for Ctrl+C closes that gap at the moment of closing, not one
+    launch later.
+
+    ``on_close`` runs on a dedicated OS-created thread (never the main
+    thread), so it is safe -- and expected -- for it to block until cleanup
+    actually finishes; Windows only force-kills if it never returns. No-op
+    off Windows.
+    """
+    if sys.platform != "win32":
+        return
+
+    def _handler(ctrl_type: int) -> bool:
+        if ctrl_type not in _FORWARDED_CTRL_EVENTS:
+            return False  # not ours; let the next handler (or default) run
+        try:
+            on_close()
+        except Exception:
+            logger.exception("Console close handler failed")
+        return True
+
+    global _console_handler_ref
+    handler_routine = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)
+    _console_handler_ref = handler_routine(_handler)
+    if not ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_handler_ref, True):
+        logger.warning("Could not install console close handler")
+
+
 def _read_lock(lock_file: Path) -> int | None:
     try:
         return int(lock_file.read_text().strip())
@@ -93,6 +146,11 @@ def _command_line(pid: int) -> str:
             ],
             capture_output=True,
             text=True,
+            # OS-locale default codec crashes subprocess's internal reader
+            # thread on any non-cp1252 byte (see cli_agents.py); a command
+            # line can carry arbitrary task text, so pin utf-8 defensively.
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):

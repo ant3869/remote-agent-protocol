@@ -149,6 +149,9 @@ def test_direct_web_launcher_uses_process_guard(monkeypatch):
     calls = []
 
     monkeypatch.setattr(
+        web_gui.process_guard, "acquire_single_instance_lock", lambda: calls.append("lock") or True
+    )
+    monkeypatch.setattr(
         web_gui.process_guard, "close_previous_instance", lambda: calls.append("close")
     )
     monkeypatch.setattr(web_gui.process_guard, "write_lock", lambda: calls.append("write"))
@@ -162,12 +165,15 @@ def test_direct_web_launcher_uses_process_guard(monkeypatch):
 
     web_gui.run()
 
-    assert calls == ["close", "write", "run", "release"]
+    assert calls == ["lock", "close", "write", "run", "release"]
 
 
 def test_direct_web_launcher_releases_lock_after_failure(monkeypatch):
     calls = []
 
+    monkeypatch.setattr(
+        web_gui.process_guard, "acquire_single_instance_lock", lambda: calls.append("lock") or True
+    )
     monkeypatch.setattr(
         web_gui.process_guard, "close_previous_instance", lambda: calls.append("close")
     )
@@ -186,7 +192,35 @@ def test_direct_web_launcher_releases_lock_after_failure(monkeypatch):
     except RuntimeError:
         pass
 
-    assert calls == ["close", "write", "run", "release"]
+    assert calls == ["lock", "close", "write", "run", "release"]
+
+
+def test_direct_web_launcher_refuses_a_second_instance(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        web_gui.process_guard, "acquire_single_instance_lock", lambda: False
+    )
+    monkeypatch.setattr(
+        web_gui.process_guard, "close_previous_instance", lambda: calls.append("close")
+    )
+    monkeypatch.setattr(web_gui.process_guard, "write_lock", lambda: calls.append("write"))
+
+    class FakeApp:
+        def run(self):
+            calls.append("run")
+
+    monkeypatch.setattr(web_gui, "WebVoiceApp", FakeApp)
+
+    try:
+        web_gui.run()
+    except SystemExit as exc:
+        assert exc.code == 1
+    else:
+        raise AssertionError("expected SystemExit")
+
+    # A live sibling's PID must be left alone -- close/write/run never happen.
+    assert calls == []
 
 
 def test_mobile_shell_contains_horizontal_navigation():

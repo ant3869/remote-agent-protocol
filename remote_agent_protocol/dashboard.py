@@ -234,5 +234,14 @@ def stop_loaded_models(host: str, timeout: float = 1.0) -> int:
     ps = _get_json(host.rstrip("/") + "/api/ps", timeout)
     names = [m.get("name") for m in ps.get("models", []) if m.get("name")]
     for name in names:
-        subprocess.run([cli, "stop", name], capture_output=True, text=True, timeout=15)
+        # encoding/errors pinned: the OS-locale default codec crashes subprocess's
+        # internal reader thread on any non-cp1252 byte (see cli_agents.py).
+        subprocess.run(
+            [cli, "stop", name],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
     return len(names)

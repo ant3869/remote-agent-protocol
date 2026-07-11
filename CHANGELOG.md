@@ -8,6 +8,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.10.0] - 2026-07-11
+
+### Added
+
+- Closing the console window (the documented way to quit -- "Close the
+  window to quit") now shuts everything down cleanly instead of Windows
+  force-killing the process a few seconds later. That force-kill used to
+  skip the app's own cleanup entirely, leaving the voice session, any
+  delegated agent subprocesses, and the Voicebox server running invisibly
+  in the background until the next launch reaped them.
+- The GUI and terminal entry points no longer duplicate their startup/
+  shutdown logic; `python -m remote_agent_protocol` now delegates to a
+  single canonical launcher.
+
+### Fixed
+
+- Coding-agent CLI status checks (Codex, Claude Code) no longer crash a
+  background thread with `UnicodeDecodeError` when the CLI's own output
+  contains a character outside the OS locale codec -- decoding is now
+  pinned to UTF-8, which also fixed the same latent risk in Ollama
+  model-unload and process-identity checks.
+
 ## [1.9.0] - 2026-07-11
 
 ### Added

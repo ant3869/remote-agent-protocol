@@ -6,6 +6,7 @@ import asyncio
 import json
 import mimetypes
 import queue
+import sys
 import threading
 import time
 import webbrowser
@@ -147,6 +148,19 @@ class WebVoiceApp:
         self._health_thread.start()
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler_class())
+        cleanup_done = threading.Event()
+
+        def _on_console_close() -> None:
+            # Runs on Windows' own console-control thread when the user closes
+            # the window rather than Ctrl+C. server.shutdown() makes
+            # serve_forever() below return normally, so the SAME finally block
+            # (not a second, duplicate cleanup here) does the real work; block
+            # until it has, so Windows doesn't force-kill mid-cleanup.
+            server.shutdown()
+            cleanup_done.wait(timeout=10.0)
+
+        process_guard.install_close_handler(_on_console_close)
+
         url = f"http://127.0.0.1:{server.server_address[1]}"
         print(f"Remote Agent Protocol web UI: {url}")
         webbrowser.open(url)
@@ -157,6 +171,7 @@ class WebVoiceApp:
         finally:
             self._stop_app()
             server.server_close()
+            cleanup_done.set()
 
     def _start_session_thread(self) -> None:
         self._thread = threading.Thread(target=self._boot_thread, daemon=True)
@@ -1021,7 +1036,10 @@ def _json_safe(value):
 
 
 def run() -> None:
-    """Launch the web UI."""
+    """Launch the web UI. The sole entry point -- __main__.py just calls this."""
+    if not process_guard.acquire_single_instance_lock():
+        print("Remote Agent Protocol is already running.")
+        sys.exit(1)
     process_guard.close_previous_instance()
     process_guard.write_lock()
     try:
