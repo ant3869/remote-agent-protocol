@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { expressionFor, blendTargets } from "./expressions.js";
 import { GazeController } from "./gaze-controller.js";
+import { AvatarEnvelopeStream, LipSyncController } from "./lip-sync.js";
 import { damp } from "./math.js";
 import { createProceduralButler } from "./procedural-butler.js";
 
@@ -31,6 +32,9 @@ export async function createAvatarScene(host, settings) {
   const rig = createProceduralButler(THREE);
   scene.add(rig.object);
   const gazeController = new GazeController();
+  const lipSync = new LipSyncController();
+  const stream = new AvatarEnvelopeStream((sample) => lipSync.ingest(sample));
+  if (settings.lipSync) stream.start();
   const currentTargets = Object.fromEntries(
     Object.keys(expressionFor("neutral")).map((keyName) => [keyName, 0]),
   );
@@ -60,7 +64,7 @@ export async function createAvatarScene(host, settings) {
     const delta = Math.min(0.1, Math.max(0.001, (time - (lastAnimatedAt || time - 16)) / 1000));
     lastAnimatedAt = time;
     lastFrame = time;
-    if (latest) applyAvatarFrame(rig.controls, latest, time / 1000, delta, gazeController, currentTargets);
+    if (latest) applyAvatarFrame(rig.controls, latest, time / 1000, delta, gazeController, lipSync, currentTargets);
     renderer.render(scene, camera);
   };
   requestAnimationFrame(animate);
@@ -71,12 +75,14 @@ export async function createAvatarScene(host, settings) {
       targetInterval = 1000 / value.settings.targetFps;
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, value.settings.maxPixelRatio));
       renderer.shadowMap.enabled = value.settings.shadows;
+      if (value.settings.lipSync) stream.start();
     },
     setVisible(value) { visible = Boolean(value); },
     dispose() {
       if (disposed) return;
       disposed = true;
       observer.disconnect();
+      stream.dispose();
       rig.dispose();
       scene.clear();
       renderer.renderLists.dispose();
@@ -87,7 +93,7 @@ export async function createAvatarScene(host, settings) {
   };
 }
 
-function applyAvatarFrame(controls, frame, seconds, delta, gazeController, currentTargets) {
+function applyAvatarFrame(controls, frame, seconds, delta, gazeController, lipSync, currentTargets) {
   const expression = expressionFor(frame.resolved.emotion.name);
   const base = expressionFor(frame.profile.defaultExpression);
   const amount = frame.resolved.emotion.intensity * frame.settings.expressionIntensity;
@@ -114,11 +120,15 @@ function applyAvatarFrame(controls, frame, seconds, delta, gazeController, curre
   controls.browRight.rotation.z = currentTargets.browOuter * 0.15;
   controls.mouthCornerLeft.position.y = -0.01 + currentTargets.mouthCorner * 0.035;
   controls.mouthCornerRight.position.y = -0.01 + currentTargets.mouthCorner * 0.035;
-  controls.mouthUpper.scale.x = 1 + currentTargets.mouthWidth * 0.2;
-  controls.mouthLower.scale.x = 1 + currentTargets.mouthWidth * 0.18;
+  const mouth = lipSync.update(delta, frame.runtime.speaking, frame.settings.lipSync);
+  controls.jaw.rotation.x = (currentTargets.jawOpen + mouth.jawOpen) * 0.22;
+  controls.mouthLower.position.y = -0.035 - mouth.jawOpen * 0.06;
+  controls.mouthUpper.scale.x = 1 + currentTargets.mouthWidth * 0.2 + mouth.mouthWidth;
+  controls.mouthLower.scale.x = 1 + currentTargets.mouthWidth * 0.18 + mouth.mouthWidth * 0.8;
   controls.cheekLeft.position.y = -0.04 + currentTargets.cheekRaise * 0.025;
   controls.cheekRight.position.y = -0.04 + currentTargets.cheekRaise * 0.025;
-  controls.jaw.rotation.x = currentTargets.jawOpen * 0.18;
+  controls.cheekLeft.scale.y = 1 - mouth.cheek;
+  controls.cheekRight.scale.y = 1 - mouth.cheek;
   controls.head.rotation.x = currentTargets.headPitch;
   controls.head.rotation.y = currentTargets.headYaw;
   controls.head.rotation.z = currentTargets.headRoll;
