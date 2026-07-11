@@ -66,6 +66,7 @@ class AvatarAudioEnvelopeHub:
     """Store one latest envelope and wake bounded SSE consumers."""
 
     def __init__(self) -> None:
+        """Initialize an empty, open hub."""
         self._condition = threading.Condition()
         self._seq = 0
         self._latest: AvatarAudioEnvelope | None = None
@@ -107,4 +108,4 @@ def sse_data(sequence: int, envelope: AvatarAudioEnvelope) -> bytes:
         separators=(",", ":"),
         allow_nan=False,
     )
-    return f"id: {int(sequence)}\nevent: envelope\ndata: {data}\n\n".encode("utf-8")
+    return f"id: {int(sequence)}\nevent: envelope\ndata: {data}\n\n".encode()

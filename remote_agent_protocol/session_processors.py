@@ -378,6 +378,7 @@ class AvatarAudioTap(FrameProcessor):
         wall_clock=time.time,
         **kwargs,
     ):
+        """Initialize the tap with a rate-limited envelope callback."""
         super().__init__(**kwargs)
         self._on_envelope = on_envelope
         self._publish_interval_secs = max(0.01, float(publish_interval_secs))
