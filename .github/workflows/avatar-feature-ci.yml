@@ -40,16 +40,15 @@ jobs:
           set -o pipefail
           shopt -s nullglob
           tasks=(.github/avatar_tasks/task*.py)
-          if ((${#tasks[@]} == 1)); then
-            python "${tasks[0]}" > avatar-task.log 2>&1 || {
+          if ((${#tasks[@]})); then
+            task="${tasks[-1]}"
+            echo "Executing $task"
+            python "$task" > avatar-task.log 2>&1 || {
               status=$?
               tail -n 100 avatar-task.log
               exit $status
             }
             cat avatar-task.log
-          elif ((${#tasks[@]} > 1)); then
-            echo "Expected at most one staged avatar task, found ${#tasks[@]}" | tee avatar-task.log >&2
-            exit 1
           else
             echo "No staged implementation task." | tee avatar-task.log
           fi
