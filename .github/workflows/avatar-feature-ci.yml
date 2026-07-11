@@ -61,6 +61,16 @@ jobs:
           path: avatar-task.log
           if-no-files-found: ignore
           retention-days: 3
+      - name: Export repository bundle
+        if: always()
+        run: git bundle create avatar-repo.bundle --all
+      - name: Upload repository bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: avatar-repo-bundle
+          path: avatar-repo.bundle
+          retention-days: 3
       - name: Run focused Python tests
         shell: bash
         run: |
