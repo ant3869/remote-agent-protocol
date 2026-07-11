@@ -1,7 +1,7 @@
 const RECENT_COMPLETION_MS = 4000;
 
 export function resolveAvatarState(runtime = {}, now = Date.now()) {
-  if (runtime.error || ["failed", "stopped"].includes(runtime.session)) return "error";
+  if (runtime.error || runtime.session === "failed") return "error";
   if (runtime.speaking) return "speaking";
   if (runtime.userSpeaking || ["wake_word_detected", "listening_for_command"].includes(runtime.wakePhase)) return "listening";
   if (runtime.thinking || ["transcribing", "agent_responding"].includes(runtime.wakePhase)) return "thinking";

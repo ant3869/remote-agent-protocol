@@ -1,8 +1,8 @@
 # Animated Butler Avatar Design
 
-**Date:** 2026-07-11  
-**Repository:** `ant3869/remote-agent-protocol`  
-**Branch:** `feature/animated-butler-avatar`  
+**Date:** 2026-07-11
+**Repository:** `ant3869/remote-agent-protocol`
+**Branch:** `feature/animated-butler-avatar`
 **Status:** Approved design, reviewed for implementation
 
 ## 1. Summary

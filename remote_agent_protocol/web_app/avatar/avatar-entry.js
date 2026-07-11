@@ -57,7 +57,14 @@ async function sync() {
 const api = {
   updateRuntime(next) { runtime = { ...runtime, ...next }; void sync(); },
   updateSettings(next) {
+    const previousKey = `${settings.avatarId}:${settings.quality}`;
     settings = normalizeAvatarSettings(next, motionQuery?.matches || false);
+    const nextKey = `${settings.avatarId}:${settings.quality}`;
+    if (scene && previousKey !== nextKey) {
+      sceneGeneration += 1;
+      scene.dispose();
+      scene = null;
+    }
     void sync();
   },
   setPanelVisible(visible) {
@@ -69,13 +76,16 @@ const api = {
     sceneGeneration += 1;
     visibilityObserver?.disconnect();
     panel.host?.removeEventListener("rap:avatar-fallback", onFallback);
+    panel.host?.removeEventListener("rap:avatar-recovered", onRecovered);
     scene?.dispose();
     scene = null;
   },
 };
 
 const onFallback = (event) => panel.showFallback(true, event.detail?.reason || "renderer-unavailable");
+const onRecovered = () => panel.showFallback(false);
 panel.host?.addEventListener("rap:avatar-fallback", onFallback);
+panel.host?.addEventListener("rap:avatar-recovered", onRecovered);
 panel.onCollapse(() => {
   window.dispatchEvent(new CustomEvent("rap:avatar-collapse", {
     detail: { collapsed: !settings.panelCollapsed },

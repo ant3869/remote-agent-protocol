@@ -1056,3 +1056,16 @@ def test_package_data_covers_nested_avatar_assets():
         "vendor/three/addons/utils/BufferGeometryUtils.js",
     ]:
         assert (WEB_APP / relative).is_file(), relative
+
+
+def test_avatar_review_gaps_are_covered():
+    app = (WEB_APP / "app.js").read_text(encoding="utf-8")
+    entry = (WEB_APP / "avatar/avatar-entry.js").read_text(encoding="utf-8")
+    scene = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
+
+    assert "lastActivityAt" in app and "sleeping:" in app
+    assert "previousKey" in entry and "nextKey" in entry
+    assert "AnimationMixer" in scene
+    assert "morphTargetInfluences" in scene
+    assert "cameraTarget" in scene
+    assert "rap:avatar-recovered" in scene

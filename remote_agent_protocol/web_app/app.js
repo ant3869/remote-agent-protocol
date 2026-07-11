@@ -9,7 +9,7 @@ const state = {
   selectedPersona: null,
   personaOriginal: null,
   connectionLost: false,
-  avatar: { speaking: false, userSpeaking: false, completedAt: 0, failedAt: 0, latestAssistantText: "" },
+  avatar: { speaking: false, userSpeaking: false, completedAt: 0, failedAt: 0, latestAssistantText: "", lastActivityAt: Date.now() },
   wake: null,
   agentJobs: {},
   agentHistory: [],
@@ -158,6 +158,9 @@ async function poll() {
 }
 
 function handleEvent(event) {
+  if (["transcript", "draft_voice", "turn", "speaking", "wake", "agent_job", "agent_confirm"].includes(event.type)) {
+    state.avatar.lastActivityAt = Date.now();
+  }
   if (event.type === "transcript" && event.role !== "user") state.avatar.latestAssistantText = event.text || "";
   if (event.type === "speaking") state.avatar.speaking = Boolean(event.value);
   if (event.type === "turn" && event.event === "user_started") state.avatar.userSpeaking = true;
@@ -245,6 +248,10 @@ function avatarRuntimeSnapshot() {
     activeAgentCount: s.activeAgentCount || 0,
     pendingConfirmation: Boolean(state.activeConfirm || s.pendingConfirms?.length),
     completedAt: state.avatar.completedAt,
+    sleeping: Date.now() - state.avatar.lastActivityAt > 120_000
+      && !state.avatar.speaking
+      && !state.avatar.userSpeaking
+      && (s.activeAgentCount || 0) === 0,
     error: s.session === "failed" || Boolean(state.avatar.failedAt && Date.now() - state.avatar.failedAt < 5000),
     latestAssistantText: state.avatar.latestAssistantText,
   };

@@ -960,4 +960,3 @@ textarea { resize: vertical; line-height: 1.5; }
   outline: 2px solid var(--status-info);
   outline-offset: 3px;
 }
-.avatar-status-row span::before { content: attr(id) " "; position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

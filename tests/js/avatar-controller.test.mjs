@@ -50,3 +50,9 @@ test("reduced motion keeps blink but suppresses large gaze offsets", () => {
   assert.ok(Math.abs(result.x) <= 0.04);
   assert.ok(Math.abs(result.y) <= 0.04);
 });
+
+
+test("extended inactivity resolves sleeping while a stopped session stays calm", () => {
+  assert.equal(resolveAvatarState({ sleeping: true, session: "stopped" }, 100), "sleeping");
+  assert.equal(resolveAvatarState({ session: "stopped" }, 100), "idle");
+});

@@ -33,6 +33,31 @@ export async function loadAvatarModel({ metadata, baseUrl, loadGltf }) {
   }
 }
 
+const CONVENTIONAL_CONTROLS = Object.freeze({
+  root: ["Armature", "Root", "root"],
+  bust: ["Bust", "Chest", "Spine2", "spine_02"],
+  neck: ["Neck", "neck"],
+  head: ["Head", "head"],
+  jaw: ["Jaw", "jaw", "jawOpen", "JawOpen"],
+  mouthUpper: ["UpperLip", "mouthUpper"],
+  mouthLower: ["LowerLip", "mouthLower"],
+  browLeft: ["BrowLeft", "browLeft"],
+  browRight: ["BrowRight", "browRight"],
+  eyeLeft: ["EyeLeft", "LeftEye", "eyeLeft"],
+  eyeRight: ["EyeRight", "RightEye", "eyeRight"],
+  blinkLeft: ["eyeBlinkLeft", "Blink_L", "blinkLeft"],
+  blinkRight: ["eyeBlinkRight", "Blink_R", "blinkRight"],
+  smileLeft: ["mouthSmileLeft", "Smile_L"],
+  smileRight: ["mouthSmileRight", "Smile_R"],
+  frownLeft: ["mouthFrownLeft", "Frown_L"],
+  frownRight: ["mouthFrownRight", "Frown_R"],
+  browInnerUp: ["browInnerUp"],
+  browDownLeft: ["browDownLeft"],
+  browDownRight: ["browDownRight"],
+  eyeWideLeft: ["eyeWideLeft"],
+  eyeWideRight: ["eyeWideRight"],
+});
+
 function discoverControls(root, aliases) {
   const named = new Map();
   const morphs = new Map();
@@ -45,8 +70,11 @@ function discoverControls(root, aliases) {
     }
   });
   const result = {};
-  for (const [key, names] of Object.entries(aliases)) {
-    result[key] = names.map((name) => named.get(name) || morphs.get(name)).find(Boolean) || null;
+  const keys = new Set([...Object.keys(CONVENTIONAL_CONTROLS), ...Object.keys(aliases || {})]);
+  for (const key of keys) {
+    const configured = Array.isArray(aliases?.[key]) ? aliases[key] : [];
+    const candidates = [...configured, ...(CONVENTIONAL_CONTROLS[key] || [])];
+    result[key] = candidates.map((name) => named.get(name) || morphs.get(name)).find(Boolean) || null;
   }
   return result;
 }
