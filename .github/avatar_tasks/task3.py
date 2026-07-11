@@ -104,7 +104,7 @@ tests = replace_once(
 tests = replace_once(
     tests,
     "\n\nclass TranscriptTapRoleTests(unittest.IsolatedAsyncioTestCase):",
-    '''
+    r'''
 
 class AvatarAudioTapTests(unittest.IsolatedAsyncioTestCase):
     async def test_tts_audio_passes_through_unchanged_and_emits_envelope(self):
