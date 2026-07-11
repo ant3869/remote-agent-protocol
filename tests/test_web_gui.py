@@ -1049,8 +1049,29 @@ def test_avatar_vendor_and_metadata_files_are_declared():
     assert '"web_app/**/*"' in project
     assert (WEB_APP / "vendor/three/LICENSE").is_file()
     assert (WEB_APP / "vendor/three/three.module.min.js").is_file()
+    assert (WEB_APP / "vendor/three/three.core.min.js").is_file()
     assert (WEB_APP / "vendor/three/addons/loaders/GLTFLoader.js").is_file()
     assert (WEB_APP / "vendor/three/addons/utils/BufferGeometryUtils.js").is_file()
+
+
+def test_vendored_three_relative_imports_all_resolve_on_disk():
+    """Every relative import inside the vendored Three.js files must resolve to a
+    file that actually exists -- three.module.min.js importing a missing
+    three.core.min.js is exactly how the avatar scene silently fell back to
+    the static placeholder in every browser, regardless of GPU/WebGL support.
+    """
+    import re
+
+    vendor_root = WEB_APP / "vendor/three"
+    js_files = list(vendor_root.rglob("*.js"))
+    assert js_files, "expected vendored Three.js files to exist"
+
+    import_re = re.compile(r"""from\s*['"](\./[^'"]+|\.\./[^'"]+)['"]""")
+    for js_file in js_files:
+        source = js_file.read_text(encoding="utf-8")
+        for relative in import_re.findall(source):
+            resolved = (js_file.parent / relative).resolve()
+            assert resolved.is_file(), f"{js_file} imports missing file {relative}"
 
 
 def test_web_shell_contains_avatar_panel_import_map_and_settings():
@@ -1151,6 +1172,7 @@ def test_package_data_covers_nested_avatar_assets():
         "avatar/avatar-scene.js",
         "assets/avatars/butler/metadata.json",
         "vendor/three/three.module.min.js",
+        "vendor/three/three.core.min.js",
         "vendor/three/addons/loaders/GLTFLoader.js",
         "vendor/three/addons/utils/BufferGeometryUtils.js",
     ]:
