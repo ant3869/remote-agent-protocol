@@ -8,6 +8,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.8.2] - 2026-07-10
+
+### Fixed
+
+- Two delegated turns to the same Hermes-family agent no longer run
+  concurrently. Hermes resumes one shared on-disk session per agent name, so
+  overlapping turns could both touch it at once and a job could "complete"
+  with a different, unrelated job's answer instead of its own. A later turn
+  for the same agent now queues (shown as waiting) until the current one
+  fully finishes.
+
 ## [1.8.1] - 2026-07-10
 
 ### Fixed

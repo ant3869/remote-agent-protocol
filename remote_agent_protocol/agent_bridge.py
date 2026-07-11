@@ -703,6 +703,11 @@ class AgentBridge:
         self._model_overrides: dict[str, list[str]] = {}
         self._model_labels: dict[str, str] = {}
         self._session_ids: dict[str, str] = {}
+        # One lock per session-based agent (hermes/hermes-yolo): only one of
+        # its turns may be in flight at a time, so a later turn always waits
+        # for the earlier one to fully exit before resuming the same on-disk
+        # session. See _launch_and_run for why concurrent turns are unsafe.
+        self._session_locks: dict[str, asyncio.Lock] = {}
         self._jobs: dict[str, AgentJob] = {}
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         # Keep strong refs to the streaming tasks: asyncio only holds *weak*
@@ -766,12 +771,47 @@ class AgentBridge:
         job._last_status = job._t0
         self._jobs[job.job_id] = job
 
-        template = self._backends.get(agent)
-        if template is None:
+        if agent not in self._backends:
             result = await self._fail_fast(job, f"unknown agent backend '{agent}'")
             job._launch_done.set()
             return result
 
+        launch_task = asyncio.create_task(
+            self._launch_and_run(job, task, cwd), name=f"agent-launch-{job.job_id}"
+        )
+        self._tasks.add(launch_task)
+        launch_task.add_done_callback(self._tasks.discard)
+        return job.job_id
+
+    async def _launch_and_run(self, job: AgentJob, task: str, cwd: str | None) -> None:
+        """Wait out any same-agent turn already in flight, then launch and stream this one.
+
+        Hermes-family backends (_HERMES_SESSION_AGENTS) resume ONE shared
+        on-disk session per agent name. Two of its turns running at once both
+        touch that session concurrently, and a job can silently "complete"
+        with another job's unrelated answer instead of its own -- e.g.
+        jess_runtime.log 2026-07-10 23:10-23:13: job-4 was asked to test
+        Claude Code while job-5, asked only to open a browser, ran
+        concurrently and reported back on the Claude Code test instead. At
+        most one turn per session-based agent may be in flight; later ones
+        wait here. Other backends have no shared session and are unaffected.
+        """
+        agent = job.agent
+        lock = self._session_locks.setdefault(agent, asyncio.Lock()) if agent in _HERMES_SESSION_AGENTS else None
+        if lock is not None and lock.locked():
+            job.status = STATUS_WAITING
+            job.state = STATE_WAITING
+            job.action = "Waiting for the current turn to finish"
+            self._emit_job(job, "started")
+        if lock is None:
+            await self._launch(job, task, cwd)
+            return
+        async with lock:
+            await self._launch(job, task, cwd)
+
+    async def _launch(self, job: AgentJob, task: str, cwd: str | None) -> None:
+        """Resolve cwd, build the command, spawn the subprocess, and stream it to completion."""
+        agent = job.agent
         cwd = resolve_cwd(cwd, self._workspace_dir)
         job.cwd = cwd
         job._host_before = await self._host_snapshot()
@@ -783,13 +823,15 @@ class AgentBridge:
             self._emit_job(job, "finished", summary=job.summary, secs=job.secs)
             await self._notify_finished(job)
             job._launch_done.set()
-            return job.job_id
+            return
         command_task = (
             task
             if agent == "mock"
             else with_status_protocol(with_scope(task, cwd, self._scope_preamble))
         )
-        command = build_command(template, command_task, extra_args=self._model_overrides.get(agent))
+        command = build_command(
+            self._backends[agent], command_task, extra_args=self._model_overrides.get(agent)
+        )
         if session_id := self._session_ids.get(agent):
             try:
                 chat_index = command.index("chat") + 1
@@ -812,18 +854,19 @@ class AgentBridge:
                 stderr=asyncio.subprocess.STDOUT,
             )
         except (OSError, FileNotFoundError) as e:
-            result = await self._fail_fast(job, f"could not launch {command[0]}: {e}")
+            await self._fail_fast(job, f"could not launch {command[0]}: {e}")
             job._launch_done.set()
-            return result
+            return
 
         self._procs[job.job_id] = proc
+        # A job that waited in _launch_and_run was parked at STATUS_WAITING;
+        # restore the normal running state now that it's actually launching.
+        job.status = STATUS_RUNNING
+        job.state = STATE_STARTED
         job._launch_done.set()
         self._emit_job(job, "started")
         logger.info(f"Agent job {job.job_id} [{job.agent}] started: {job.task}")
-        task = asyncio.create_task(self._stream(job, proc), name=f"agent-{job.job_id}")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return job.job_id
+        await self._stream(job, proc)
 
     async def cancel(self, job_id: str) -> None:
         """Cancel an active job if it exists."""

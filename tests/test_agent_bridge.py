@@ -617,6 +617,55 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(job.result, "I found your note and fixed the link.")
         self.assertNotIn("--resume", agent_bridge.announcement(job))
 
+    def test_concurrent_hermes_turns_are_serialized_not_interleaved(self):
+        """Regression: two hermes turns must never share the resumed session concurrently.
+
+        hermes resumes ONE on-disk session per agent name; running two turns
+        against it at once lets a job "complete" with another job's unrelated
+        answer (jess_runtime.log 2026-07-10 23:10-23:13: a job asked only to
+        open a browser instead reported on a concurrent Claude Code test). A
+        later turn for the same agent must queue behind the active one.
+        """
+        events: list[dict] = []
+        script = (
+            "import sys, time; "
+            "time.sleep(0.3); "
+            "print('TASK ' + sys.argv[-1], flush=True); "
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"ok",'
+            '"result":"ok"}\', flush=True); '
+            "print('session_id: 20260707_174900_abc123', flush=True)"
+        )
+        backend = {"hermes": ["{python}", "-u", "-c", script, "chat", "-q", "{task}"]}
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(backend, events.append, completion_grace_secs=0.01)
+            first_id = await bridge.start("hermes", "first turn")
+            second_id = await bridge.start("hermes", "second turn")
+            # start() returns before either background launch task has run a
+            # single step, so wait for the first job to actually spawn its
+            # subprocess before asserting anything about the second.
+            for _ in range(100):
+                if first_id in bridge._procs:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                self.fail("first job never spawned")
+            # While job-1's process is still alive, job-2 must be queued behind
+            # it -- not a second live subprocess racing it for the same session.
+            self.assertNotIn(second_id, bridge._procs)
+            self.assertEqual(bridge.get(second_id).status, agent_bridge.STATUS_WAITING)
+            while sum(event["event"] == "finished" for event in events) < 2:
+                await asyncio.sleep(0.01)
+            return bridge.get(first_id), bridge.get(second_id)
+
+        first, second = self._run(scenario())
+        first_lines = "\n".join(first.lines)
+        second_lines = "\n".join(second.lines)
+        self.assertIn("first turn", first_lines)
+        self.assertIn("second turn", second_lines)
+        self.assertNotIn("second turn", first_lines)
+        self.assertNotIn("first turn", second_lines)
+
     def test_execution_context_is_not_exposed_as_public_task(self):
         events: list[dict] = []
         execution_task = (
