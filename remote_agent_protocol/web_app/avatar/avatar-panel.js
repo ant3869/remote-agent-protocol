@@ -18,14 +18,26 @@ export function createAvatarPanel() {
 
   return {
     host,
-    showFallback(show) {
+    showFallback(show, reason = "renderer-unavailable") {
       fallback?.classList.toggle("active", show);
       fallback?.setAttribute("aria-hidden", String(!show));
+      fallback?.setAttribute("role", show ? "img" : "presentation");
+      fallback?.setAttribute("aria-label", show ? `Static assistant companion: ${reason}` : "");
+      host?.classList.toggle("has-fallback", show);
     },
-    render(runtime, resolved) {
-      if (persona) persona.textContent = runtime.persona || "Assistant";
-      if (stateLabel) stateLabel.textContent = resolved.state || "idle";
-      if (emotionLabel) emotionLabel.textContent = resolved.emotion?.name || "neutral";
+    render(runtime, resolved, labelsVisible = true) {
+      const personaName = runtime.persona || "Assistant";
+      const state = resolved.state || "idle";
+      const emotion = resolved.emotion?.name || "neutral";
+      if (persona) persona.textContent = personaName;
+      if (stateLabel) stateLabel.textContent = state;
+      if (emotionLabel) emotionLabel.textContent = emotion;
+      host?.setAttribute(
+        "aria-label",
+        labelsVisible
+          ? `Animated assistant face for ${personaName}`
+          : `Animated assistant face for ${personaName}, ${state}, ${emotion}`,
+      );
     },
     setCollapsed,
     setEnabled(enabled) { panel?.classList.toggle("hidden", !enabled); },

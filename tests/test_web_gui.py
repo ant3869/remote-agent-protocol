@@ -1020,3 +1020,25 @@ def test_avatar_scene_respects_reduced_motion_and_idle_gate():
     assert "idleMotion" in source
     assert "GazeController" in source
     assert "expressionFor" in source
+
+
+def test_avatar_scene_has_visibility_context_loss_and_complete_cleanup():
+    source = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
+    entry = (WEB_APP / "avatar/avatar-entry.js").read_text(encoding="utf-8")
+    panel = (WEB_APP / "avatar/avatar-panel.js").read_text(encoding="utf-8")
+
+    assert "IntersectionObserver" in entry
+    assert "webglcontextlost" in source
+    assert "webglcontextrestored" in source
+    assert "attemptedContextRestore" in source
+    assert "aria-label" in panel
+    for marker in [
+        "observer.disconnect()",
+        "stream.dispose()",
+        "rig.dispose()",
+        "renderer.renderLists.dispose()",
+        "renderer.dispose()",
+        "renderer.forceContextLoss()",
+        "cancelAnimationFrame(animationFrame)",
+    ]:
+        assert marker in source

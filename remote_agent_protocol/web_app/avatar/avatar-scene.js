@@ -62,6 +62,8 @@ export async function createAvatarScene(host, settings) {
 
   let visible = true;
   let disposed = false;
+  let attemptedContextRestore = false;
+  let animationFrame = 0;
   let lastFrame = 0;
   let lastAnimatedAt = 0;
   let latest = null;
@@ -76,11 +78,24 @@ export async function createAvatarScene(host, settings) {
   };
   const observer = new ResizeObserver(resize);
   observer.observe(host);
+  const onContextLost = (event) => {
+    event.preventDefault();
+    visible = false;
+    host.dispatchEvent(new CustomEvent("rap:avatar-fallback", { detail: { reason: "context-lost" } }));
+  };
+  const onContextRestored = () => {
+    if (attemptedContextRestore || disposed) return;
+    attemptedContextRestore = true;
+    visible = true;
+    resize();
+  };
+  renderer.domElement.addEventListener("webglcontextlost", onContextLost, false);
+  renderer.domElement.addEventListener("webglcontextrestored", onContextRestored, false);
   resize();
 
   const animate = (time) => {
     if (disposed) return;
-    requestAnimationFrame(animate);
+    animationFrame = requestAnimationFrame(animate);
     if (!visible || document.hidden || time - lastFrame < targetInterval) return;
     const delta = Math.min(0.1, Math.max(0.001, (time - (lastAnimatedAt || time - 16)) / 1000));
     lastAnimatedAt = time;
@@ -88,7 +103,7 @@ export async function createAvatarScene(host, settings) {
     if (latest) applyAvatarFrame(rig.controls, latest, time / 1000, delta, gazeController, lipSync, currentTargets);
     renderer.render(scene, camera);
   };
-  requestAnimationFrame(animate);
+  animationFrame = requestAnimationFrame(animate);
 
   return {
     update(value) {
@@ -97,12 +112,16 @@ export async function createAvatarScene(host, settings) {
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, value.settings.maxPixelRatio));
       renderer.shadowMap.enabled = value.settings.shadows;
       if (value.settings.lipSync) stream.start();
+      else stream.stop();
     },
     setVisible(value) { visible = Boolean(value); },
     dispose() {
       if (disposed) return;
       disposed = true;
+      cancelAnimationFrame(animationFrame);
       observer.disconnect();
+      renderer.domElement.removeEventListener("webglcontextlost", onContextLost, false);
+      renderer.domElement.removeEventListener("webglcontextrestored", onContextRestored, false);
       stream.dispose();
       rig.dispose();
       scene.clear();

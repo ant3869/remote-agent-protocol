@@ -59,3 +59,24 @@ test("stream reconnect uses bounded exponential backoff", () => {
   assert.equal(stream.retryMs, 1000);
   stream.dispose();
 });
+
+
+test("stopping the stream closes source and clears a pending reconnect", () => {
+  const events = [];
+  const sources = [];
+  class FakeEventSource {
+    constructor() { sources.push(this); }
+    close() { events.push("close"); }
+  }
+  const stream = new AvatarEnvelopeStream(() => {}, {
+    EventSourceImpl: FakeEventSource,
+    setTimer: () => 17,
+    clearTimer: (id) => events.push(`clear:${id}`),
+  });
+  stream.start();
+  sources[0].onerror();
+  stream.stop();
+  assert.deepEqual(events, ["close", "clear:17"]);
+  assert.equal(stream.source, null);
+  assert.equal(stream.timer, null);
+});

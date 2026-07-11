@@ -45,10 +45,12 @@ export class AvatarEnvelopeStream {
     this.timer = null;
     this.retryMs = 500;
     this.disposed = false;
+    this.enabled = false;
   }
 
   start() {
     if (this.disposed || this.source) return;
+    this.enabled = true;
     const source = new this.EventSourceImpl(this.url);
     this.source = source;
     source.addEventListener?.("envelope", (event) => {
@@ -62,7 +64,7 @@ export class AvatarEnvelopeStream {
     source.onerror = () => {
       source.close();
       if (this.source === source) this.source = null;
-      if (this.disposed) return;
+      if (this.disposed || !this.enabled) return;
       const delay = this.retryMs;
       this.retryMs = Math.min(8000, this.retryMs * 2);
       this.timer = this.setTimer(() => {
@@ -72,11 +74,17 @@ export class AvatarEnvelopeStream {
     };
   }
 
-  dispose() {
-    this.disposed = true;
+  stop() {
+    this.enabled = false;
     if (this.timer !== null) this.clearTimer(this.timer);
     this.timer = null;
     this.source?.close();
     this.source = null;
+    this.retryMs = 500;
+  }
+
+  dispose() {
+    this.disposed = true;
+    this.stop();
   }
 }
