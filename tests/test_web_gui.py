@@ -1,3 +1,4 @@
+import inspect
 import json
 from pathlib import Path
 
@@ -198,9 +199,7 @@ def test_direct_web_launcher_releases_lock_after_failure(monkeypatch):
 def test_direct_web_launcher_refuses_a_second_instance(monkeypatch):
     calls = []
 
-    monkeypatch.setattr(
-        web_gui.process_guard, "acquire_single_instance_lock", lambda: False
-    )
+    monkeypatch.setattr(web_gui.process_guard, "acquire_single_instance_lock", lambda: False)
     monkeypatch.setattr(
         web_gui.process_guard, "close_previous_instance", lambda: calls.append("close")
     )
@@ -877,3 +876,61 @@ def _restore_agent_prompts(snapshot: dict[str, str]) -> None:
     cfg.DELEGATION_CONFIRM_PROMPT = snapshot["confirm"]
     cfg.AGENT_CONFIRM_APPROVED_PROMPT = snapshot["confirmApproved"]
     cfg.AGENT_CONFIRM_DENIED_PROMPT = snapshot["confirmDenied"]
+
+
+def test_new_session_receives_avatar_audio_callback(monkeypatch):
+    captured = {}
+
+    class FakeSession:
+        def __init__(self, persona, on_event=None, on_avatar_audio=None):
+            captured["callback"] = on_avatar_audio
+
+        def set_manual_prompt_mode(self, value):
+            return None
+
+        def set_voice_mode(self, value):
+            return None
+
+        def set_muted(self, value):
+            return None
+
+        def set_startup_defaults(self, **kwargs):
+            return None
+
+        def set_voicebox_warmup_personas(self, personas):
+            return None
+
+        def set_default_agent_backend(self, backend):
+            return None
+
+    monkeypatch.setattr(web_gui, "VoiceSession", FakeSession)
+    app = WebVoiceApp()
+
+    assert captured["callback"] == app._avatar_audio.publish
+
+
+def test_stop_app_closes_avatar_hub(monkeypatch):
+    app = WebVoiceApp()
+    closed = []
+    monkeypatch.setattr(app._avatar_audio, "close", lambda: closed.append(True))
+    monkeypatch.setattr(app, "_stop_session", lambda **kwargs: None)
+    monkeypatch.setattr(app, "_join_thread", lambda *args, **kwargs: None)
+
+    app._stop_app()
+
+    assert closed == [True]
+
+
+def test_avatar_audio_route_calls_streamer():
+    app = WebVoiceApp()
+    handler_class = app._handler_class()
+
+    assert "/api/avatar-audio" in inspect.getsource(handler_class.do_GET)
+
+
+def test_avatar_audio_tap_sits_between_tts_and_local_output():
+    source = Path("remote_agent_protocol/session.py").read_text(encoding="utf-8")
+    output_block = source.split('TranscriptTap(self._on_event, role="assistant")', 1)[1]
+
+    assert output_block.index("self._tts") < output_block.index("AvatarAudioTap(")
+    assert output_block.index("AvatarAudioTap(") < output_block.index("transport.output()")

@@ -37,6 +37,7 @@ from remote_agent_protocol import (
     wake_word,
 )
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol.avatar_audio import AvatarAudioEnvelopeHub, sse_data
 from remote_agent_protocol.session import VoiceSession
 
 logging_setup.setup_logging(cfg.DEBUG_MODE)
@@ -134,6 +135,7 @@ class WebVoiceApp:
         self._wake_status = self._initial_wake_status()
         self._pending_confirms: list[dict] = []
         self._agent_jobs: dict[str, dict] = {}
+        self._avatar_audio = AvatarAudioEnvelopeHub()
         self._session = self._new_session()
         self._thread: threading.Thread | None = None
         self._event_thread: threading.Thread | None = None
@@ -194,6 +196,7 @@ class WebVoiceApp:
 
     def _stop_app(self) -> None:
         self._stop.set()
+        self._avatar_audio.close()
         self._stop_session(unload_models=True)
         self._join_thread(self._event_thread, timeout=1.0)
         self._join_thread(self._health_thread, timeout=1.0)
@@ -201,7 +204,11 @@ class WebVoiceApp:
         self._health_thread = None
 
     def _new_session(self) -> VoiceSession:
-        session = VoiceSession(self._persona, on_event=self._events_in.put)
+        session = VoiceSession(
+            self._persona,
+            on_event=self._events_in.put,
+            on_avatar_audio=self._avatar_audio.publish,
+        )
         session.set_manual_prompt_mode(True)
         session.set_voice_mode(self._voice_mode)
         session.set_muted(self._muted)
@@ -938,12 +945,34 @@ class WebVoiceApp:
         self._session.set_muted(self._muted)
         self._start_session_thread()
 
+    def _stream_avatar_audio(self, handler: BaseHTTPRequestHandler) -> None:
+        """Stream the newest normalized TTS envelope to one local browser client."""
+        handler.send_response(HTTPStatus.OK)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "keep-alive")
+        handler.end_headers()
+        sequence = 0
+        try:
+            while not self._stop.is_set():
+                sequence, envelope, closed = self._avatar_audio.wait_after(sequence, timeout=10.0)
+                if closed or self._stop.is_set():
+                    break
+                payload = b": keepalive\n\n" if envelope is None else sse_data(sequence, envelope)
+                handler.wfile.write(payload)
+                handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
     def _handler_class(self):
         app = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 parsed = urlparse(self.path)
+                if parsed.path == "/api/avatar-audio":
+                    app._stream_avatar_audio(self)
+                    return
                 if parsed.path == "/api/status":
                     self._send_json(app._status_payload())
                     return
