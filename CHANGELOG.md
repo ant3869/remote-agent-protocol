@@ -8,6 +8,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.8.1] - 2026-07-10
+
+### Fixed
+
+- The persona no longer refers to every delegated tool agent as "Hermes" --
+  the gender/name note in the runtime system prompt is now only added when
+  the active tool agent actually is a Hermes variant.
+- The Codex tool user no longer fails immediately with "the system cannot
+  find the file specified": npm-installed `.CMD` shims are now resolved to
+  their real executable path before launch (Windows only launches bare
+  commands as `.EXE` automatically, never `.CMD`/`.BAT`).
+- The Claude Code tool user no longer hangs for the full job timeout and
+  fails: headless dispatch now skips the interactive tool-permission prompt,
+  which previously blocked forever with no TTY to answer it.
+
 ## [1.8.0] - 2026-07-10
 
 ### Added

@@ -22,6 +22,7 @@ import asyncio
 import itertools
 import json
 import re
+import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -796,6 +797,13 @@ class AgentBridge:
                 pass
             else:
                 command[chat_index:chat_index] = ["--resume", session_id]
+        # Windows' CreateProcess only auto-appends .EXE to a bare command name,
+        # never .CMD/.BAT -- so an npm-installed shim like codex.CMD fails with
+        # "WinError 2: The system cannot find the file specified" unless we
+        # resolve it to its real, extensioned path first (jess_runtime.log
+        # 2026-07-10 19:59:55). shutil.which is a no-op on other platforms.
+        if resolved := shutil.which(command[0]):
+            command[0] = resolved
         try:
             proc = await asyncio.create_subprocess_exec(
                 *command,

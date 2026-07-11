@@ -722,10 +722,14 @@ class VoiceSession:
         parts = [self._persona.system_prompt]
         if cfg.AGENT_LLM_DELEGATE:
             parts.append(cfg.LLM_DELEGATE_STYLE)
+        hermes_note = (
+            cfg.HERMES_GENDER_NOTE if "hermes" in self._default_agent_backend.lower() else ""
+        )
         parts.append(
             cfg.RUNTIME_CONTEXT_TEMPLATE.format(
                 now=datetime.now().strftime("%A, %B %d, %Y, %I:%M %p"),
                 agent=self._default_agent_backend,
+                hermes_note=hermes_note,
             )
         )
         return "".join(parts)

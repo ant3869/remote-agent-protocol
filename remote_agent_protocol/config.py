@@ -378,6 +378,11 @@ AGENT_BACKENDS = {
     "claude-code": [
         "claude",
         "-p",
+        # Headless dispatch has no TTY to answer an interactive tool-permission
+        # prompt, so any file/shell tool call blocks forever until the job's
+        # silence timeout kills it (jess_runtime.log 2026-07-10 20:00-20:05).
+        # codex avoids the same trap via --sandbox danger-full-access above.
+        "--dangerously-skip-permissions",
         "{task}"
     ],
     **_parse_command_map(_env("AGENT_BACKENDS_JSON", ""), "AGENT_BACKENDS_JSON"),
@@ -620,10 +625,14 @@ AGENT_PROMISE_NOUNS = ("agent", "bat computer")
 
 # Appended to the system prompt and refreshed on every user turn so the model
 # knows the real date/time (it has no clock) and who its tool agent is.
+# {hermes_note} is only filled in when the current tool agent is actually a
+# Hermes variant -- it used to be unconditional text, so the persona called
+# every backend "Hermes" no matter which agent (mock, codex, claude-code...)
+# was actually selected (jess_runtime.log 2026-07-10).
 RUNTIME_CONTEXT_TEMPLATE = (
-    "\n\nCurrent local date and time: {now}. Your tool agent is '{agent}'. "
-    "Hermes is female; do not refer to her with male-coded terms."
+    "\n\nCurrent local date and time: {now}. Your tool agent is '{agent}'.{hermes_note}"
 )
+HERMES_GENDER_NOTE = " Hermes is female; do not refer to her with male-coded terms."
 
 # What the LLM is told INSTEAD of your raw command once the job is actually
 # dispatched -- so her acknowledgment is truthful, short, and in-character.
