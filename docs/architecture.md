@@ -13,12 +13,12 @@ are relative to `remote_agent_protocol/`.
 ## Runtime flow
 
 ```text
-microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> speakers
-                                      |                         |
-                                      +-> AgentBridge ----------+-> spoken job updates
-                                             |       |
+microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> AvatarAudioTap -> speakers
+                                      |                         |              |
+                                      +-> AgentBridge ----------+              +-> latest normalized envelope
+                                             |       |                                  |
                                              |       +-> main PC or configured remote launcher
-                                             +-> loopback lifecycle WebSocket
+                                             +-> loopback lifecycle WebSocket            +-> loopback SSE -> avatar renderer
 ```
 
 - `web_gui.py` serves the default loopback web control center and bridges HTTP
@@ -29,7 +29,17 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
   the user sends one reviewed prompt.
 - `session.py` owns the Pipecat pipeline and exposes thread-safe commands to the
   GUI. The audio loop never calls Tk directly. `send_multimodal_prompt()` adds
-  one assembled user message to the LLM context and runs one LLM turn.
+  one assembled user message to the LLM context and runs one LLM turn. The
+  optional `AvatarAudioTap` observes TTS PCM after synthesis and before local
+  output, publishing only normalized RMS/peak envelopes; it never mutates or
+  delays the audio frame.
+- `avatar_audio.py` defines the bounded latest-value envelope hub and SSE
+  serialization. `WebVoiceApp` owns and closes one hub, while `VoiceSession`
+  receives only its `publish` callback. Raw PCM never crosses the web boundary.
+- `web_app/avatar/` is a zero-build ES-module runtime. It lazy-loads vendored
+  Three.js only when enabled, renders the procedural butler or a safe local GLB,
+  and owns expression, gaze, lip-sync, reduced-motion, fallback, and disposal
+  behavior.
 - `intent_router.py` routes explicit commands and high-confidence keyword
   matches without model latency, skips pure acknowledgments, and uses a small
   local classifier only for otherwise-ambiguous requests. Vague references to

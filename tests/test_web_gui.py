@@ -1042,3 +1042,17 @@ def test_avatar_scene_has_visibility_context_loss_and_complete_cleanup():
         "cancelAnimationFrame(animationFrame)",
     ]:
         assert marker in source
+
+
+def test_package_data_covers_nested_avatar_assets():
+    project = Path("pyproject.toml").read_text(encoding="utf-8")
+    assert '"web_app/**/*"' in project
+    for relative in [
+        "avatar/avatar-entry.js",
+        "avatar/avatar-scene.js",
+        "assets/avatars/butler/metadata.json",
+        "vendor/three/three.module.min.js",
+        "vendor/three/addons/loaders/GLTFLoader.js",
+        "vendor/three/addons/utils/BufferGeometryUtils.js",
+    ]:
+        assert (WEB_APP / relative).is_file(), relative
