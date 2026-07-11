@@ -140,8 +140,15 @@ class ClaudeCodeCliBackend:
             )
             version = proc.stdout.strip() if proc.returncode == 0 else None
 
+            # --dangerously-skip-permissions: Claude reads "echo ping" as an
+            # instruction to run that shell command via its Bash tool, which
+            # in headless mode blocks on a permission prompt with no TTY to
+            # answer it (same root cause as AGENT_BACKENDS["claude-code"] in
+            # config.py -- reproduced here too: this call hung the full 10s
+            # timeout before this flag was added). User-approved 2026-07-11
+            # to extend the flag from the dispatch path to this status ping.
             auth_proc = subprocess.run(
-                [exe, "-p", "echo ping"],
+                [exe, "-p", "--dangerously-skip-permissions", "echo ping"],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
