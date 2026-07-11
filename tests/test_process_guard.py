@@ -68,6 +68,37 @@ class CloseInstanceTests(unittest.TestCase):
             process_guard.close_previous_instance(lock_file=lock_file)  # must not raise
 
 
+class SingleInstanceLockTests(unittest.TestCase):
+    def test_acquires_lock_when_no_other_instance_holds_it(self) -> None:
+        process_guard._mutex_handle = None
+        kernel32 = SimpleNamespace(
+            CreateMutexW=lambda *_a: 42,
+            GetLastError=lambda: 0,
+            CloseHandle=lambda _h: None,
+        )
+        with _win32(), patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)):
+            self.assertTrue(process_guard.acquire_single_instance_lock("test-mutex"))
+        self.assertEqual(process_guard._mutex_handle, 42)
+        process_guard._mutex_handle = None
+
+    def test_refuses_when_another_instance_already_holds_it(self) -> None:
+        process_guard._mutex_handle = None
+        closed: list[int] = []
+        kernel32 = SimpleNamespace(
+            CreateMutexW=lambda *_a: 42,
+            GetLastError=lambda: process_guard._ERROR_ALREADY_EXISTS,
+            CloseHandle=closed.append,
+        )
+        with _win32(), patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)):
+            self.assertFalse(process_guard.acquire_single_instance_lock("test-mutex"))
+        self.assertIsNone(process_guard._mutex_handle)
+        self.assertEqual(closed, [42])
+
+    def test_no_op_on_non_windows_platforms(self) -> None:
+        with patch.object(process_guard.sys, "platform", "linux"):
+            self.assertTrue(process_guard.acquire_single_instance_lock("test-mutex"))
+
+
 class LockFileTests(unittest.TestCase):
     def test_write_lock_records_our_own_pid(self) -> None:
         lock_file = _missing_path()

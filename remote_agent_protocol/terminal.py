@@ -17,6 +17,7 @@ Want the pretty control panel with live voice/persona switching instead?
 """
 
 import asyncio
+import sys
 
 from loguru import logger
 
@@ -41,6 +42,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    if not process_guard.acquire_single_instance_lock():
+        print("Remote Agent Protocol is already running.")
+        sys.exit(1)
     process_guard.close_previous_instance()
     process_guard.write_lock()
     try:

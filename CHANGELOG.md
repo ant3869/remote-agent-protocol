@@ -8,6 +8,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.9.0] - 2026-07-11
+
+### Added
+
+- The app now refuses to start a second instance instead of silently running
+  two side by side (or worse, the second launch killing the first, healthy
+  one). A launch that loses the race prints "Remote Agent Protocol is
+  already running." and exits immediately, leaving the running instance
+  untouched.
+
 ## [1.8.2] - 2026-07-10
 
 ### Fixed
