@@ -952,3 +952,31 @@ def test_avatar_vendor_and_metadata_files_are_declared():
     assert (WEB_APP / "vendor/three/three.module.min.js").is_file()
     assert (WEB_APP / "vendor/three/addons/loaders/GLTFLoader.js").is_file()
     assert (WEB_APP / "vendor/three/addons/utils/BufferGeometryUtils.js").is_file()
+
+
+def test_web_shell_contains_avatar_panel_import_map_and_settings():
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+    css = (WEB_APP / "styles.css").read_text(encoding="utf-8")
+
+    for marker in [
+        'id="avatarPanel"',
+        'id="avatarCanvasHost"',
+        'id="avatarFallback"',
+        'id="avatarPersonaName"',
+        'id="avatarStateLabel"',
+        'id="avatarEmotionLabel"',
+        'id="avatarCollapseBtn"',
+        'id="avatarSettingEnabled"',
+        'id="avatarSettingQuality"',
+        'id="avatarSettingMotion"',
+        'id="avatarSettingsSaveBtn"',
+    ]:
+        assert marker in html
+    assert 'type="importmap"' in html
+    assert '"three": "/vendor/three/three.module.min.js"' in html
+    assert 'src="/avatar/avatar-entry.js"' in html
+    assert "function syncAvatarRuntime" in script
+    assert "post('avatar_settings'" in script
+    assert ".avatar-panel" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css
