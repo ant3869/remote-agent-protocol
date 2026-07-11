@@ -440,6 +440,16 @@ class WebVoiceApp:
             coqui_language=self._coqui_language,
             coqui_device=self._coqui_device,
             agent_prompts=self._app_state.agent_prompts,
+            avatar_enabled=self._app_state.avatar_enabled,
+            avatar_id=self._app_state.avatar_id,
+            avatar_quality=self._app_state.avatar_quality,
+            avatar_lip_sync=self._app_state.avatar_lip_sync,
+            avatar_gaze=self._app_state.avatar_gaze,
+            avatar_idle_motion=self._app_state.avatar_idle_motion,
+            avatar_expression_intensity=self._app_state.avatar_expression_intensity,
+            avatar_reduced_motion=self._app_state.avatar_reduced_motion,
+            avatar_show_state=self._app_state.avatar_show_state,
+            avatar_panel_collapsed=self._app_state.avatar_panel_collapsed,
         )
         app_state.save_state(cfg.APP_STATE_FILE, state)
         self._app_state = state
@@ -481,6 +491,7 @@ class WebVoiceApp:
 
     def _cli_diagnostics_payload(self) -> dict:
         from remote_agent_protocol.cli_agents import get_all_cli_agents
+
         agents = get_all_cli_agents()
         return {
             "cli_agents": {
@@ -566,6 +577,7 @@ class WebVoiceApp:
             "model": self._model,
             "voice": self._voice,
             "toolUser": self._session.default_agent_backend(),
+            "avatar": app_state.avatar_settings_payload(self._app_state),
             "personas": self._personas_payload(),
             "models": self._models,
             "voices": [
@@ -635,6 +647,11 @@ class WebVoiceApp:
         elif name == "voice_mode":
             self._voice_mode = multimodal_prompt.normalize_voice_mode(payload.get("mode"))
             self._session.set_voice_mode(self._voice_mode)
+            self._save_state()
+        elif name == "avatar_settings":
+            self._app_state = app_state.normalize_avatar_settings(
+                payload.get("settings"), self._app_state
+            )
             self._save_state()
         elif name == "ptt":
             self._session.set_push_to_talk(bool(payload.get("active")))
