@@ -8,6 +8,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.10.1] - 2026-07-11
+
+### Fixed
+
+- Running the test suite no longer pollutes the real runtime log
+  (`data/jess_runtime.log`) with synthetic test-fixture noise. Importing the
+  GUI/terminal entry points from a test file (not even running them)
+  silently redirected all app logging into the real log for the rest of
+  that test run, so bursts of rapid mock-agent activity and deliberately
+  triggered failures ended up interleaved with real conversation history --
+  reading as the app "piling answers on top of each other" when reviewed
+  afterward. Tests now log to a separate `data/test_runtime.log` instead.
+
 ## [1.10.0] - 2026-07-11
 
 ### Added

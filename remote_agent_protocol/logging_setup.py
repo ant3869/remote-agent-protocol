@@ -58,17 +58,35 @@ def _formatter(record) -> str:
     )
 
 
-_DEFAULT_LOG_PATH = Path(__file__).resolve().parent.parent / "data" / "jess_runtime.log"
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_DEFAULT_LOG_PATH = _DATA_DIR / "jess_runtime.log"
+# gui.py, terminal.py, and web_gui.py each call setup_logging() at bare module
+# import time, so merely importing one of them from a test file -- not running
+# it -- used to point loguru's global sink at the real runtime log for the
+# rest of that pytest process. Every other test's log calls landed there too,
+# interleaving synthetic fixture data (repeated "job-1".."job-32" bursts,
+# deliberately-triggered failures) with real conversation history, which read
+# as the app "piling answers on top of each other" when reviewed afterward.
+_TEST_LOG_PATH = _DATA_DIR / "test_runtime.log"
 
 
-def setup_logging(debug: bool, log_path: str | Path = _DEFAULT_LOG_PATH) -> None:
+def _running_under_pytest() -> bool:
+    """True for the whole pytest process, from collection through the last test."""
+    return "pytest" in sys.modules
+
+
+def setup_logging(debug: bool, log_path: str | Path | None = None) -> None:
     """Replace loguru's default sink with our readable, filtered one.
 
     Args:
         debug: When True, show the full DEBUG pipeline flow (minus the noise).
             When False, stay quiet at WARNING for normal use.
-        log_path: Bounded rotating runtime-log destination.
+        log_path: Bounded rotating runtime-log destination. Defaults to the
+            real runtime log, or a separate test-only log when running under
+            pytest -- pass an explicit path to override either way.
     """
+    if log_path is None:
+        log_path = _TEST_LOG_PATH if _running_under_pytest() else _DEFAULT_LOG_PATH
     logger.remove()
     logger.add(
         sys.stderr,
