@@ -3,77 +3,86 @@
 **Date:** 2026-07-11  
 **Repository:** `ant3869/remote-agent-protocol`  
 **Branch:** `feature/animated-butler-avatar`  
-**Status:** Approved design
+**Status:** Approved design, reviewed for implementation
 
 ## 1. Summary
 
-Add an optional, local-first animated talking-head companion to the existing Remote Agent Protocol web control center. The initial avatar is a refined, slightly stylized procedural butler bust rendered with native Three.js. It reacts to the existing voice, wake-word, agent, TTS, and session lifecycle without replacing or weakening any current controls.
+Add an optional, local-first animated talking-head companion to the existing Remote Agent Protocol web control center. The first avatar is a refined, slightly stylized procedural butler head and upper bust rendered with native Three.js.
 
-The avatar system must remain isolated from the core audio and agent logic, fail safely, and support a future GLB/GLTF model with blendshapes, skeleton animation, and visemes. The first implementation uses a procedural rig so the repository does not inherit an uncertain third-party model license.
+The avatar reacts to the existing voice, wake-word, TTS, session, and agent lifecycle. It adds no alternate agent logic, does not replace current controls, and must never block voice startup, TTS playback, delegation, shutdown, or normal UI operation.
+
+The architecture supports future local GLB/GLTF avatars with morph targets, skeletal animation, and visemes. The initial release deliberately avoids bundling a third-party character model so the repository does not inherit uncertain licensing or attribution requirements.
 
 ## 2. Repository Constraints
 
-The application currently uses:
+The current application uses:
 
 - A Python `ThreadingHTTPServer` in `remote_agent_protocol/web_gui.py`.
 - A zero-build browser client in `remote_agent_protocol/web_app/` using plain HTML, CSS, and JavaScript.
 - A Pipecat voice pipeline owned by `remote_agent_protocol/session.py`.
-- UI event delivery through `/api/events` and status snapshots.
-- Atomic persisted runtime selections through `remote_agent_protocol/app_state.py`.
-- A graphite/dark operational UI with semantic status colors.
+- Status snapshots and event polling through the existing web API.
+- Atomic runtime-setting persistence through `remote_agent_protocol/app_state.py`.
+- A dense graphite operational UI with semantic status colors.
 
-The design therefore does not introduce React, Vite, npm, or a second frontend application. Native Three.js ES modules fit the current architecture with the least disruption.
+The implementation therefore uses native Three.js ES modules. It does not introduce React, React Three Fiber, Vite, npm, or a second frontend application.
 
 ## 3. Goals
 
-The implementation must:
+The feature must:
 
 1. Add a polished butler-style head and upper bust to the Control Center.
-2. React visibly to listening, thinking, speaking, agent activity, confirmations, success, and errors.
-3. Use real TTS audio amplitude for mouth movement when available.
+2. React visibly to listening, thinking, speaking, agent activity, confirmations, completion, and errors.
+3. Use real TTS amplitude for mouth movement when the PCM envelope is available.
 4. Provide natural gaze, blinking, breathing, and restrained micro-motion.
 5. Persist avatar settings through the existing application state file.
-6. Support a future local GLB/GLTF avatar without redesigning the UI or event system.
-7. Preserve all current voice, persona, memory, TTS, wake-word, and delegation behavior.
-8. Degrade to a static accessible companion card if WebGL or Three.js fails.
-9. Remain optional and disposable at runtime.
+6. Load a future local GLB/GLTF avatar without redesigning the UI or event system.
+7. Preserve all voice, persona, memory, wake-word, TTS, Coqui, and delegation behavior.
+8. Degrade to a useful static companion card when WebGL or Three.js is unavailable.
+9. Release all renderer, model, stream, timer, and observer resources when disabled or unmounted.
 
 ## 4. Non-Goals
 
-The first implementation will not:
+The first release will not:
 
-- Create a photorealistic human face.
+- Create a photorealistic face.
 - Bundle a third-party avatar model.
-- Perform camera-based eye tracking.
-- Add cloud avatar services.
+- Use cloud avatar services.
+- Perform camera-based or pointer-based eye tracking.
 - Add neural facial animation.
-- Require phoneme or viseme support from every TTS backend.
-- Convert the existing frontend to React.
-- Expose raw TTS audio outside the local application.
-- Replace the current transcript, state labels, or controls with animation-only feedback.
+- Require phoneme or viseme output from every TTS provider.
+- Expose raw TTS audio to the browser.
+- Replace transcript or status information with animation-only feedback.
+- Convert the existing frontend to a framework build.
 
-## 5. Rendering Framework
+## 5. Rendering Framework and Local Imports
 
-Use a pinned, vendored Three.js browser module and GLTFLoader under the static web application directory.
-
-Recommended layout:
+Vendor a pinned Three.js browser module and GLTFLoader inside the static application:
 
 ```text
 remote_agent_protocol/web_app/vendor/three/
   LICENSE
+  VERSION
   three.module.min.js
   addons/loaders/GLTFLoader.js
 ```
 
-The exact Three.js release must be pinned in a small `VERSION` or metadata file. The repository must retain the upstream license notice. No CDN is used so the local-first application remains functional offline.
+Retain the upstream Three.js license and record the exact release in `VERSION`. Do not use a CDN.
 
-The avatar entry point is loaded as an ES module:
+Use an import map so the unmodified upstream addon can resolve its normal module imports:
 
 ```html
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three/three.module.min.js",
+    "three/addons/": "/vendor/three/addons/"
+  }
+}
+</script>
 <script type="module" src="/avatar/avatar-entry.js"></script>
 ```
 
-The module must not initialize a renderer until avatar settings are available and the avatar is enabled.
+The avatar module must not initialize Three.js until status settings have loaded and the avatar is enabled.
 
 ## 6. High-Level Architecture
 
@@ -111,22 +120,26 @@ AvatarAudioTap -> AvatarAudioEnvelopeHub -> /api/avatar-audio SSE
                                        browser lip-sync
 ```
 
-### 6.1 Browser Module Boundary
+`WebVoiceApp` owns one `AvatarAudioEnvelopeHub` and injects its `publish` callback when constructing `VoiceSession`. `VoiceSession` passes that callback into `AvatarAudioTap`. This avoids a process-global singleton and gives shutdown one clear ownership path.
 
-The avatar module exposes a deliberately small interface:
+### 6.1 Browser Boundary
+
+`avatar-entry.js` exposes a small runtime interface:
 
 ```js
-export interface AvatarRuntime {
-  updateRuntime(runtimeState): void;
-  updateSettings(settings): void;
-  setPanelVisible(visible): void;
-  dispose(): void;
+{
+  updateRuntime(runtimeState),
+  updateSettings(settings),
+  setPanelVisible(visible),
+  dispose()
 }
 ```
 
-`app.js` remains responsible for application state and event polling. It passes normalized runtime information to the avatar module rather than allowing the avatar to directly mutate shared UI state.
+`app.js` remains the owner of general application state. It normalizes current status and events, then passes only the avatar-relevant snapshot into the avatar runtime.
 
-### 6.2 Planned Browser Files
+The avatar module may update its own canvas and companion-card text. It must not directly change microphone state, personas, models, TTS settings, agent jobs, memory, or shared navigation.
+
+### 6.2 Browser Files
 
 ```text
 remote_agent_protocol/web_app/avatar/
@@ -144,26 +157,24 @@ remote_agent_protocol/web_app/avatar/
   math.js
 ```
 
-Each file has one clear concern:
+Responsibilities:
 
 - `avatar-entry.js`: bootstrap, feature detection, lazy initialization, public boundary.
-- `avatar-panel.js`: DOM status labels, collapse behavior, fallback card.
+- `avatar-panel.js`: companion DOM, labels, collapse behavior, static fallback.
 - `avatar-controller.js`: state priority, transitions, emotion resolution.
 - `avatar-scene.js`: renderer, camera, lights, animation loop, resize, disposal.
-- `procedural-butler.js`: build the initial rig and expose named controls.
-- `model-loader.js`: load and normalize a local GLB/GLTF model.
-- `expressions.js`: expression target definitions and interpolation.
-- `gaze-controller.js`: blinking, saccades, camera gaze, thinking offsets.
-- `lip-sync.js`: audio-envelope smoothing and jaw/mouth targets.
-- `persona-profiles.js`: persona-to-avatar behavior profiles.
-- `avatar-settings.js`: normalize browser-facing settings and quality presets.
-- `math.js`: reusable damp, clamp, seeded timing, and range helpers.
+- `procedural-butler.js`: procedural rig and named controls.
+- `model-loader.js`: metadata, GLB/GLTF loading, normalization, morph/skeleton discovery.
+- `expressions.js`: expression targets and interpolation.
+- `gaze-controller.js`: blinking, saccades, eye contact, thinking gaze.
+- `lip-sync.js`: SSE envelope smoothing and mouth targets.
+- `persona-profiles.js`: persona-to-avatar behavior mapping.
+- `avatar-settings.js`: browser normalization and quality presets.
+- `math.js`: damp, clamp, timing, and range helpers.
 
 ## 7. UI Placement
 
-The companion appears at the top of the existing right-side activity area in the Control Center. The current agent activity and telemetry remain below it.
-
-Desktop layout:
+Place the companion at the top of the existing right-side activity area. Existing agent activity and telemetry remain below it.
 
 ```text
 +-----------------------------+-----------------------+
@@ -178,13 +189,13 @@ Desktop layout:
 
 Responsive behavior:
 
-- Wide desktop: avatar card in the right activity column.
-- Narrow desktop/tablet: avatar card above agent activity.
-- Mobile: compact horizontal avatar card above the conversation or activity block.
-- Collapsed: small status row with persona, state, and expand button.
-- Disabled: panel and renderer are removed, not merely hidden.
+- Wide desktop: card in the existing right activity column.
+- Narrow desktop/tablet: card above agent activity.
+- Mobile: compact horizontal card above the conversation or activity block.
+- Collapsed: persona, current state, and expand control remain visible.
+- Disabled: panel and renderer are removed rather than hidden offscreen.
 
-Panel content:
+The panel contains:
 
 - Canvas or static fallback visual.
 - Current persona name.
@@ -194,24 +205,24 @@ Panel content:
 - Optional short status text.
 - Collapse/expand control.
 
-No essential information is conveyed only through movement.
+No essential information is conveyed only through movement or color.
 
-## 8. Procedural Butler Design
+## 8. Procedural Butler
 
-The initial avatar is a stylized head and upper bust made from native Three.js geometry and standard materials.
+The initial model uses native Three.js geometry and standard materials.
 
-### 8.1 Visual Direction
+Visual direction:
 
-- Composed, attentive, professional.
-- Slightly stylized rather than uncanny pseudo-realism.
-- Dark formal jacket, pale shirt, restrained bow tie.
-- Soft neutral skin and subtle facial detail.
-- Graphite studio environment with semantic highlights matching the existing UI.
-- No bright cyan-first visual motif.
+- Composed, attentive, and professional.
+- Slightly stylized rather than pseudo-photorealistic.
+- Dark jacket, pale shirt, formal collar, lapels, and restrained bow tie.
+- Soft neutral skin and subtle facial definition.
+- Graphite studio background matching the existing UI.
+- Semantic highlights may use the current status palette; do not restore the obsolete cyan-first motif.
 
-### 8.2 Rig Controls
+### 8.1 Rig Contract
 
-The procedural model exposes stable named controls so the rest of the animation system does not depend on geometry implementation details.
+The procedural model exposes stable named controls:
 
 ```js
 {
@@ -237,29 +248,27 @@ The procedural model exposes stable named controls so the rest of the animation 
 }
 ```
 
-The bust includes shoulders, lapels, collar, and bow tie. A moustache or similarly restrained formal facial detail may be included when it improves the silhouette without making the character comic.
+The animation controller depends on this contract, not the geometry implementation. A moustache or similarly restrained formal detail may be included only when it improves the silhouette without making the character comic.
 
 ## 9. GLB/GLTF Upgrade Path
 
-The system attempts to load a selected avatar from:
+Avatar assets live under:
 
 ```text
 remote_agent_protocol/web_app/assets/avatars/<avatar-id>/
   metadata.json
-  <model-file>.glb
+  <optional-model>.glb
   textures/
   animations/
 ```
 
-The default butler metadata file exists even while no GLB is bundled.
-
-Example metadata:
+The initial butler metadata contains no model path, preventing a guaranteed 404 while the procedural version is the intended default:
 
 ```json
 {
   "id": "butler",
   "label": "Butler",
-  "model": "butler.glb",
+  "model": null,
   "fallback": "procedural-butler",
   "scale": 1.0,
   "cameraTarget": [0, 1.55, 0],
@@ -271,19 +280,21 @@ Example metadata:
 }
 ```
 
-`model-loader.js` must support:
+The loader attempts a network request only when `model` is a non-empty local relative path.
+
+`model-loader.js` supports:
 
 - GLB/GLTF loading.
 - Morph target discovery.
-- Skeleton and AnimationMixer support.
-- Metadata-provided aliases.
+- Skeleton and `AnimationMixer` support.
+- Metadata-provided control aliases.
 - Normalized scale and camera framing.
 - Loading and error states.
-- Complete disposal of geometry, materials, textures, animations, and object references.
+- Disposal of geometry, materials, textures, mixers, clips, and references.
 
-Failure to load a model always returns to the procedural butler without taking down the application.
+A missing or malformed model always falls back to the procedural butler.
 
-## 10. Avatar Runtime States
+## 10. Runtime States
 
 ```ts
 type AvatarState =
@@ -300,7 +311,7 @@ type AvatarState =
   | "sleeping";
 ```
 
-### 10.1 Priority Resolution
+### 10.1 State Priority
 
 Concurrent signals resolve in this order:
 
@@ -309,17 +320,17 @@ Concurrent signals resolve in this order:
 3. `listening`
 4. `thinking`
 5. `focused` agent activity
-6. `concerned` confirmation/warning
+6. `concerned` confirmation or warning
 7. `happy` recent completion
 8. wake-word standby
 9. `idle`
 10. `sleeping`
 
-Higher-priority states temporarily override lower states. Short-lived emotions such as pleased or surprised have explicit expiry times and return to the underlying lifecycle state.
+Short-lived emotions have expiry times and return to the underlying lifecycle state. Transitions use damped interpolation rather than snapping.
 
-### 10.2 Existing Event Mapping
+### 10.2 Event Mapping
 
-| Existing signal | Avatar state and response |
+| Signal | Avatar response |
 |---|---|
 | Wake word detected | `listening`; eyes widen slightly, posture rises, gaze returns to camera |
 | Listening for command | `listening`; stable attentive gaze and slight forward posture |
@@ -328,15 +339,17 @@ Higher-priority states temporarily override lower states. Short-lived emotions s
 | Transcribing | `thinking`; restrained brow movement and processing gaze |
 | Agent/LLM responding | `thinking`; slow gaze shift and subtle posture hold |
 | TTS speaking true | `speaking`; audio-driven jaw and mouth movement |
-| Active agent job | `focused`; occasional side glance, reduced idle motion |
+| Active agent job | `focused`; occasional side glance and reduced idle motion |
 | Confirmation required | `concerned`; direct attentive gaze |
 | Agent completed | brief `happy`; small smile or nod |
-| Agent failed | `error` or `concerned` depending on severity |
+| Agent failed | `error` or `concerned`, based on severity |
 | Session failed | `error` |
-| Wake-word passive standby | calm `idle` |
-| Extended inactivity | `sleeping` when enabled |
+| Passive wake-word standby | calm `idle` |
+| Extended inactivity | `sleeping`, when enabled |
 
-## 11. Facial Expressions
+`TranscriptTap` currently emits user-stop and bot-speaking telemetry. Add `UserStartedSpeakingFrame` handling so the browser receives a real `turn/user_started` event instead of relying only on inferred wake phases.
+
+## 11. Expressions
 
 Supported expressions:
 
@@ -352,7 +365,7 @@ Supported expressions:
 - surprised
 - error
 
-Each expression is a set of normalized targets, not a one-off animation clip.
+Each expression is a normalized target set:
 
 ```js
 {
@@ -371,11 +384,11 @@ Each expression is a set of normalized targets, not a one-off animation clip.
 }
 ```
 
-All targets are multiplied by persona expressiveness and the global expression-intensity setting. The controller uses damped interpolation so state changes do not snap.
+Targets are multiplied by persona expressiveness and global expression intensity. Expression and audio targets blend so lip-sync does not erase emotion.
 
 ## 12. Eye and Gaze Behavior
 
-The butler profile defaults to restrained natural motion:
+Initial butler profile:
 
 ```js
 {
@@ -390,16 +403,15 @@ The butler profile defaults to restrained natural motion:
 }
 ```
 
-Behavior rules:
+Rules:
 
 - Blinks are slightly asymmetric.
 - Double blinks are uncommon.
 - Listening reduces blink frequency and saccade intensity.
-- Thinking introduces small off-camera and downward gaze shifts.
-- Speaking softens eye contact without creating constant wandering.
+- Thinking introduces small off-camera and downward shifts.
+- Speaking softens eye contact without constant wandering.
 - Error states suppress playful micro-motion.
-- Gaze remains bounded to anatomically plausible ranges.
-- Pointer movement is not used as eye tracking in the first release.
+- Gaze remains inside anatomically plausible limits.
 
 ## 13. Idle Motion
 
@@ -407,22 +419,18 @@ Idle life includes:
 
 - Subtle shoulder and neck breathing.
 - Small head stabilization movement.
-- Rare posture reset.
-- Occasional micro-expression.
+- Rare posture resets.
+- Occasional micro-expressions.
 - Natural blinking and saccades.
-- Attentive reset when user activity begins.
+- An attentive reset as soon as user activity begins.
 
-The butler must remain composed. Constant swaying, repetitive nodding, exaggerated breathing, or large random eye motion is prohibited.
+Constant swaying, repetitive nodding, exaggerated breathing, and large random eye motion are prohibited.
 
-## 14. TTS Audio Envelope and Lip-Sync
+## 14. Audio Envelope and Lip-Sync
 
-### 14.1 Problem
+### 14.1 Pipeline Tap
 
-The browser currently receives bot speaking start/stop events but does not play the TTS audio. Audio is emitted by the Python Pipecat local output transport. A browser AudioContext therefore cannot directly analyze the real signal.
-
-### 14.2 Pipeline Tap
-
-Add `AvatarAudioTap` after the selected TTS service and before local audio output:
+The browser does not play TTS audio, so Web Audio cannot analyze the real output. Add `AvatarAudioTap` after the selected TTS service and before local output:
 
 ```text
 TTS service
@@ -434,7 +442,7 @@ AvatarAudioTap
 LocalAudioTransport output
 ```
 
-The tap observes `TTSAudioRawFrame` PCM data, calculates an envelope, and always forwards the original frame unchanged.
+The tap observes `TTSAudioRawFrame` PCM data, calculates an envelope, and forwards the original frame unchanged.
 
 ```py
 @dataclass(frozen=True)
@@ -449,22 +457,22 @@ class AvatarAudioEnvelope:
 
 Requirements:
 
-- Values are clamped to `0.0..1.0`.
-- Silence is stable and does not chatter.
-- Calculation supports the PCM format produced by the current pipeline.
-- Frames are never delayed or modified.
-- Emission is rate-limited to approximately 20 Hz.
-- The tap performs no network I/O directly.
+- Clamp `rms` and `peak` to `0.0..1.0`.
+- Use a stable silence threshold and avoid mouth chatter.
+- Support the PCM format emitted by the current Pipecat pipeline.
+- Never delay, replace, or mutate audio frames.
+- Rate-limit publication to approximately 20 Hz.
+- Perform no HTTP or SSE work inside the pipeline processor.
 
-### 14.3 Envelope Hub and SSE
+### 14.2 Envelope Hub and SSE
 
-A small thread-safe `AvatarAudioEnvelopeHub` stores only the latest sample and sequence number. The web server exposes a same-origin server-sent event endpoint:
+`AvatarAudioEnvelopeHub` stores only the newest sample and sequence number. The web server exposes:
 
 ```text
 GET /api/avatar-audio
 ```
 
-The SSE payload contains only amplitude telemetry:
+Example SSE data:
 
 ```json
 {
@@ -478,24 +486,25 @@ The SSE payload contains only amplitude telemetry:
 
 Rules:
 
-- No raw PCM leaves the pipeline.
+- Raw PCM never leaves the audio pipeline.
 - Each client receives bounded latest-value updates, not an unbounded queue.
-- A periodic keepalive prevents stale connections.
-- Disconnects are caught without logging noisy stack traces.
-- The avatar reconnects with backoff.
-- If telemetry is unavailable, the existing speaking boolean drives a restrained fallback cadence.
+- Send a periodic keepalive.
+- Stop cleanly when the application stop event is set.
+- Catch client disconnects without noisy tracebacks.
+- Reconnect in the browser with bounded exponential backoff.
+- When telemetry is absent, the existing `speaking` boolean drives restrained fallback mouth motion.
 
-### 14.4 Mouth Motion
+### 14.3 Mouth Motion
 
-Envelope values drive:
+The envelope drives:
 
 - Jaw opening.
-- Lower lip movement.
+- Lower-lip movement.
 - Small mouth-width variation.
 - Cheek compression.
-- Tiny speaking head movement.
+- Tiny speaking head motion.
 
-The controller uses attack/release smoothing. Peak influences consonant-like closures and RMS controls sustained jaw opening. The first release does not pretend amplitude is true phoneme-level lip-sync; it is explicitly an extensible fallback beneath future viseme support.
+Use attack/release smoothing. RMS controls sustained opening; peak adds short consonant-like closures. This is amplitude animation, not claimed phoneme-perfect lip-sync. The interface remains ready for future viseme timing.
 
 ## 15. Persona-Aware Behavior
 
@@ -512,7 +521,7 @@ interface PersonaAvatarProfile {
 }
 ```
 
-Initial butler/Jess profile:
+Initial profile:
 
 ```js
 {
@@ -532,11 +541,11 @@ Initial butler/Jess profile:
 }
 ```
 
-Persona lookup must be case-insensitive and normalize display names. Unknown/custom personas inherit a neutral profile and the selected default avatar.
+Persona lookup is case-insensitive and normalizes display names. Unknown and custom personas inherit a neutral profile and the selected default avatar.
 
 ## 16. Emotion Input
 
-Emotion resolution order:
+Resolve emotion in this order:
 
 1. Explicit future event metadata:
 
@@ -550,24 +559,15 @@ Emotion resolution order:
 }
 ```
 
-2. Deterministic application state:
-   - error
-   - pending confirmation
-   - failed/completed job
-   - listening/thinking/speaking lifecycle
-3. Local text cues from the latest assistant transcript:
-   - apology language
-   - uncertainty
-   - warnings
-   - success/completion
-   - direct questions
+2. Deterministic application state: errors, pending confirmations, failed/completed jobs, and lifecycle state.
+3. Low-intensity local text cues from the latest assistant transcript: apologies, uncertainty, warnings, completion, or questions.
 4. Persona default.
 
-Text cue inference must be lightweight, deterministic, and low intensity. It must not invoke another language model.
+Text cue inference is deterministic and does not invoke another language model.
 
 ## 17. Persisted Settings
 
-Extend `AppState` with normalized avatar settings:
+Extend `AppState`:
 
 ```py
 avatar_enabled: bool = True
@@ -577,12 +577,14 @@ avatar_lip_sync: bool = True
 avatar_gaze: bool = True
 avatar_idle_motion: bool = True
 avatar_expression_intensity: float = 0.62
-avatar_reduced_motion: bool = False
+avatar_reduced_motion: bool | None = None
 avatar_show_state: bool = True
 avatar_panel_collapsed: bool = False
 ```
 
-The settings status payload uses camelCase for the browser:
+`avatar_reduced_motion=None` means follow the browser's `prefers-reduced-motion` setting. `True` forces reduced motion; `False` explicitly permits normal motion.
+
+Browser status payload:
 
 ```json
 {
@@ -594,14 +596,14 @@ The settings status payload uses camelCase for the browser:
     "gaze": true,
     "idleMotion": true,
     "expressionIntensity": 0.62,
-    "reducedMotion": false,
+    "reducedMotion": null,
     "showState": true,
     "panelCollapsed": false
   }
 }
 ```
 
-Add one `avatar_settings` action to `/api/action`. The backend validates and persists a complete settings object atomically. Unknown fields are ignored. Invalid values normalize to defaults rather than breaking startup.
+Add one `avatar_settings` action to `/api/action`. The backend validates and persists a complete settings object atomically. Unknown fields are ignored. Invalid values normalize to safe defaults.
 
 Settings UI:
 
@@ -611,14 +613,12 @@ Settings UI:
 - Lip-sync.
 - Eye movement and gaze.
 - Idle animation.
-- Expression intensity slider.
-- Reduced motion.
+- Expression intensity.
+- Motion preference: system, reduced, normal.
 - Show state labels.
 - Collapse companion panel.
 
 ## 18. Quality and Performance
-
-Quality presets:
 
 ```js
 const QUALITY = {
@@ -643,17 +643,16 @@ const QUALITY = {
 };
 ```
 
-Performance requirements:
+Requirements:
 
-- Three.js is loaded only when enabled.
-- Rendering pauses when the document is hidden.
-- Rendering pauses when the panel is collapsed or outside the viewport.
-- `ResizeObserver` controls renderer size.
-- Pixel ratio is capped by the selected quality.
-- Low mode uses simpler geometry and materials where practical.
-- The animation loop updates Three.js state directly and does not trigger application DOM rerenders.
-- Renderer, render lists, textures, materials, geometries, mixers, EventSource, observers, and timers are disposed on teardown.
-- WebGL context loss displays a fallback and attempts at most one controlled reinitialization.
+- Lazy-load Three.js only while enabled.
+- Pause rendering when the document is hidden.
+- Pause rendering when the panel is collapsed or outside the viewport.
+- Use `ResizeObserver` for canvas sizing.
+- Cap pixel ratio according to quality.
+- Keep animation state outside general UI rerender paths.
+- Dispose renderer, render lists, context, textures, materials, geometries, mixers, EventSource, observers, and timers.
+- On WebGL context loss, show the fallback and attempt at most one guarded reinitialization.
 
 ## 19. Reduced Motion and Accessibility
 
@@ -672,86 +671,88 @@ It disables or sharply limits:
 - Micro-expressions.
 - Animated camera transitions.
 
-The browser's `prefers-reduced-motion` setting activates reduced motion unless the user has explicitly selected an application setting. The avatar remains independently disableable.
-
 Accessibility requirements:
 
-- Status text uses `aria-live="polite"` only for meaningful state changes.
-- Canvas has an accessible label and is decorative when equivalent text is visible.
-- Controls remain keyboard accessible.
-- No flashing, strobing, or high-frequency brightness changes.
-- Color is not the only state indicator.
+- Use `aria-live="polite"` only for meaningful state changes.
+- Give the canvas an accessible label or mark it decorative when equivalent text is visible.
+- Keep all settings and collapse controls keyboard accessible.
+- Do not flash or strobe.
+- Do not use color as the only state indicator.
+- Keep non-visual status indicators available when the avatar is disabled.
 
-## 20. Failure and Fallback Behavior
+## 20. Failure Behavior
 
 | Failure | Required result |
 |---|---|
-| Three.js module fails to load | Static butler silhouette and normal text state |
+| Three.js import fails | Static butler silhouette and normal state text |
 | WebGL unavailable | Accessible non-animated companion card |
-| GLB absent | Procedural butler loads |
+| GLB absent | Procedural butler loads without requesting a missing file |
 | GLB malformed | Warning logged; procedural butler remains |
-| Audio SSE disconnected | Speaking-state fallback mouth motion |
-| Main event polling disconnected | Avatar returns to neutral disconnected state |
+| Audio SSE disconnects | Speaking-state fallback mouth motion |
+| Main event polling disconnects | Neutral disconnected state |
 | Invalid saved settings | Safe normalized defaults |
 | Avatar module exception | Main application remains usable |
-| WebGL context lost | Static fallback; one guarded reinitialize attempt |
-
-The avatar is never allowed to block application boot, voice startup, TTS, agent execution, or shutdown.
+| WebGL context lost | Static fallback and one guarded reinitialize attempt |
 
 ## 21. Testing
 
-### 21.1 Python Unit Tests
+### 21.1 Python Tests
 
 Add or update tests for:
 
-- Avatar settings default values.
-- Avatar settings save/reload.
-- Old state files load with avatar defaults.
-- Corrupt avatar values normalize safely.
-- `avatar_settings` action persists values.
-- Status payload exposes browser settings.
-- Envelope RMS and peak remain bounded.
-- Silent PCM produces a closed-mouth envelope.
-- Audio frames pass through unchanged.
-- Envelope emission is rate-limited.
-- Pipeline order is TTS, avatar tap, local output.
-- Hub stores only the latest sequence/sample.
-- SSE serializes the documented payload and handles disconnects.
+- Avatar defaults.
+- Save/reload persistence.
+- Old state files loading with avatar defaults.
+- Invalid values normalizing safely.
+- `avatar_settings` persistence.
+- Status payload shape.
+- RMS and peak bounds.
+- Silent PCM behavior.
+- Audio frames passing through unchanged.
+- Envelope rate limiting.
+- Hub latest-value semantics.
+- Pipeline order: TTS, avatar tap, local output.
+- SSE serialization, stop handling, and disconnect handling.
+- `UserStartedSpeakingFrame` producing `turn/user_started`.
 
-### 21.2 Browser and Static Integration Tests
+### 21.2 JavaScript Tests
 
-Following the repository's existing static frontend test style, assert:
+Use the built-in Node test runner with pure ES modules and hand-written mocks; do not add npm production dependencies.
 
-- Avatar panel exists without replacing current controls.
-- Settings controls exist.
-- Avatar entry point is loaded as a module.
-- Three.js is not initialized while disabled.
-- Wake detection maps to listening/attentive.
-- User speech maps to listening.
-- Transcribing maps to thinking.
-- Speaking starts lip-sync and stop releases the jaw.
-- Session failure maps to error.
-- Pending confirmation maps to concerned.
-- Completed job briefly maps to pleased.
-- Reduced motion suppresses idle transforms.
-- Missing GLB invokes the procedural model.
-- WebGL failure invokes the static fallback.
-- Disposal closes EventSource and releases scene resources.
+```text
+tests/js/
+  avatar-controller.test.mjs
+  avatar-settings.test.mjs
+  lip-sync.test.mjs
+  model-loader.test.mjs
+```
 
-### 21.3 Regression Tests
+Test:
 
-The existing test suite must remain green, especially tests covering:
+- State priority and event mapping.
+- Persona profile fallback.
+- Reduced-motion resolution.
+- Speaking start/stop and envelope smoothing.
+- Missing model metadata choosing procedural fallback without a fetch.
+- Malformed model choosing procedural fallback.
+- Disabled avatar not initializing Three.js.
+- Disposal closing EventSource and observers.
 
-- Session construction.
-- Web status and actions.
-- App state persistence.
-- TTS switching, including Coqui.
-- Wake-word state.
-- Agent lifecycle events.
-- Static asset serving.
-- Process guard and shutdown.
+Node is a development-only test tool; the shipped application remains zero-build and has no Node runtime dependency.
 
-## 22. Planned Repository Changes
+### 21.3 Static and Regression Tests
+
+Following current pytest frontend-contract style, assert:
+
+- Avatar panel and settings controls exist.
+- Import map and module entry exist.
+- Existing controls remain present.
+- The status/action API includes avatar settings.
+- Static serving supports the new modules and metadata.
+
+Keep existing tests green, especially session construction, app state, TTS switching, Coqui, wake word, agent lifecycle, process guard, and shutdown.
+
+## 22. Planned Files
 
 ```text
 docs/superpowers/specs/
@@ -780,75 +781,72 @@ remote_agent_protocol/
       persona-profiles.js
       avatar-settings.js
       math.js
-    assets/
-      avatars/
-        butler/
-          metadata.json
-    vendor/
-      three/
-        LICENSE
-        VERSION
-        three.module.min.js
-        addons/loaders/GLTFLoader.js
+    assets/avatars/butler/
+      metadata.json
+    vendor/three/
+      LICENSE
+      VERSION
+      three.module.min.js
+      addons/loaders/GLTFLoader.js
 
 tests/
   test_app_state.py
   test_session_processors.py
   test_web_gui.py
   test_avatar_audio.py
+  js/
+    avatar-controller.test.mjs
+    avatar-settings.test.mjs
+    lip-sync.test.mjs
+    model-loader.test.mjs
 ```
-
-The implementation plan may split browser tests into additional files if doing so improves isolation.
 
 ## 23. Delivery Sequence
 
-Implementation should proceed in this order:
-
-1. Add avatar settings model, normalization, status payload, and action.
-2. Add audio envelope calculation, hub, tap, and tests.
-3. Insert the audio tap into the pipeline without changing output behavior.
-4. Add SSE endpoint and browser reconnection logic.
-5. Vendor pinned Three.js files and license.
-6. Add the panel, settings controls, and static fallback.
+1. Add settings model, normalization, status payload, and action.
+2. Add audio envelope calculation, hub, processor, and tests.
+3. Inject the hub into `VoiceSession` and place the tap after TTS.
+4. Add the SSE endpoint and clean shutdown behavior.
+5. Vendor pinned Three.js files, import map, version, and license.
+6. Add panel, settings controls, and static fallback.
 7. Build the procedural butler scene and disposal path.
-8. Add state controller, expressions, gaze, idle motion, and persona profile.
+8. Add state controller, expressions, gaze, idle behavior, and persona profile.
 9. Add audio-driven lip-sync and speaking fallback.
-10. Add GLB metadata and loader fallback.
-11. Complete performance, reduced-motion, WebGL-failure, and responsive behavior.
-12. Run focused tests and the full applicable suite.
-13. Update README or architecture documentation with operation and extension notes.
+10. Add metadata and GLB loader fallback.
+11. Complete quality, reduced-motion, accessibility, responsive, and WebGL-failure behavior.
+12. Run JavaScript, focused Python, and full applicable regression tests.
+13. Update README and architecture documentation with operation and extension notes.
 
 ## 24. Acceptance Criteria
 
 The feature is complete when:
 
 - The Control Center contains an optional animated butler companion.
-- The avatar visibly reacts to listening, thinking, speaking, agent work, confirmations, completion, and errors.
-- TTS amplitude drives jaw and mouth movement through local envelope telemetry.
-- Speaking start and stop remain synchronized even when envelope telemetry is unavailable.
-- Eye movement, blinking, breathing, and micro-motion appear natural and restrained.
-- The default butler behavior is calm, formal, attentive, and persona-appropriate.
-- Avatar settings are configurable and persist across restarts.
-- A missing model cleanly uses the procedural butler.
-- GLB/GLTF loading is supported for future assets.
-- Reduced motion and complete disablement work.
-- WebGL failure leaves a useful accessible fallback.
-- Existing voice, persona, memory, wake-word, TTS, Coqui, and agent workflows continue to work.
-- Focused and regression tests pass.
+- The avatar reacts to listening, thinking, speaking, agent activity, confirmation, completion, and errors.
+- Real TTS amplitude drives jaw and mouth motion through local envelope telemetry.
+- Speaking start/stop remains synchronized when envelope telemetry is unavailable.
+- Facial expressions, eye movement, blinking, breathing, and restrained idle motion are visible.
+- Butler behavior feels calm, formal, attentive, and persona-appropriate.
+- Settings are configurable and survive restarts.
+- Missing or malformed models use the procedural fallback cleanly.
+- GLB/GLTF support is ready for later assets.
+- Reduced motion, full disablement, and WebGL fallback work.
+- Existing voice, persona, memory, wake-word, TTS, Coqui, and agent workflows remain functional.
+- JavaScript, focused Python, and regression tests pass.
 - No raw TTS audio is sent to the browser.
-- The avatar releases all browser and server-side resources during shutdown or disablement.
+- All browser and server-side avatar resources are released during disablement and shutdown.
 
 ## 25. Future Enhancements
 
-The architecture intentionally leaves room for:
+The architecture leaves room for:
 
 - ARKit-compatible blendshape aliases.
-- Provider-issued viseme events.
-- Forced-alignment phoneme timing for generated audio.
-- Multiple persona-specific GLB avatars.
-- Hand and torso gestures.
+- TTS-provider viseme events.
+- Forced-alignment phoneme timing.
+- Persona-specific GLB avatars.
+- Torso and hand gestures.
 - Camera-aware gaze.
-- Additional lighting/environment profiles.
+- Additional lighting profiles.
 - Avatar authoring and calibration tools.
 
-These enhancements are not required for the first implementation and must not expand the initial scope.
+These are outside the initial implementation scope.
