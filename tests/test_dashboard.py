@@ -109,5 +109,84 @@ class OllamaPathTests(unittest.TestCase):
                     dashboard.start_ollama_app()
 
 
+class VramStatusTests(unittest.TestCase):
+    def test_unavailable_when_nvidia_smi_missing(self):
+        with mock.patch("remote_agent_protocol.dashboard.shutil.which", return_value=None):
+            status = dashboard.vram_status()
+        self.assertFalse(status.available)
+        self.assertIn("not found", status.error)
+
+    def test_parses_csv_output_from_the_first_gpu(self):
+        completed = SimpleNamespace(
+            returncode=0, stdout="8192, 16384, 42\n", stderr=""
+        )
+        with (
+            mock.patch(
+                "remote_agent_protocol.dashboard.shutil.which",
+                return_value=r"C:\nvidia-smi.exe",
+            ),
+            mock.patch(
+                "remote_agent_protocol.dashboard.subprocess.run", return_value=completed
+            ),
+        ):
+            status = dashboard.vram_status()
+        self.assertTrue(status.available)
+        self.assertEqual(status.used_mb, 8192)
+        self.assertEqual(status.total_mb, 16384)
+        self.assertEqual(status.gpu_util_percent, 42)
+        self.assertEqual(status.percent, 50.0)
+        self.assertEqual(status.label, "8.0 / 16.0 GB (50%)")
+
+    def test_only_the_first_line_is_used_on_a_multi_gpu_box(self):
+        completed = SimpleNamespace(
+            returncode=0, stdout="1024, 8192, 10\n2048, 8192, 20\n", stderr=""
+        )
+        with (
+            mock.patch(
+                "remote_agent_protocol.dashboard.shutil.which",
+                return_value=r"C:\nvidia-smi.exe",
+            ),
+            mock.patch(
+                "remote_agent_protocol.dashboard.subprocess.run", return_value=completed
+            ),
+        ):
+            status = dashboard.vram_status()
+        self.assertEqual(status.used_mb, 1024)
+
+    def test_unavailable_on_nonzero_return_code(self):
+        completed = SimpleNamespace(returncode=1, stdout="", stderr="driver not loaded")
+        with (
+            mock.patch(
+                "remote_agent_protocol.dashboard.shutil.which",
+                return_value=r"C:\nvidia-smi.exe",
+            ),
+            mock.patch(
+                "remote_agent_protocol.dashboard.subprocess.run", return_value=completed
+            ),
+        ):
+            status = dashboard.vram_status()
+        self.assertFalse(status.available)
+        self.assertEqual(status.error, "driver not loaded")
+
+    def test_unavailable_when_subprocess_raises(self):
+        with (
+            mock.patch(
+                "remote_agent_protocol.dashboard.shutil.which",
+                return_value=r"C:\nvidia-smi.exe",
+            ),
+            mock.patch(
+                "remote_agent_protocol.dashboard.subprocess.run",
+                side_effect=OSError("boom"),
+            ),
+        ):
+            status = dashboard.vram_status()
+        self.assertFalse(status.available)
+        self.assertIn("boom", status.error)
+
+    def test_no_gpu_label(self):
+        status = dashboard.VramHealth(available=False)
+        self.assertEqual(status.label, "No GPU")
+
+
 if __name__ == "__main__":
     unittest.main()

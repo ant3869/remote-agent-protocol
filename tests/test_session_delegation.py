@@ -89,7 +89,14 @@ class SessionDelegationTests(unittest.TestCase):
 
         self.assertEqual(
             list(voice_session._pending_confirmations.values()),
-            [(voice_session._default_agent_backend, "get the Bentonville forecast", None)],
+            [
+                (
+                    voice_session._default_agent_backend,
+                    "get the Bentonville forecast",
+                    None,
+                    "the assistant talked about agent work without a valid delegation marker",
+                )
+            ],
         )
         self.assertEqual(spawned, ["markerless-promise-confirm"])
 
@@ -208,6 +215,7 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
             "hermes",
             "write the client",
             None,
+            "this task changes files, installs software, or otherwise mutates the system",
         )
 
         prompt = await voice_session._maybe_handle_model_control("Actually use httpx instead")

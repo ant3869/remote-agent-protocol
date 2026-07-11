@@ -1,4 +1,8 @@
 import json
+import threading
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from remote_agent_protocol import (
@@ -221,6 +225,59 @@ def test_direct_web_launcher_refuses_a_second_instance(monkeypatch):
 
     # A live sibling's PID must be left alone -- close/write/run never happen.
     assert calls == []
+
+
+def _post_action(port, action, token=None, payload=None):
+    body = json.dumps({"action": action, **(payload or {})}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-Session-Token"] = token
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/action", data=body, headers=headers, method="POST"
+    )
+    return urllib.request.urlopen(req, timeout=5)
+
+
+def test_post_action_requires_a_matching_csrf_token():
+    # A foreign webpage open in the same browser has no way to read this
+    # server's token, so it can't forge a valid X-Session-Token header --
+    # unlike the request body, which a "simple request" (Content-Type: text/
+    # plain) can carry cross-origin without ever triggering a CORS preflight.
+    app = WebVoiceApp()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+
+        for bad_token in (None, "", "wrong-token"):
+            try:
+                _post_action(port, "mute", token=bad_token, payload={"muted": True})
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 403
+            else:
+                raise AssertionError(f"expected 403 for token={bad_token!r}")
+
+        response = _post_action(port, "mute", token=app._csrf_token, payload={"muted": True})
+        assert response.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_index_html_serves_the_real_csrf_token():
+    app = WebVoiceApp()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode()
+        assert f'window.__CSRF_TOKEN__ = "{app._csrf_token}"' in html
+        assert "__CSRF_TOKEN_PLACEHOLDER__" not in html
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_mobile_shell_contains_horizontal_navigation():
@@ -478,6 +535,48 @@ def test_agents_payload_preserves_live_output_lines_and_prompts(monkeypatch, tmp
     assert payload["jobs"][0]["result"] == "Found the log entries."
     assert "statusProtocol" in payload["prompts"]
     assert payload["prompts"]["scopePreamble"]["required"] == ["{cwd}"]
+
+
+def test_agents_payload_keeps_resolved_confirmation_history(monkeypatch, tmp_path):
+    # Regression: a resolved confirmation used to vanish with no trace once
+    # approved/denied, so there was no way to review what was held and why
+    # after the fact -- only the live pending banner ever showed the reason.
+    monkeypatch.setattr(cfg, "APP_STATE_FILE", str(tmp_path / "state.json"))
+    app = WebVoiceApp()
+
+    app._publish(
+        {
+            "type": "agent_confirm_resolved",
+            "token": "confirm-1",
+            "decision": "deny",
+            "agent": "hermes",
+            "task": "delete the old logs",
+            "reason": "this task changes files, installs software, or otherwise mutates the system",
+        }
+    )
+    app._publish(
+        {
+            "type": "agent_confirm_resolved",
+            "token": "confirm-2",
+            "decision": "approve",
+            "agent": "hermes",
+            "task": "check my emails",
+            "reason": "classifier task shares no word with the transcript",
+        }
+    )
+
+    history = app._agents_payload()["confirmHistory"]
+
+    assert len(history) == 2
+    # Newest first.
+    assert history[0]["task"] == "check my emails"
+    assert history[0]["decision"] == "approve"
+    assert history[1]["task"] == "delete the old logs"
+    assert history[1]["decision"] == "deny"
+    assert history[1]["reason"] == (
+        "this task changes files, installs software, or otherwise mutates the system"
+    )
+    assert "resolvedAt" in history[0]
 
 
 def test_agent_prompt_save_persists_and_updates_runtime(monkeypatch, tmp_path):

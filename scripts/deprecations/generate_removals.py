@@ -116,7 +116,17 @@ def render(document: dict) -> str:
 
 
 def _git(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True, text=True)
+    # encoding/errors pinned: the OS-locale default codec crashes subprocess's
+    # internal reader thread on any non-cp1252 byte -- and git output (commit
+    # messages, file contents) is arbitrary and commonly non-ASCII.
+    return subprocess.run(
+        ["git", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def previous_release_tag() -> str | None:

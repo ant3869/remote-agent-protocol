@@ -163,6 +163,71 @@ class TTSHealth:
     label: str
 
 
+@dataclass(frozen=True)
+class VramHealth:
+    """GPU VRAM usage snapshot for the first NVIDIA GPU, via nvidia-smi.
+
+    ``available`` is False both when there's no NVIDIA GPU at all and when the
+    query itself failed -- either way there's nothing to show, and ``error``
+    carries which case it was for logs/diagnostics without the caller needing
+    to branch on it.
+    """
+
+    available: bool
+    used_mb: int = 0
+    total_mb: int = 0
+    gpu_util_percent: int = 0
+    error: str = ""
+
+    @property
+    def percent(self) -> float:
+        """Used/total as a percentage, or 0 if the total is unknown."""
+        return round(100 * self.used_mb / self.total_mb, 1) if self.total_mb else 0.0
+
+    @property
+    def label(self) -> str:
+        """Compact status-chip text for the GUI."""
+        if not self.available:
+            return "No GPU"
+        return f"{self.used_mb / 1024:.1f} / {self.total_mb / 1024:.1f} GB ({self.percent:.0f}%)"
+
+
+def vram_status(timeout: float = 2.0) -> VramHealth:
+    """Query the first GPU's memory usage. Not an error if there's no NVIDIA GPU."""
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return VramHealth(False, error="nvidia-smi not found")
+    try:
+        result = subprocess.run(
+            [
+                exe,
+                "--query-gpu=memory.used,memory.total,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            # OS-locale default codec crashes subprocess's internal reader
+            # thread on any non-cp1252 byte (see cli_agents.py).
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return VramHealth(False, error=str(e))
+    if result.returncode != 0:
+        return VramHealth(False, error=result.stderr.strip() or "nvidia-smi failed")
+    # One line per GPU; a multi-GPU box only ever gets the first reported here.
+    first_line = next((line for line in result.stdout.splitlines() if line.strip()), "")
+    parts = [p.strip() for p in first_line.split(",")]
+    if len(parts) < 3:
+        return VramHealth(False, error="unexpected nvidia-smi output")
+    try:
+        used, total, util = (int(p) for p in parts[:3])
+    except ValueError:
+        return VramHealth(False, error="unparseable nvidia-smi output")
+    return VramHealth(True, used_mb=used, total_mb=total, gpu_util_percent=util)
+
+
 def _endpoint_alive(url: str, timeout: float) -> bool:
     """True if the URL's host answers at all -- even a 404 means it's up."""
     try:

@@ -168,6 +168,66 @@ class ClaudeCodeCliBackend:
             return CodingAgentStatus(True, None, None, exe, f"Error getting status: {e}")
 
 
+class _VersionOnlyCliBackend:
+    """Availability/version check for a CLI with no safe stateless auth probe.
+
+    Codex (`exec`) and Claude Code (`-p`) are one-shot: a no-op prompt is a
+    safe, side-effect-free way to also infer auth state. Hermes's `chat` mode
+    resumes ONE shared on-disk session per agent name (agent_bridge.py), and
+    code-puppy's quick-resume similarly ties into real session state -- a
+    "ping" through either would touch the same session a real delegated turn
+    uses rather than just checking status. So these two report availability
+    and version only; auth_ok stays None ("unknown") rather than guessed.
+    """
+
+    id: str
+    label: str
+    _exe_name: str
+    _version_args: tuple[str, ...] = ("--version",)
+
+    def is_available(self) -> bool:
+        """True if the CLI executable is on PATH."""
+        return bool(shutil.which(self._exe_name))
+
+    def get_status(self) -> CodingAgentStatus:
+        """Run `<cli> --version`; no auth probe (see class docstring)."""
+        exe = shutil.which(self._exe_name)
+        if not exe:
+            return CodingAgentStatus(
+                False, None, None, None, f"Executable '{self._exe_name}' not found in PATH"
+            )
+        try:
+            proc = subprocess.run(
+                [exe, *self._version_args],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            version = proc.stdout.strip() or proc.stderr.strip() if proc.returncode == 0 else None
+            error = None if proc.returncode == 0 else f"'--version' exited {proc.returncode}"
+            return CodingAgentStatus(True, version or None, None, exe, error)
+        except Exception as e:
+            return CodingAgentStatus(True, None, None, exe, f"Error getting status: {e}")
+
+
+class HermesCliBackend(_VersionOnlyCliBackend):
+    """Status checks for the `hermes` CLI."""
+
+    id = "hermes"
+    label = "Hermes Agent"
+    _exe_name = "hermes"
+
+
+class CodePuppyCliBackend(_VersionOnlyCliBackend):
+    """Status checks for the `code-puppy` CLI."""
+
+    id = "code-puppy"
+    label = "Code Puppy"
+    _exe_name = "code-puppy"
+
+
 def get_all_cli_agents() -> list[CodingAgentBackend]:
     """Return every known coding-agent CLI backend."""
-    return [CodexCliBackend(), ClaudeCodeCliBackend()]
+    return [CodexCliBackend(), ClaudeCodeCliBackend(), HermesCliBackend(), CodePuppyCliBackend()]

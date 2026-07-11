@@ -8,6 +8,43 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [1.11.0] - 2026-07-11
+
+### Added
+
+- The main page now shows a live VRAM stat (used / total, GPU utilization)
+  via `nvidia-smi` when an NVIDIA GPU is present, in the topbar and the
+  detailed status dashboard.
+- POST `/api/action` now requires a per-launch session token in a custom
+  header. Without it, any webpage open in the same browser could have
+  silently dispatched or approved a real delegated agent task -- the
+  server had no auth of its own, and a "simple request" (`Content-Type:
+  text/plain`) skips the CORS preflight a browser would otherwise block it
+  with.
+- The Agents panel now keeps a rolling history of resolved confirmations
+  (approved/denied), including *why* each one was held -- previously that
+  reasoning only existed on the live pending banner and vanished the
+  moment you answered it.
+- Added availability/version status checks for the Hermes and Code Puppy
+  CLIs alongside the existing Codex/Claude Code checks (auth state is
+  intentionally not probed for these two -- see cli_agents.py).
+
+### Removed
+
+- Deleted the legacy Tkinter desktop UI (`gui.py` and its five exclusive
+  support modules, ~3,000 lines). It had no process-lifecycle protection
+  of its own, hadn't been touched since the web control center replaced
+  it, and nothing in the app referenced it anymore.
+
+### Fixed
+
+- Fixed an inconsistent `escapeHtml()` gap in the agent-backend status
+  chips (values were server-controlled, so not exploitable, but
+  inconsistent with the rest of the file).
+- Hardened a vendored-tooling script (`scripts/deprecations/
+  generate_removals.py`) against the same subprocess decode crash fixed
+  elsewhere this cycle.
+
 ## [1.10.1] - 2026-07-11
 
 ### Fixed

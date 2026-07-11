@@ -1,7 +1,13 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from remote_agent_protocol.cli_agents import ClaudeCodeCliBackend, CodexCliBackend
+from remote_agent_protocol.cli_agents import (
+    ClaudeCodeCliBackend,
+    CodePuppyCliBackend,
+    CodexCliBackend,
+    HermesCliBackend,
+    get_all_cli_agents,
+)
 
 
 class TestCliAgents(unittest.TestCase):
@@ -66,6 +72,57 @@ class TestCliAgents(unittest.TestCase):
         self.assertFalse(status.auth_ok)
         self.assertEqual(status.executable_path, "/usr/local/bin/claude")
         self.assertIn("Not authenticated", status.error)
+
+
+    @patch("shutil.which")
+    def test_hermes_is_available(self, mock_which):
+        mock_which.return_value = r"C:\hermes\hermes.exe"
+        self.assertTrue(HermesCliBackend().is_available())
+
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    def test_hermes_get_status_never_probes_auth(self, mock_run, mock_which):
+        # Hermes resumes a shared on-disk session per agent name; a status
+        # check must never touch that session the way a real delegated turn
+        # would, so only --version is ever run (one subprocess call, not two).
+        mock_which.return_value = r"C:\hermes\hermes.exe"
+        mock_proc = MagicMock(returncode=0, stdout="Hermes Agent v0.18.2\n", stderr="")
+        mock_run.return_value = mock_proc
+
+        status = HermesCliBackend().get_status()
+
+        self.assertTrue(status.available)
+        self.assertEqual(status.version, "Hermes Agent v0.18.2")
+        self.assertIsNone(status.auth_ok)
+        self.assertIsNone(status.error)
+        mock_run.assert_called_once()
+
+    @patch("shutil.which")
+    def test_code_puppy_is_available(self, mock_which):
+        mock_which.return_value = None
+        self.assertFalse(CodePuppyCliBackend().is_available())
+
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    def test_code_puppy_get_status_success(self, mock_run, mock_which):
+        mock_which.return_value = r"C:\tools\code-puppy.exe"
+        mock_run.return_value = MagicMock(returncode=0, stdout="0.0.614\n", stderr="")
+
+        status = CodePuppyCliBackend().get_status()
+
+        self.assertTrue(status.available)
+        self.assertEqual(status.version, "0.0.614")
+        self.assertEqual(status.executable_path, r"C:\tools\code-puppy.exe")
+
+    @patch("shutil.which", return_value=None)
+    def test_missing_executable_reports_unavailable_not_an_exception(self, _mock_which):
+        status = HermesCliBackend().get_status()
+        self.assertFalse(status.available)
+        self.assertIn("not found in PATH", status.error)
+
+    def test_get_all_cli_agents_includes_all_four_backends(self):
+        ids = {agent.id for agent in get_all_cli_agents()}
+        self.assertEqual(ids, {"codex", "claude-code", "hermes", "code-puppy"})
 
 
 if __name__ == "__main__":

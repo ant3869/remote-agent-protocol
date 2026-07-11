@@ -6,11 +6,13 @@ import asyncio
 import json
 import mimetypes
 import queue
+import secrets
 import sys
 import threading
 import time
 import webbrowser
 from collections import deque
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -106,6 +108,14 @@ class WebVoiceApp:
         self._event_id = 0
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        # Bound to this process, not persisted: the server has no other auth,
+        # so a foreign webpage open in the same browser could otherwise POST
+        # /api/action directly (a "simple request" with Content-Type: text/
+        # plain skips CORS preflight entirely) and dispatch or approve a real
+        # delegated task. A random per-launch token in a custom header closes
+        # that -- a cross-origin fetch() that sets a custom header stops being
+        # a "simple request" and needs a preflight this server never approves.
+        self._csrf_token = secrets.token_urlsafe(32)
         self._persona_config = persona_config.load_config()
         self._personas = persona_config.effective_personas(personas.PERSONAS, self._persona_config)
         self._app_state = app_state.load_state(cfg.APP_STATE_FILE)
@@ -128,11 +138,17 @@ class WebVoiceApp:
         self._session_state = "starting"
         self._health = {"ok": False, "label": "Ollama checking"}
         self._tts_health = {"ok": False, "label": "TTS checking"}
+        self._vram = {"available": False, "label": "VRAM checking"}
         self._latency = dashboard.LatencyState()
         self._models = self._model_choices()
         self._voice_map = dict(voices.labelled() + voicebox.labelled_profiles())
         self._wake_status = self._initial_wake_status()
         self._pending_confirms: list[dict] = []
+        # Resolved confirmations used to just vanish once approved/denied --
+        # nothing but a transient transcript line recorded *why* a task was
+        # held or what the user decided. Bounded so the Agents panel can show
+        # recent history without growing unbounded over a long session.
+        self._confirm_history: deque[dict] = deque(maxlen=30)
         self._agent_jobs: dict[str, dict] = {}
         self._session = self._new_session()
         self._thread: threading.Thread | None = None
@@ -260,6 +276,15 @@ class WebVoiceApp:
             self._health = {"ok": bool(evt.get("ok")), "label": evt.get("label", "Ollama ?")}
         elif kind == "tts_health":
             self._tts_health = {"ok": bool(evt.get("ok")), "label": evt.get("label", "TTS ?")}
+        elif kind == "vram":
+            self._vram = {
+                "available": bool(evt.get("available")),
+                "label": evt.get("label", "VRAM ?"),
+                "percent": evt.get("percent", 0),
+                "usedMb": evt.get("used_mb", 0),
+                "totalMb": evt.get("total_mb", 0),
+                "gpuUtilPercent": evt.get("gpu_util_percent", 0),
+            }
         elif kind == "metric":
             self._latency.update(evt.get("bucket", ""), evt.get("kind", ""), evt.get("value", 0.0))
         elif kind == "turn":
@@ -274,6 +299,15 @@ class WebVoiceApp:
             self._pending_confirms = [
                 row for row in self._pending_confirms if row.get("token") != token
             ]
+            self._confirm_history.append(
+                {
+                    "agent": evt.get("agent", ""),
+                    "task": evt.get("task", ""),
+                    "reason": evt.get("reason", ""),
+                    "decision": evt.get("decision", ""),
+                    "resolvedAt": datetime.now().isoformat(),
+                }
+            )
         elif kind == "agent_job":
             job_id = str(evt.get("job_id", ""))
             if job_id:
@@ -298,6 +332,18 @@ class WebVoiceApp:
                 has_cartesia_key=bool(tts_factory.load_env_value("CARTESIA_API_KEY")),
             )
             self._publish({"type": "tts_health", "ok": tts.ok, "label": tts.label})
+            vram = dashboard.vram_status()
+            self._publish(
+                {
+                    "type": "vram",
+                    "available": vram.available,
+                    "label": vram.label,
+                    "percent": vram.percent,
+                    "used_mb": vram.used_mb,
+                    "total_mb": vram.total_mb,
+                    "gpu_util_percent": vram.gpu_util_percent,
+                }
+            )
             self._stop.wait(4)
 
     def _persona_names(self) -> list[str]:
@@ -477,6 +523,7 @@ class WebVoiceApp:
             "history": self._session.agent_history(),
             "prompts": self._agent_prompt_payload(),
             "status": self._status_payload(),
+            "confirmHistory": list(reversed(self._confirm_history)),
         }
 
     def _cli_diagnostics_payload(self) -> dict:
@@ -586,6 +633,7 @@ class WebVoiceApp:
             "memoryEnabled": cfg.MEMORY_ENABLED,
             "semanticMemoryEnabled": cfg.MEM0_ENABLED,
             "wake": self._wake_payload(),
+            "vram": self._vram,
         }
 
     def _initial_wake_status(self) -> dict:
@@ -947,6 +995,11 @@ class WebVoiceApp:
                 if parsed.path != "/api/action":
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
+                if not secrets.compare_digest(
+                    self.headers.get("X-Session-Token", ""), app._csrf_token
+                ):
+                    self.send_error(HTTPStatus.FORBIDDEN)
+                    return
                 payload = self._read_json()
                 self._send_json(app._action(str(payload.get("action", "")), payload))
 
@@ -963,6 +1016,10 @@ class WebVoiceApp:
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
                 data = target.read_bytes()
+                if rel == "index.html":
+                    data = data.replace(
+                        b"__CSRF_TOKEN_PLACEHOLDER__", app._csrf_token.encode("ascii")
+                    )
                 self.send_response(HTTPStatus.OK)
                 self.send_header(
                     "Content-Type", mimetypes.guess_type(target.name)[0] or "text/plain"

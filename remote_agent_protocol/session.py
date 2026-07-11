@@ -1,7 +1,7 @@
 """VoiceSession -- the shared, reusable core of the local voice agent.
 
-Shared by remote_agent_protocol.terminal and remote_agent_protocol.gui. Owns the Pipecat pipeline and exposes a
-small thread-safe control surface for persona/voice/model/mute/memory/agents.
+Shared by remote_agent_protocol.terminal and remote_agent_protocol.web_gui. Owns the Pipecat pipeline and exposes
+a small thread-safe control surface for persona/voice/model/mute/memory/agents.
 The GUI is a controller/observer, not part of the audio path.
 """
 
@@ -129,8 +129,8 @@ class VoiceSession:
         self._startup_tts_model: str | None = None
         self._startup_tts_options: dict | None = None
 
-        # Delegations held awaiting the user's yes/no: token -> (agent, task, cwd).
-        self._pending_confirmations: dict[str, tuple[str, str, str | None]] = {}
+        # Delegations held awaiting the user's yes/no: token -> (agent, task, cwd, reason).
+        self._pending_confirmations: dict[str, tuple[str, str, str | None, str]] = {}
         self._confirm_counter = itertools.count(1)
         # Consecutive times an agent has "completed" a job by asking for
         # confirmation instead of a real result -- guards against relaunching
@@ -926,7 +926,7 @@ class VoiceSession:
             if repeat_note:
                 reason = f"{reason} {repeat_note}"
             token = f"confirm-{next(self._confirm_counter)}"
-            self._pending_confirmations[token] = (agent, task, cwd)
+            self._pending_confirmations[token] = (agent, task, cwd, reason)
             self._emit(
                 {
                     "type": "agent_confirm",
@@ -1052,9 +1052,18 @@ class VoiceSession:
         if decision is None:
             return None
         token = next(reversed(self._pending_confirmations))
-        agent, task, cwd = self._pending_confirmations.pop(token)
+        agent, task, cwd, reason = self._pending_confirmations.pop(token)
         self._agent_ack_turn = True  # the reply relays the confirm/deny outcome
-        self._emit({"type": "agent_confirm_resolved", "token": token, "decision": decision})
+        self._emit(
+            {
+                "type": "agent_confirm_resolved",
+                "token": token,
+                "decision": decision,
+                "agent": agent,
+                "task": task,
+                "reason": reason,
+            }
+        )
         if decision == "approve":
             execution_task = self._with_delegation_context(task)
             self._spawn(self._bridge.start(agent, execution_task, cwd), name=f"delegate-{agent}")
@@ -1069,9 +1078,10 @@ class VoiceSession:
         if correction is not None:
             if self._pending_confirmations:
                 token = next(reversed(self._pending_confirmations))
-                agent, task, cwd = self._pending_confirmations[token]
+                agent, task, cwd, _reason = self._pending_confirmations[token]
                 revised = f"{task}\n\nUser correction: {correction}"
-                self._pending_confirmations[token] = (agent, revised, cwd)
+                revised_reason = "revised per your spoken correction; still needs confirming"
+                self._pending_confirmations[token] = (agent, revised, cwd, revised_reason)
                 self._emit(
                     {
                         "type": "agent_confirm",
@@ -1079,7 +1089,7 @@ class VoiceSession:
                         "agent": agent,
                         "task": revised,
                         "machine": self._bridge.machine_for(agent),
-                        "reason": "revised per your spoken correction; still needs confirming",
+                        "reason": revised_reason,
                         "transcript": text,
                     }
                 )
@@ -1134,8 +1144,17 @@ class VoiceSession:
         entry = self._pending_confirmations.pop(token, None)
         if entry is None:
             return
-        agent, task, cwd = entry
-        self._emit({"type": "agent_confirm_resolved", "token": token, "decision": decision})
+        agent, task, cwd, reason = entry
+        self._emit(
+            {
+                "type": "agent_confirm_resolved",
+                "token": token,
+                "decision": decision,
+                "agent": agent,
+                "task": task,
+                "reason": reason,
+            }
+        )
         if decision == "approve":
             await self._bridge.start(agent, self._with_delegation_context(task), cwd)
             await self._inject_and_run(
@@ -1332,7 +1351,8 @@ class VoiceSession:
             f"{job.task}\n\nThe user has already confirmed this action -- proceed "
             "without asking again."
         )
-        self._pending_confirmations[token] = (job.agent, approved_task, job.cwd)
+        mid_task_reason = "the agent needs your OK before continuing"
+        self._pending_confirmations[token] = (job.agent, approved_task, job.cwd, mid_task_reason)
         self._emit(
             {
                 "type": "agent_confirm",
@@ -1340,7 +1360,7 @@ class VoiceSession:
                 "agent": job.agent,
                 "task": job.task,
                 "machine": self._bridge.machine_for(job.agent),
-                "reason": "the agent needs your OK before continuing",
+                "reason": mid_task_reason,
                 "transcript": prompt_text,
             }
         )

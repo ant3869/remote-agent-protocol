@@ -776,6 +776,38 @@ textarea { resize: vertical; line-height: 1.5; }
   white-space: pre-wrap;
 }
 
+.agent-confirm-history-panel {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-panel);
+}
+.confirm-history-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  max-height: 320px;
+  overflow: auto;
+}
+.confirm-history-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-field);
+}
+.confirm-history-row p { margin: 0; font-size: 12px; color: var(--text-secondary); }
+.confirm-history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.confirm-history-head strong { text-transform: capitalize; }
+.confirm-history-head time { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+
 .agent-prompts-panel { margin-top: 12px; }
 .prompt-editor-grid {
   display: grid;

@@ -13,6 +13,7 @@ const state = {
   agentJobs: {},
   agentHistory: [],
   agentPrompts: null,
+  confirmHistory: [],
   selectedAgentJobId: null,
   selectedMemory: null,
   sending: false,
@@ -104,6 +105,12 @@ function healthTone(health) {
   return /check|start/i.test(health?.label || "") ? "status-warning" : "status-error";
 }
 
+function vramTone(percent) {
+  if (percent >= 95) return "status-error";
+  if (percent >= 85) return "status-warning";
+  return "status-success";
+}
+
 function wakeLabel(phase) {
   return {
     idle: "Wake word idle",
@@ -122,7 +129,10 @@ function wakeLabel(phase) {
 async function post(action, payload = {}) {
   const response = await fetch("/api/action", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Session-Token": window.__CSRF_TOKEN__ || "",
+    },
     body: JSON.stringify({ action, ...payload }),
   });
   const data = await response.json();
@@ -261,6 +271,11 @@ function renderStatus() {
   setPillTone("sessionPill", s.session === "ready" ? "status-success" : (["failed", "stopped"].includes(s.session) ? "status-error" : "status-warning"));
   setPillTone("ollamaPill", healthTone(s.health));
   setPillTone("ttsPill", healthTone(s.ttsHealth));
+  $("vramPillRow").hidden = !s.vram?.available;
+  if (s.vram?.available) {
+    $("vramPill").textContent = s.vram.label;
+    setPillTone("vramPill", vramTone(s.vram.percent));
+  }
   const activeAgents = s.activeAgentCount || 0;
   $("agentsPill").textContent = activeAgents ? `${activeAgents} active` : "idle";
   $("agentsPill").closest(".status-pill").classList.toggle("busy", activeAgents > 0);
@@ -525,7 +540,7 @@ function renderAgents(s) {
     const detail = active ? (job.action || job.state || job.status) : "idle";
     const chip = document.createElement("article");
     chip.className = `agent-chip${active ? " active" : ""}`;
-    chip.innerHTML = `<strong>${backend}</strong><span>${s.agentMachines[backend] || "local"} / ${escapeHtml(detail)}</span>`;
+    chip.innerHTML = `<strong>${escapeHtml(backend)}</strong><span>${escapeHtml(s.agentMachines[backend] || "local")} / ${escapeHtml(detail)}</span>`;
     strip.appendChild(chip);
   });
 }
@@ -565,6 +580,7 @@ async function loadAgentsPage() {
   state.status = data.status || state.status;
   state.agentHistory = data.history || [];
   state.agentPrompts = data.prompts || state.agentPrompts;
+  state.confirmHistory = data.confirmHistory || [];
   (data.jobs || []).forEach((job) => {
     if (!job.job_id) return;
     const old = state.agentJobs[job.job_id] || {};
@@ -600,6 +616,23 @@ function renderAgentsPage(options = {}) {
   renderAgentJobList();
   renderAgentDetail();
   renderAgentPrompts(Boolean(options.forcePrompts));
+  renderConfirmHistory();
+}
+
+function renderConfirmHistory() {
+  const list = $("confirmHistoryList");
+  if (!list) return;
+  const rows = state.confirmHistory || [];
+  $("confirmHistoryCount").textContent = `${rows.length} resolved`;
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty-state"><strong>No confirmations resolved yet.</strong><span>Held delegations you approve or deny will show up here with the reason they were held.</span></div>';
+    return;
+  }
+  list.innerHTML = rows.map((row) => {
+    const decisionTone = row.decision === "approve" ? "status-success" : "status-error";
+    const decisionLabel = row.decision === "approve" ? "Approved" : "Denied";
+    return `<article class="confirm-history-row"><div class="confirm-history-head"><strong>${escapeHtml(row.agent || "agent")}</strong><b class="${decisionTone}">${decisionLabel}</b><time>${escapeHtml(fmtClock(row.resolvedAt))}</time></div><p>${escapeHtml(compactText(row.task))}</p><p class="muted">${escapeHtml(row.reason || "")}</p></article>`;
+  }).join("");
 }
 
 function renderAgentRoster() {
@@ -749,6 +782,9 @@ function renderStatusDashboard(s) {
     ["Memory", s.semanticMemoryEnabled ? "Semantic enabled" : "Short term only", s.memoryEnabled ? "success" : "warning"],
     ["Default agent", s.toolUser, "info"],
   ];
+  if (s.vram?.available) {
+    rows.push(["VRAM", s.vram.label, vramTone(s.vram.percent).replace("status-", "")]);
+  }
   $("statusDashboard").innerHTML = rows.map(([label, value, tone]) => (
     `<article class="status-row-card"><span class="status-icon">${label.slice(0, 2).toUpperCase()}</span><div><strong>${label}</strong><p class="muted">${value}</p></div><b class="${tone}">${tone}</b></article>`
   )).join("");
