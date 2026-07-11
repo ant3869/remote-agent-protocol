@@ -184,9 +184,7 @@ include = ["pipecat*", "remote_agent_protocol*"]
 [tool.setuptools.package-data]
 "pipecat" = ["py.typed"]
 "remote_agent_protocol" = [
-    "web_app/app.js",
-    "web_app/index.html",
-    "web_app/styles.css",
+    "web_app/**/*",
 ]
 "pipecat.audio.dtmf" = [
     "src/pipecat/audio/dtmf/dtmf-0.wav",

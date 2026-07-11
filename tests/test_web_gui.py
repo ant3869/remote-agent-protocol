@@ -934,3 +934,21 @@ def test_avatar_audio_tap_sits_between_tts_and_local_output():
 
     assert output_block.index("self._tts") < output_block.index("AvatarAudioTap(")
     assert output_block.index("AvatarAudioTap(") < output_block.index("transport.output()")
+
+
+def test_avatar_vendor_and_metadata_files_are_declared():
+    metadata = json.loads(
+        (WEB_APP / "assets/avatars/butler/metadata.json").read_text(encoding="utf-8")
+    )
+    version = (WEB_APP / "vendor/three/VERSION").read_text(encoding="utf-8").strip()
+    project = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    assert metadata["id"] == "butler"
+    assert metadata["model"] is None
+    assert metadata["fallback"] == "procedural-butler"
+    assert version == "0.180.0"
+    assert '"web_app/**/*"' in project
+    assert (WEB_APP / "vendor/three/LICENSE").is_file()
+    assert (WEB_APP / "vendor/three/three.module.min.js").is_file()
+    assert (WEB_APP / "vendor/three/addons/loaders/GLTFLoader.js").is_file()
+    assert (WEB_APP / "vendor/three/addons/utils/BufferGeometryUtils.js").is_file()
