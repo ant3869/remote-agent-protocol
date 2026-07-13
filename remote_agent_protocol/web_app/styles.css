@@ -966,10 +966,46 @@ textarea { resize: vertical; line-height: 1.5; }
 .avatar-panel-body { position: relative; padding: 0 1rem 1rem; }
 .avatar-canvas-host { width: 100%; min-height: 260px; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: 14px; background: var(--surface-raised); }
 .avatar-canvas-host canvas { display: block; width: 100%; height: 100%; min-height: 260px; }
+.avatar-canvas-host.avatar-visage {
+  position: relative;
+  background: radial-gradient(120% 90% at 50% 32%, #0a1626 0%, #050b16 55%, #02040b 100%);
+  border-color: rgba(56, 189, 248, 0.22);
+  box-shadow: inset 0 0 46px rgba(1, 4, 10, 0.9), 0 0 22px rgba(34, 211, 238, 0.07);
+}
+/* CRT transmission overlay: fine scanlines plus an occasional drifting streak
+   (the panel-wide reduced-motion rule below freezes the streak). */
+.avatar-canvas-host.avatar-visage::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    linear-gradient(to bottom, transparent 0%, rgba(125, 211, 252, 0.05) 49%, rgba(165, 224, 255, 0.09) 50%, transparent 52%) no-repeat 0 -30px / 100% 26px,
+    repeating-linear-gradient(to bottom, rgba(148, 220, 255, 0.028) 0 1px, transparent 1px 3px);
+  mix-blend-mode: screen;
+  animation: avatar-crt-streak 11s linear infinite;
+}
+/* Vignette, rounded-corner falloff, and faint static noise. */
+.avatar-canvas-host.avatar-visage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 1;
+  background:
+    radial-gradient(130% 105% at 50% 42%, transparent 58%, rgba(1, 4, 10, 0.5) 88%, rgba(0, 2, 6, 0.85) 100%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+}
+@keyframes avatar-crt-streak {
+  0%, 82% { background-position: 0 -30px, 0 0; }
+  100% { background-position: 0 calc(100% + 30px), 0 0; }
+}
 .avatar-fallback { position: absolute; inset: 0 1rem 3.2rem; display: none; place-items: center; overflow: hidden; pointer-events: none; }
 .avatar-fallback.active { display: grid; }
-.avatar-fallback-head { width: 88px; height: 112px; border-radius: 48% 48% 42% 42%; background: var(--surface-raised); border: 1px solid var(--border-strong); box-shadow: 0 18px 50px rgba(0, 0, 0, .35); }
-.avatar-fallback-collar { position: absolute; top: 62%; width: 150px; height: 80px; border-radius: 50% 50% 18% 18%; background: var(--surface-elevated); border: 1px solid var(--border-subtle); }
+.avatar-fallback-head { width: 88px; height: 112px; border-radius: 48% 48% 42% 42%; background: transparent; border: 1px solid rgba(56, 189, 248, 0.65); box-shadow: 0 0 18px rgba(34, 211, 238, 0.35), inset 0 0 26px rgba(34, 211, 238, 0.12); }
+.avatar-fallback-collar { position: absolute; top: 62%; width: 150px; height: 80px; border-radius: 50% 50% 18% 18%; background: transparent; border: 1px solid rgba(56, 189, 248, 0.3); }
 .avatar-status-row { display: flex; justify-content: space-between; gap: .75rem; padding-top: .75rem; color: var(--text-muted); font-size: .8rem; text-transform: capitalize; }
 .avatar-panel.hide-state-labels .avatar-status-row { display: none; }
 .avatar-panel.collapsed { margin-bottom: .5rem; }

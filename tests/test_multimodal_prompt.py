@@ -114,6 +114,12 @@ class MultimodalPromptBundleTests(unittest.TestCase):
         self.assertEqual(len(candidates), 3)
         self.assertTrue(any("Hermes-Agent" in item for item in candidates))
 
+    def test_task_local_negative_constraint_is_not_remembered(self):
+        bundle = multimodal_prompt.MultimodalPromptBundle()
+        bundle.set_text("Audit the codebase, but don't change any code.")
+
+        self.assertEqual(bundle.preference_candidates(), [])
+
     def test_remove_attachment_updates_context_order(self):
         bundle = multimodal_prompt.MultimodalPromptBundle()
         bundle.add_attachment(

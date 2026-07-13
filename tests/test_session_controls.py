@@ -35,6 +35,27 @@ class DefaultBackendFromPersonaTests(unittest.TestCase):
         self.assertEqual(session.default_agent_backend(), "code-puppy")
 
 
+class AgentVoiceControlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_controls_are_local_and_emit_persistable_change(self):
+        events: list[dict] = []
+        voice_session = session_mod.VoiceSession(personas.DEFAULT_PERSONA, on_event=events.append)
+
+        listed = await voice_session._maybe_handle_model_control("list agents")
+        current = await voice_session._maybe_handle_model_control("what is my default agent")
+        changed = await voice_session._maybe_handle_model_control(
+            "make code puppy my default agent"
+        )
+
+        self.assertIn("available agents", listed)
+        self.assertIn("default agent", current)
+        self.assertIn("code-puppy", changed)
+        self.assertEqual(voice_session.default_agent_backend(), "code-puppy")
+        self.assertIn(
+            {"type": "default_agent_changed", "agent": "code-puppy"},
+            events,
+        )
+
+
 class MutePersistenceTests(unittest.TestCase):
     def test_mute_before_build_is_remembered(self):
         session = session_mod.VoiceSession(personas.DEFAULT_PERSONA)

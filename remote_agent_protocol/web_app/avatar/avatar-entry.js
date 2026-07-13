@@ -54,8 +54,21 @@ async function sync() {
   scene?.update({ runtime, resolved, profile, settings });
 }
 
+// Development/debug surface: delegates into the active scene (no-ops while no
+// scene exists). Exposed on the existing window.remoteAgentAvatar object.
+const debugApi = {};
+for (const method of [
+  "setState", "setEmotion", "setSpeaking", "setAudioLevel", "setLookTarget",
+  "setReducedMotion", "triggerGlitch", "setGlitchesEnabled", "reset", "getDiagnostics",
+]) {
+  debugApi[method] = (...args) => scene?.debug?.[method]?.(...args);
+}
+
 const api = {
   updateRuntime(next) { runtime = { ...runtime, ...next }; void sync(); },
+  triggerGlitch(type, strength) { return scene?.debug?.triggerGlitch(type, strength) ?? false; },
+  getDiagnostics() { return scene?.debug?.getDiagnostics() ?? null; },
+  debug: debugApi,
   updateSettings(next) {
     const previousKey = `${settings.avatarId}:${settings.quality}`;
     settings = normalizeAvatarSettings(next, motionQuery?.matches || false);

@@ -36,7 +36,7 @@ _CONTEXT_REFERENCE_RE = re.compile(
     re.I,
 )
 _PREFERENCE_RE = re.compile(
-    r"\b(?:always|never|don't|do not|dont|default to|when i|remember|call this|call the|treat them)\b",
+    r"\b(?:always|never|default to|when i|remember|from now on|i prefer|my preference|call this|call the|treat them)\b",
     re.IGNORECASE,
 )
 

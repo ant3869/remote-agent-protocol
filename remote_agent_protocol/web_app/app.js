@@ -161,6 +161,7 @@ async function poll() {
     if (!state.connectionLost) {
       state.connectionLost = true;
       addMessage("sys", "System", `UI connection lost: ${error.message}`);
+      syncAvatarRuntime();
     }
   } finally {
     setTimeout(poll, state.connectionLost ? 2000 : 450);
@@ -263,6 +264,7 @@ function avatarRuntimeSnapshot() {
       && !state.avatar.userSpeaking
       && (s.activeAgentCount || 0) === 0,
     error: s.session === "failed" || Boolean(state.avatar.failedAt && Date.now() - state.avatar.failedAt < 5000),
+    connectionLost: Boolean(state.connectionLost),
     latestAssistantText: state.avatar.latestAssistantText,
   };
 }
@@ -728,7 +730,8 @@ function renderAgentRoster() {
     const detail = live ? compactText(live.action || live.state || live.task, "Working") : (state.status.agentMachines?.[backend] || "local");
     const row = document.createElement("article");
     row.className = `agent-roster-row ${status}`;
-    row.innerHTML = `<strong>${escapeHtml(backend)}</strong><span>${escapeHtml(detail)}</span><b>${escapeHtml(status)}</b>`;
+    const label = backend === state.status.toolUser ? `${backend} · Default` : backend;
+    row.innerHTML = `<strong>${escapeHtml(label)}</strong><span>${escapeHtml(detail)}</span><b>${escapeHtml(status)}</b>`;
     roster.appendChild(row);
   });
 }

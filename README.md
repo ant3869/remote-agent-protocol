@@ -29,6 +29,12 @@ real-time audio pipeline.
   conversation snapshot so contextual references survive the handoff.
 - Completed jobs speak the agent's substantive result, while live tool, step,
   and last-completed fields continue advancing in the Agents panel.
+- The selected tool user is the default for unnamed work, not the only agent:
+  address Hermes, Code Puppy, Codex, or Claude Code explicitly for one request,
+  then unnamed work returns to the persisted default automatically.
+- The companion avatar is a locally rendered holographic butler with expressive
+  gaze, phrase-shaped lip sync, state-aware scanlines/glitches, quality tiers,
+  reduced-motion behavior, and no CDN dependency.
 - Optional multi-wake persona routing (`WAKE_WORD_ENABLED=true` in `.env` or
   Wake Word mode in the UI): locally installed openwakeword models are matched
   to personas, repo-local models under `wake_word/wake_models` are discovered,

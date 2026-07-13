@@ -87,10 +87,13 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
   decision is logged; capability-state audits bypass the classifier, and a
   markerless promise creates a real pending confirmation for the original
   request instead of relying on another LLM response.
-- Directly addressed agents are deterministic, contextual handoffs include a
-  bounded untrusted transcript snapshot, and corrections cancel the newest
-  job before a revised job can launch. Concrete coding tasks prefer the
-  configured Code Puppy backend; other work retains the persona/default agent.
+- Directly addressed agents are deterministic and apply to one request only:
+  forms such as `Hermes, ...`, `use Hermes to ...`, and `ask Code Puppy to ...`
+  override the persisted default without changing it. Unnamed work returns to
+  the default. `list agents`, `what is my default agent`, and `make Hermes my
+  default agent` are local controls; a deliberate default change persists.
+  Contextual handoffs include a bounded untrusted transcript snapshot, and
+  corrections cancel the newest job before a revised job can launch.
 - Agent work is asynchronous and streams to a dedicated console.
 - STT, TTS, personas, model choice, wake word, memory, agent completion
   announcements, and audio devices are independently configurable (most of it

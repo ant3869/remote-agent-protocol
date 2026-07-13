@@ -1,12 +1,12 @@
 {
   "id": "butler",
-  "label": "Butler",
+  "label": "Holo Butler",
   "model": null,
-  "fallback": "procedural-butler",
+  "fallback": "procedural-visage",
   "scale": 1.0,
   "cameraTarget": [
     0,
-    1.55,
+    0.95,
     0
   ],
   "controls": {

@@ -26,9 +26,7 @@ def test_silence_produces_closed_mouth_envelope():
 
 
 def test_pcm_envelope_is_normalized_and_bounded():
-    envelope = compute_pcm16_envelope(
-        pcm16(32767, -32768, 16384, -16384), 24000, 1, timestamp=7.0
-    )
+    envelope = compute_pcm16_envelope(pcm16(32767, -32768, 16384, -16384), 24000, 1, timestamp=7.0)
 
     expected_rms = math.sqrt((32767**2 + 32768**2 + 16384**2 + 16384**2) / 4) / 32768
     assert envelope.rms == pytest.approx(expected_rms)

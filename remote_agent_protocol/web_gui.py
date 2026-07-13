@@ -326,6 +326,10 @@ class WebVoiceApp:
                 elif isinstance(evt.get("lines"), list):
                     lines = list(evt["lines"])[-250:]
                 self._agent_jobs[job_id] = {**old, **evt, "lines": lines}
+        elif kind == "default_agent_changed":
+            agent = str(evt.get("agent", ""))
+            if agent in cfg.AGENT_BACKENDS:
+                self._save_state()
         elif kind == "wake":
             self._wake_status = {**self._wake_status, **evt}
 

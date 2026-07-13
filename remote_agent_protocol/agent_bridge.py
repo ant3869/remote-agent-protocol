@@ -302,7 +302,7 @@ def set_status_protocol(text: str) -> None:
 
 
 def with_scope(task: str, cwd: str | None, preamble: str) -> str:
-    """Prepend the scope preamble so agents know the cwd is not the subject.
+    """Add scope guidance after the task so agents know the cwd is not the subject.
 
     Without it, a coding agent handed a vague task treats whatever directory
     it is standing in as the thing to change (jess_runtime.log 2026-07-05
@@ -310,7 +310,7 @@ def with_scope(task: str, cwd: str | None, preamble: str) -> str:
     """
     if not preamble:
         return task
-    return f"{preamble.format(cwd=cwd or 'unspecified')}\n\n{task}"
+    return f"{task}\n\n{preamble.format(cwd=cwd or 'unspecified')}"
 
 
 def resolve_cwd(cwd: str | None, workspace_dir: str | None) -> str | None:
@@ -682,7 +682,7 @@ class AgentBridge:
             model_targets: Agent/provider mappings for deterministic model overrides.
             workspace_dir: Default cwd for jobs started without one; None
                 inherits the host process directory (the old behavior).
-            scope_preamble: Text prepended to every task ({cwd} placeholder);
+            scope_preamble: Text added after every task ({cwd} placeholder);
                 empty disables it.
             host_repo: Git repository checked for modification by each job;
                 None or empty disables the check.
@@ -797,7 +797,11 @@ class AgentBridge:
         wait here. Other backends have no shared session and are unaffected.
         """
         agent = job.agent
-        lock = self._session_locks.setdefault(agent, asyncio.Lock()) if agent in _HERMES_SESSION_AGENTS else None
+        lock = (
+            self._session_locks.setdefault(agent, asyncio.Lock())
+            if agent in _HERMES_SESSION_AGENTS
+            else None
+        )
         if lock is not None and lock.locked():
             job.status = STATUS_WAITING
             job.state = STATE_WAITING
@@ -882,6 +886,18 @@ class AgentBridge:
         if proc is None:
             return
         await self._terminate(proc)
+
+    async def cancel_active(self, agent: str | None = None, *, all_jobs: bool = False) -> int:
+        """Cancel the newest matching job, or every matching active job."""
+        jobs = [
+            job
+            for job in reversed(self._jobs.values())
+            if job.status in _ACTIVE_STATUSES and (agent is None or job.agent == agent)
+        ]
+        if not all_jobs:
+            jobs = jobs[:1]
+        await asyncio.gather(*(self.cancel(job.job_id) for job in jobs))
+        return len(jobs)
 
     async def replace_latest(self, correction: str) -> str | None:
         """Cancel the newest active job, then restart it with user correction context."""

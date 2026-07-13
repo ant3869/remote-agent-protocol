@@ -52,8 +52,7 @@ class PureHelperTests(unittest.TestCase):
 
     def test_build_command_for_codex(self):
         cmd = agent_bridge.build_command(
-            ["codex", "exec", "--sandbox", "danger-full-access", "{task}"],
-            "build a thing"
+            ["codex", "exec", "--sandbox", "danger-full-access", "{task}"], "build a thing"
         )
         self.assertEqual(
             cmd,
@@ -61,10 +60,7 @@ class PureHelperTests(unittest.TestCase):
         )
 
     def test_build_command_for_claude_code(self):
-        cmd = agent_bridge.build_command(
-            ["claude", "-p", "{task}"],
-            "write some tests"
-        )
+        cmd = agent_bridge.build_command(["claude", "-p", "{task}"], "write some tests")
         self.assertEqual(
             cmd,
             ["claude", "-p", "write some tests"],
@@ -100,12 +96,12 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(label, "OpenAI GPT-5.5")
         self.assertEqual(bridge._model_overrides["code-puppy"], ["--model", "chatgpt-gpt-5.5"])
 
-    def test_scope_preamble_is_prepended_with_cwd(self):
+    def test_scope_preamble_follows_task_so_prompt_hooks_see_the_task(self):
         wrapped = agent_bridge.with_scope(
             "do a thing", "C:/sandbox", "[Scope: workspace is {cwd}, hands off.]"
         )
-        self.assertTrue(wrapped.startswith("[Scope: workspace is C:/sandbox, hands off.]"))
-        self.assertTrue(wrapped.endswith("do a thing"))
+        self.assertTrue(wrapped.startswith("do a thing"))
+        self.assertTrue(wrapped.endswith("[Scope: workspace is C:/sandbox, hands off.]"))
 
     def test_empty_scope_preamble_leaves_task_untouched(self):
         self.assertEqual(agent_bridge.with_scope("do a thing", "C:/sandbox", ""), "do a thing")
@@ -714,6 +710,20 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(calls[1][0:2], ("start", "hermes"))
         self.assertIn("actually use httpx instead", calls[1][2])
         self.assertTrue(calls[1][3])
+
+    def test_cancel_active_can_stop_all_jobs_for_one_agent(self):
+        async def scenario():
+            bridge = agent_bridge.AgentBridge({}, lambda _event: None)
+            for job_id, agent in (("job-1", "hermes"), ("job-2", "hermes"), ("job-3", "codex")):
+                bridge._jobs[job_id] = agent_bridge.AgentJob(job_id, agent, "task")
+            bridge.cancel = AsyncMock()
+
+            count = await bridge.cancel_active("hermes", all_jobs=True)
+            return count, bridge.cancel.await_args_list
+
+        count, calls = self._run(scenario())
+        self.assertEqual(count, 2)
+        self.assertEqual([call.args[0] for call in calls], ["job-2", "job-1"])
 
     def test_replace_during_start_never_launches_superseded_job(self):
         events = []

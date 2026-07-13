@@ -368,13 +368,7 @@ AGENT_BACKENDS = {
         "-p",
         "{task}",
     ],
-    "codex": [
-        "codex",
-        "exec",
-        "--sandbox",
-        "danger-full-access",
-        "{task}"
-    ],
+    "codex": ["codex", "exec", "--sandbox", "danger-full-access", "{task}"],
     "claude-code": [
         "claude",
         "-p",
@@ -383,7 +377,7 @@ AGENT_BACKENDS = {
         # silence timeout kills it (jess_runtime.log 2026-07-10 20:00-20:05).
         # codex avoids the same trap via --sandbox danger-full-access above.
         "--dangerously-skip-permissions",
-        "{task}"
+        "{task}",
     ],
     **_parse_command_map(_env("AGENT_BACKENDS_JSON", ""), "AGENT_BACKENDS_JSON"),
 }
@@ -452,7 +446,7 @@ AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_histo
 # keeps an agent from ever waking up inside its host's source tree.
 AGENT_WORKSPACE_DIR = _env("AGENT_WORKSPACE_DIR", str(DATA_DIR / "agent_workspace"))
 
-# Scope preamble prepended to every dispatched task (the status protocol is
+# Scope guidance added after every dispatched task (the status protocol is
 # appended). A coding agent handed a vague task treats whatever directory it
 # stands in as the thing to change; this tells it not to.
 AGENT_SCOPE_PREAMBLE = (
@@ -530,6 +524,8 @@ AGENT_SPOKEN_ALIASES = {
     "puppy": "code-puppy",
     "mock": "mock",
     "the mock agent": "mock",
+    "codex": "codex",
+    "claude code": "claude-code",
 }
 
 # Implicit delegation: no agent named, but the request is clearly a real-world

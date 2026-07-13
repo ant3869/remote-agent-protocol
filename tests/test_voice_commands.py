@@ -3,7 +3,14 @@ import unittest
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import voice_commands
 
-BACKENDS = {"mock": [], "hermes": [], "hermes-yolo": [], "code-puppy": []}
+BACKENDS = {
+    "mock": [],
+    "hermes": [],
+    "hermes-yolo": [],
+    "code-puppy": [],
+    "codex": [],
+    "claude-code": [],
+}
 ALIASES = {
     "hermes": "hermes",
     "hermes yolo": "hermes-yolo",
@@ -11,6 +18,8 @@ ALIASES = {
     "puppy": "code-puppy",
     "mock": "mock",
     "the mock agent": "mock",
+    "codex": "codex",
+    "claude code": "claude-code",
 }
 
 
@@ -49,6 +58,33 @@ class ModelSwitchCommandTests(unittest.TestCase):
         self.assertFalse(voice_commands.is_retry_request("tell me why retries matter"))
 
 
+class AgentControlCommandTests(unittest.TestCase):
+    def test_list_agents(self):
+        self.assertEqual(
+            voice_commands.parse_agent_control("list agents", BACKENDS, ALIASES),
+            ("list", None),
+        )
+
+    def test_get_default_agent(self):
+        self.assertEqual(
+            voice_commands.parse_agent_control("what is my default agent", BACKENDS, ALIASES),
+            ("get_default", None),
+        )
+
+    def test_set_default_agent(self):
+        self.assertEqual(
+            voice_commands.parse_agent_control(
+                "make code puppy my default agent", BACKENDS, ALIASES
+            ),
+            ("set_default", "code-puppy"),
+        )
+
+    def test_unknown_default_agent_is_rejected(self):
+        self.assertIsNone(
+            voice_commands.parse_agent_control("make hal my default agent", BACKENDS, ALIASES)
+        )
+
+
 class ParseDelegationTests(unittest.TestCase):
     # -- real utterance from ant's logs that previously got vibed at ---------
     def test_real_utterance_tell_hermes_to_write_a_file(self):
@@ -84,6 +120,29 @@ class ParseDelegationTests(unittest.TestCase):
             parse("please ask hermes yolo to clean up my downloads folder"),
             ("hermes-yolo", "clean up my downloads folder"),
         )
+
+    def test_natural_explicit_forms_target_one_agent(self):
+        expected = {
+            "use hermes to check my email": ("hermes", "check my email"),
+            "ask code puppy to inspect this repository": (
+                "code-puppy",
+                "inspect this repository",
+            ),
+            "have codex diagnose hermes": ("codex", "diagnose hermes"),
+            "tell claude code to run the tests": ("claude-code", "run the tests"),
+        }
+        for text, result in expected.items():
+            with self.subTest(text=text):
+                self.assertEqual(parse(text), result)
+
+    def test_direct_question_reaches_named_agent(self):
+        self.assertEqual(
+            parse("Hermes, what do you think about this?"),
+            ("hermes", "what do you think about this"),
+        )
+
+    def test_empty_direct_address_does_not_dispatch(self):
+        self.assertIsNone(parse("Hermes?"))
 
     # -- must NOT trigger (also straight from the logs) ----------------------
     def test_question_about_past_does_not_trigger(self):
@@ -277,6 +336,19 @@ class ParseTaskCorrectionTests(unittest.TestCase):
 
     def test_plain_disagreement_is_not_a_task_correction(self):
         self.assertIsNone(voice_commands.parse_task_correction("No, I don't think so"))
+
+
+class ParseAgentCancelTests(unittest.TestCase):
+    def test_named_all_jobs(self):
+        self.assertEqual(
+            voice_commands.parse_agent_cancel(
+                "Cancel all active Hermes jobs", {"hermes": "hermes"}
+            ),
+            ("hermes", True),
+        )
+
+    def test_purchase_or_appointment_is_not_agent_control(self):
+        self.assertIsNone(voice_commands.parse_agent_cancel("Cancel my appointment", {}))
 
 
 class ParseCapabilityRequestTests(unittest.TestCase):

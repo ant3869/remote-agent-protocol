@@ -76,7 +76,10 @@ class SingleInstanceLockTests(unittest.TestCase):
             GetLastError=lambda: 0,
             CloseHandle=lambda _h: None,
         )
-        with _win32(), patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)):
+        with (
+            _win32(),
+            patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)),
+        ):
             self.assertTrue(process_guard.acquire_single_instance_lock("test-mutex"))
         self.assertEqual(process_guard._mutex_handle, 42)
         process_guard._mutex_handle = None
@@ -89,7 +92,10 @@ class SingleInstanceLockTests(unittest.TestCase):
             GetLastError=lambda: process_guard._ERROR_ALREADY_EXISTS,
             CloseHandle=closed.append,
         )
-        with _win32(), patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)):
+        with (
+            _win32(),
+            patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)),
+        ):
             self.assertFalse(process_guard.acquire_single_instance_lock("test-mutex"))
         self.assertIsNone(process_guard._mutex_handle)
         self.assertEqual(closed, [42])
@@ -106,7 +112,10 @@ class CloseHandlerTests(unittest.TestCase):
         kernel32 = SimpleNamespace(
             SetConsoleCtrlHandler=lambda handler, add: registered.append(handler) or True,
         )
-        with _win32(), patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)):
+        with (
+            _win32(),
+            patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)),
+        ):
             process_guard.install_close_handler(on_close)
         self.assertEqual(len(registered), 1)
         return registered[0]

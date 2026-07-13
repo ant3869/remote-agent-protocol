@@ -25,7 +25,9 @@ def test_run_follows_process_guard_then_builds_and_runs_the_session(monkeypatch)
     monkeypatch.setattr(
         terminal, "_build_default_session", lambda: calls.append("build") or mock.Mock()
     )
-    monkeypatch.setattr(terminal.dashboard, "stop_loaded_models", lambda host: calls.append("unload") or 0)
+    monkeypatch.setattr(
+        terminal.dashboard, "stop_loaded_models", lambda host: calls.append("unload") or 0
+    )
 
     async def fake_main(session):
         calls.append("main")
@@ -41,7 +43,9 @@ def test_run_releases_lock_and_unloads_models_after_failure(monkeypatch):
     calls = []
     _patch_guard(monkeypatch, calls)
     monkeypatch.setattr(terminal, "_build_default_session", lambda: mock.Mock())
-    monkeypatch.setattr(terminal.dashboard, "stop_loaded_models", lambda host: calls.append("unload") or 0)
+    monkeypatch.setattr(
+        terminal.dashboard, "stop_loaded_models", lambda host: calls.append("unload") or 0
+    )
 
     async def failing_main(session):
         calls.append("main")

@@ -8,6 +8,63 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
 see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
+## [Unreleased]
+
+## [1.12.0] - 2026-07-12
+
+### Changed
+
+- The selected tool user is now an actual default rather than an exclusive
+  route: natural one-turn addressing can target Hermes, Code Puppy, Codex, or
+  Claude Code without changing that default. Voice commands can list agents,
+  report the default, or deliberately change and persist it, and the Agents
+  roster labels the current default.
+- The animated companion avatar is now a **scanline retro holographic
+  butler**: a stylized male bust with swept-back hair, a curled mustache,
+  an animated diagnostic monocle, curved expressive brows, shaped lips,
+  a bow tie, lapels, and jacket shoulders, rendered as a slightly
+  unstable cyan hologram. Every surface carries CRT transmission
+  scanlines, and a structured glitch scheduler produces micro-flickers,
+  horizontal tears (shader band displacement), channel splits
+  (violet/magenta echoes), transmission dropouts, point scatters,
+  monocle desyncs, data fragments, and a boot-up reconstruction sweep --
+  paced by assistant state (calm while speaking, stormy on error, near
+  silent while sleeping) and disabled down to flicker under reduced
+  motion. States now keep the figure cyan and move restrained accents
+  instead of recoloring the whole avatar. The metadata now selects the richer
+  `procedural-visage` fallback; conventional GLTF/procedural rigs remain
+  supported by the shared avatar loader.
+- Avatar expressions expanded (happy, excited, sad, angry, calm,
+  skeptical, listening, sleeping) over a richer target schema (brow
+  arch/asymmetry, eye squint, pupil scale, mouth roundness/asymmetry,
+  monocle and glow/glitch biases). The avatar state controller adds
+  `disconnected` (UI connection lost), `transcribing`, `warning`, and
+  `passive` resolution, and persona profiles gain hologram tuning
+  (glitch intensity, monocle activity, scanline intensity, colors).
+- Avatar lip-sync's synthetic fallback is now phrase-like (syllable
+  pulses, consonant closures, pauses) instead of a bare sinusoid, and
+  real envelope data drives extra articulation channels (roundness,
+  closure, asymmetry). Quality tiers expose visage-specific parameters
+  (mote counts, glitch band limits, fragment/scatter gates).
+- `window.remoteAgentAvatar` gains a development `debug` surface
+  (`setState`, `setEmotion`, `setSpeaking`, `setAudioLevel`,
+  `setLookTarget`, `triggerGlitch`, `setGlitchesEnabled`,
+  `setReducedMotion`, `reset`, `getDiagnostics`).
+
+### Fixed
+
+- Agent prompts now lead with the actual task so first-block prompt hooks cannot
+  discard it; spoken job-cancellation commands stop active bridge jobs locally
+  instead of queuing another agent task.
+- Persona and avatar style requests such as "answer angrily" stay in chat rather
+  than being misrouted to a tool agent.
+- One-time multimodal constraints such as "don't change code" are no longer
+  persisted as durable semantic preferences.
+- The avatar audio envelope stream (`/api/avatar-audio`) crashed with
+  "Illegal invocation" when scheduling a reconnect in real browsers
+  (bare `setTimeout` reference invoked as a method); reconnect backoff
+  now works.
+
 ## [1.11.0] - 2026-07-11
 
 ### Added

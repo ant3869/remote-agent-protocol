@@ -39,7 +39,9 @@ def _build_default_session() -> VoiceSession:
     config = persona_config.load_config()
     persona = persona_config.effective_by_name(cfg.DEFAULT_PERSONA_NAME, personas.PERSONAS, config)
     session = VoiceSession(persona)
-    session.set_voicebox_warmup_personas(persona_config.voicebox_personas(personas.PERSONAS, config))
+    session.set_voicebox_warmup_personas(
+        persona_config.voicebox_personas(personas.PERSONAS, config)
+    )
     session.build()
     return session
 

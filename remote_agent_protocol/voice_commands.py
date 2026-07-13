@@ -29,7 +29,7 @@ _FILLERS = (
 # Imperative verbs that start a delegation. Question forms ("did you ask...",
 # "is hermes...") never survive filler-stripping into one of these, which is
 # exactly how we avoid false positives on chatter ABOUT agents.
-_VERBS = ("ask", "tell", "have", "get")
+_VERBS = ("ask", "tell", "have", "get", "use")
 
 _TRAILING_PUNCTUATION = ".!?,;: "
 
@@ -248,8 +248,9 @@ def parse_delegation(
             continue
         backend = aliases[alias]
         task = lowered[len(prefix) :].strip(_TRAILING_PUNCTUATION)
-        first = task.split(" ", 1)[0]
-        if first in {"am", "are", "did", "do", "does", "have", "is", "was", "were"}:
+        if re.match(r"^(?:are|is|did|have) you\b", task) and re.search(
+            r"\b(?:working|done|finished|complete)\b", task
+        ):
             return None
         if backend in backends and task:
             return backend, task
@@ -315,6 +316,45 @@ def is_retry_request(text: str) -> bool:
             lowered,
         )
     )
+
+
+def parse_agent_control(
+    text: str, backends: dict, aliases: dict[str, str]
+) -> tuple[str, str | None] | None:
+    """Parse local commands that inspect or change agent orchestration."""
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    if lowered in {"list agents", "list my agents", "what agents are available"}:
+        return "list", None
+    if lowered in {
+        "what is my default agent",
+        "what's my default agent",
+        "which agent is default",
+    }:
+        return "get_default", None
+    match = re.fullmatch(r"(?:make|set|use) (.+?) (?:as )?my default agent", lowered)
+    if match:
+        backend = aliases.get(match.group(1))
+        if backend in backends:
+            return "set_default", backend
+    return None
+
+
+def parse_agent_cancel(text: str, aliases: dict[str, str]) -> tuple[str | None, bool] | None:
+    """Parse a command to cancel active delegated work, optionally by agent."""
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    if not re.match(r"^(?:cancel|stop|abort|end)\b", lowered):
+        return None
+    agent = next(
+        (
+            aliases[alias]
+            for alias in sorted(aliases, key=len, reverse=True)
+            if re.search(rf"\b{re.escape(alias)}\b", lowered)
+        ),
+        None,
+    )
+    if agent is None and not re.search(r"\b(?:agent|job|task)s?\b", lowered):
+        return None
+    return agent, bool(re.search(r"\b(?:all|every)\b", lowered))
 
 
 def parse_task_correction(text: str) -> str | None:

@@ -5,6 +5,7 @@ import { AvatarEnvelopeStream, LipSyncController } from "./lip-sync.js";
 import { damp } from "./math.js";
 import { loadAvatarModel } from "./model-loader.js";
 import { createProceduralButler } from "./procedural-butler.js";
+import { createProceduralVisage } from "./procedural-visage.js";
 
 export async function createAvatarScene(host, settings) {
   if (!host) throw new Error("Avatar canvas host is missing");
@@ -20,6 +21,8 @@ export async function createAvatarScene(host, settings) {
   camera.position.set(0, 1.35, 4.4);
   camera.lookAt(0, 1.15, 0);
 
+  // Lighting serves GLTF models and the conventional procedural butler; the
+  // holographic visage is emissive and ignores it.
   const key = new THREE.DirectionalLight(0xffffff, 2.3);
   key.position.set(2.5, 3.2, 3.5);
   key.castShadow = settings.shadows;
@@ -31,7 +34,7 @@ export async function createAvatarScene(host, settings) {
   scene.add(key, fill, rim, ambient);
 
   const avatarBase = `/assets/avatars/${settings.avatarId}/`;
-  let metadata = { model: null, fallback: "procedural-butler", scale: 1 };
+  let metadata = { model: null, fallback: "procedural-visage", scale: 1 };
   let loaded = { kind: "procedural" };
   try {
     const response = await fetch(`${avatarBase}metadata.json`, { cache: "no-cache" });
@@ -51,11 +54,21 @@ export async function createAvatarScene(host, settings) {
   const cameraTarget = Array.isArray(metadata.cameraTarget) && metadata.cameraTarget.length === 3
     ? metadata.cameraTarget.map(Number)
     : [0, 1.15, 0];
-  if (cameraTarget.every(Number.isFinite)) camera.lookAt(...cameraTarget);
+  const target = cameraTarget.every(Number.isFinite)
+    ? new THREE.Vector3(...cameraTarget)
+    : new THREE.Vector3(0, 1.15, 0);
   const rig = loaded.kind === "gltf"
     ? adaptLoadedRig(loaded, metadata, THREE)
-    : createProceduralButler(THREE);
+    : metadata.fallback === "procedural-butler"
+      ? createProceduralButler(THREE)
+      : createProceduralVisage(THREE, {
+        quality: settings.quality,
+        reducedMotion: settings.effectiveReducedMotion,
+      });
   scene.add(rig.object);
+  if (rig.hostClass) host.classList.add(rig.hostClass);
+  rig.setQuality?.(settings.quality);
+  rig.setReducedMotion?.(settings.effectiveReducedMotion);
   const gazeController = new GazeController();
   const lipSync = new LipSyncController();
   const stream = new AvatarEnvelopeStream((sample) => lipSync.ingest(sample));
@@ -73,11 +86,22 @@ export async function createAvatarScene(host, settings) {
   let latest = null;
   let targetInterval = 1000 / settings.targetFps;
 
+  // Debug overrides (driven through window.remoteAgentAvatar.debug).
+  const debugState = {
+    state: null, emotion: null, intensity: 0.8, speaking: null,
+    audioLevel: null, lookTarget: null, reducedMotion: null,
+  };
+
   const resize = () => {
     const width = Math.max(1, host.clientWidth);
     const height = Math.max(1, host.clientHeight);
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
+    // Responsive portrait framing: tall hosts pull in for head-and-shoulders,
+    // wide hosts back off to include lapels and the projection ring.
+    const tightness = Math.min(1, Math.max(0, (1.25 - camera.aspect) / 0.6));
+    camera.position.set(0, target.y + 0.14 + tightness * 0.16, 4.55 - tightness * 0.55);
+    camera.lookAt(target.x, target.y + tightness * 0.12, target.z);
     camera.updateProjectionMatrix();
   };
   const observer = new ResizeObserver(resize);
@@ -106,7 +130,9 @@ export async function createAvatarScene(host, settings) {
     lastAnimatedAt = time;
     lastFrame = time;
     rig.update?.(delta);
-    if (latest) applyAvatarFrame(rig, latest, time / 1000, delta, gazeController, lipSync, currentTargets);
+    if (latest) {
+      applyAvatarFrame(rig, withDebugOverrides(latest, debugState), time / 1000, delta, gazeController, lipSync, currentTargets, debugState);
+    }
     renderer.render(scene, camera);
   };
   animationFrame = requestAnimationFrame(animate);
@@ -117,10 +143,50 @@ export async function createAvatarScene(host, settings) {
       targetInterval = 1000 / value.settings.targetFps;
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, value.settings.maxPixelRatio));
       renderer.shadowMap.enabled = value.settings.shadows;
+      rig.setReducedMotion?.(debugState.reducedMotion ?? value.settings.effectiveReducedMotion);
       if (value.settings.lipSync) stream.start();
       else stream.stop();
     },
     setVisible(value) { visible = Boolean(value); },
+    debug: {
+      setState(name) { debugState.state = name || null; },
+      setEmotion(name, intensity = 0.8) {
+        debugState.emotion = name || null;
+        debugState.intensity = intensity;
+      },
+      setSpeaking(value) { debugState.speaking = value === null ? null : Boolean(value); },
+      setAudioLevel(value) {
+        debugState.audioLevel = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : null;
+      },
+      setLookTarget(x, y) {
+        debugState.lookTarget = Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+      },
+      setReducedMotion(value) {
+        debugState.reducedMotion = value === null ? null : Boolean(value);
+        rig.setReducedMotion?.(debugState.reducedMotion ?? latest?.settings.effectiveReducedMotion ?? false);
+      },
+      triggerGlitch(type, strength = 1) { return rig.triggerGlitch?.(type, strength) ?? false; },
+      setGlitchesEnabled(value) { rig.setGlitchesEnabled?.(value); },
+      reset() {
+        debugState.state = null;
+        debugState.emotion = null;
+        debugState.speaking = null;
+        debugState.audioLevel = null;
+        debugState.lookTarget = null;
+        debugState.reducedMotion = null;
+        rig.setGlitchesEnabled?.(true);
+        rig.setReducedMotion?.(latest?.settings.effectiveReducedMotion ?? false);
+      },
+      getDiagnostics() {
+        return {
+          kind: loaded.kind,
+          state: latest?.resolved?.state ?? null,
+          emotion: latest?.resolved?.emotion ?? null,
+          overrides: { ...debugState },
+          rig: rig.getDiagnostics?.() ?? null,
+        };
+      },
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -129,6 +195,7 @@ export async function createAvatarScene(host, settings) {
       renderer.domElement.removeEventListener("webglcontextlost", onContextLost, false);
       renderer.domElement.removeEventListener("webglcontextrestored", onContextRestored, false);
       stream.dispose();
+      if (rig.hostClass) host.classList.remove(rig.hostClass);
       rig.dispose();
       scene.clear();
       renderer.renderLists.dispose();
@@ -139,53 +206,95 @@ export async function createAvatarScene(host, settings) {
   };
 }
 
-function applyAvatarFrame(rig, frame, seconds, delta, gazeController, lipSync, currentTargets) {
+function withDebugOverrides(frame, debugState) {
+  if (debugState.state === null && debugState.emotion === null
+    && debugState.speaking === null && debugState.reducedMotion === null) return frame;
+  return {
+    ...frame,
+    runtime: debugState.speaking === null ? frame.runtime : { ...frame.runtime, speaking: debugState.speaking },
+    resolved: {
+      state: debugState.state ?? frame.resolved.state,
+      emotion: debugState.emotion
+        ? { name: debugState.emotion, intensity: debugState.intensity }
+        : frame.resolved.emotion,
+    },
+    settings: debugState.reducedMotion === null
+      ? frame.settings
+      : { ...frame.settings, effectiveReducedMotion: debugState.reducedMotion },
+  };
+}
+
+function applyAvatarFrame(rig, frame, seconds, delta, gazeController, lipSync, currentTargets, debugState) {
   const controls = rig.controls;
+  const profile = frame.profile;
   const expression = expressionFor(frame.resolved.emotion.name);
-  const base = expressionFor(frame.profile.defaultExpression);
+  const base = expressionFor(profile.defaultExpression);
   const amount = frame.resolved.emotion.intensity * frame.settings.expressionIntensity;
   const target = blendTargets(base, expression, amount);
   for (const key of Object.keys(currentTargets)) {
     currentTargets[key] = damp(currentTargets[key], target[key], 8, delta);
   }
+  const state = frame.resolved.state;
+  const reducedMotion = frame.settings.effectiveReducedMotion;
 
-  const gaze = gazeController.update(
-    delta,
-    frame.resolved.state,
-    frame.settings.gaze,
-    frame.settings.effectiveReducedMotion,
-  );
-  controls.pupilLeft.position.x = gaze.x;
-  controls.pupilRight.position.x = gaze.x;
-  controls.pupilLeft.position.y = gaze.y;
-  controls.pupilRight.position.y = gaze.y;
-  const sleeping = frame.resolved.state === "sleeping";
+  const gaze = gazeController.update(delta, state, frame.settings.gaze, reducedMotion, profile);
+  const look = debugState?.lookTarget;
+  const gazeX = look ? look.x : gaze.x;
+  const gazeY = look ? look.y : gaze.y;
+  if (controls.pupilLeft) {
+    controls.pupilLeft.position.x = gazeX;
+    controls.pupilLeft.position.y = gazeY;
+  }
+  if (controls.pupilRight) {
+    controls.pupilRight.position.x = gazeX;
+    controls.pupilRight.position.y = gazeY;
+  }
+  const sleeping = state === "sleeping";
   const leftBlink = sleeping ? 1 : gaze.blink;
   const rightBlink = sleeping ? 1 : gaze.blink * 0.96;
-  controls.lidLeft.scale.y = Math.max(0.04, 0.74 * (1 - leftBlink));
-  controls.lidRight.scale.y = Math.max(0.04, 0.74 * (1 - rightBlink));
+  if (controls.lidLeft) controls.lidLeft.scale.y = Math.max(0.04, 0.74 * (1 - leftBlink));
+  if (controls.lidRight) controls.lidRight.scale.y = Math.max(0.04, 0.74 * (1 - rightBlink));
   setMorph(rig.morphControls?.blinkLeft, leftBlink);
   setMorph(rig.morphControls?.blinkRight, rightBlink);
   controls.browLeft.position.y = 0.22 + currentTargets.browInner * 0.035 + currentTargets.browAsymmetry * 0.02;
   controls.browRight.position.y = 0.22 + currentTargets.browInner * 0.035 - currentTargets.browAsymmetry * 0.02;
   controls.browLeft.rotation.z = currentTargets.browOuter * -0.15;
   controls.browRight.rotation.z = currentTargets.browOuter * 0.15;
-  controls.mouthCornerLeft.position.y = -0.01 + currentTargets.mouthCorner * 0.035;
-  controls.mouthCornerRight.position.y = -0.01 + currentTargets.mouthCorner * 0.035;
+  controls.mouthCornerLeft.position.y = -0.01 + (currentTargets.mouthCorner - currentTargets.mouthAsymmetry * 0.4) * 0.035;
+  controls.mouthCornerRight.position.y = -0.01 + (currentTargets.mouthCorner + currentTargets.mouthAsymmetry * 0.4) * 0.035;
+  const mouthScale = profile.mouthMotionScale ?? 1;
   const mouth = lipSync.update(delta, frame.runtime.speaking, frame.settings.lipSync);
-  const jawOpen = Math.min(1, currentTargets.jawOpen + mouth.jawOpen);
+  if (debugState?.audioLevel !== null && debugState?.audioLevel !== undefined) {
+    lipSync.ingest({ rms: debugState.audioLevel, peak: Math.min(1, debugState.audioLevel * 1.35) });
+  }
+  const jawOpen = Math.min(1, currentTargets.jawOpen + mouth.jawOpen * mouthScale);
   controls.jaw.rotation.x = jawOpen * 0.22;
   setMorph(rig.morphControls?.jaw, jawOpen);
-  controls.mouthLower.position.y = -0.035 - mouth.jawOpen * 0.06;
+  controls.mouthLower.position.y = -0.035 - mouth.jawOpen * mouthScale * 0.06;
   controls.mouthUpper.scale.x = 1 + currentTargets.mouthWidth * 0.2 + mouth.mouthWidth;
   controls.mouthLower.scale.x = 1 + currentTargets.mouthWidth * 0.18 + mouth.mouthWidth * 0.8;
   controls.cheekLeft.position.y = -0.04 + currentTargets.cheekRaise * 0.025;
   controls.cheekRight.position.y = -0.04 + currentTargets.cheekRaise * 0.025;
   controls.cheekLeft.scale.y = 1 - mouth.cheek;
   controls.cheekRight.scale.y = 1 - mouth.cheek;
-  controls.head.rotation.x = currentTargets.headPitch + (sleeping ? 0.09 : 0);
-  controls.head.rotation.y = currentTargets.headYaw;
-  controls.head.rotation.z = currentTargets.headRoll;
+
+  // Layered idle motion: several slow sinusoids at unrelated frequencies so
+  // the sway never reads as one pendulum. Listening steadies the head,
+  // thinking adds micro-tilts, speaking nods with the envelope.
+  const canIdle = frame.settings.idleMotion && !reducedMotion;
+  const idleScale = (canIdle ? profile.idleIntensity ?? 0.25 : 0)
+    * (state === "listening" ? 0.3 : state === "focused" ? 0.55 : 1);
+  const idleYaw = (Math.sin(seconds * 0.31) * 0.5 + Math.sin(seconds * 0.73 + 1.7) * 0.3) * 0.14 * idleScale;
+  const idlePitch = Math.sin(seconds * 0.47 + 0.6) * 0.08 * idleScale
+    + (state === "thinking" && !reducedMotion ? Math.sin(seconds * 1.9) * 0.012 : 0);
+  const idleRoll = Math.sin(seconds * 0.23 + 2.1) * 0.05 * idleScale;
+  const nod = frame.runtime.speaking && !reducedMotion
+    ? mouth.jawOpen * (profile.speakingHeadMotion ?? 0.16) * 0.16 * Math.sin(seconds * 2.2)
+    : 0;
+  controls.head.rotation.x = currentTargets.headPitch + idlePitch + nod + (sleeping ? 0.09 : 0);
+  controls.head.rotation.y = currentTargets.headYaw + idleYaw;
+  controls.head.rotation.z = currentTargets.headRoll + idleRoll;
+
   setMorph(rig.morphControls?.smileLeft, Math.max(0, currentTargets.mouthCorner));
   setMorph(rig.morphControls?.smileRight, Math.max(0, currentTargets.mouthCorner));
   setMorph(rig.morphControls?.frownLeft, Math.max(0, -currentTargets.mouthCorner));
@@ -196,11 +305,28 @@ function applyAvatarFrame(rig, frame, seconds, delta, gazeController, lipSync, c
   setMorph(rig.morphControls?.eyeWideLeft, Math.max(0, currentTargets.eyeWiden));
   setMorph(rig.morphControls?.eyeWideRight, Math.max(0, currentTargets.eyeWiden));
 
-  const canIdle = frame.settings.idleMotion && !frame.settings.effectiveReducedMotion;
-  const breathing = canIdle ? Math.sin(seconds * 1.35) * 0.008 * frame.profile.idleIntensity : 0;
-  const stabilization = canIdle ? Math.sin(seconds * 0.41) * 0.006 * frame.profile.idleIntensity : 0;
+  const breathing = canIdle ? Math.sin(seconds * 1.35) * 0.008 * (profile.idleIntensity ?? 0.25) : 0;
+  const stabilization = canIdle ? Math.sin(seconds * 0.41) * 0.006 * (profile.idleIntensity ?? 0.25) : 0;
   controls.bust.scale.y = 0.72 + breathing;
   controls.root.rotation.y = stabilization;
+
+  rig.applyExpression?.({
+    targets: currentTargets,
+    emotion: frame.resolved.emotion,
+    state,
+    profile,
+    delta,
+    seconds,
+  });
+  rig.applyMouth?.({
+    mouth,
+    jawOpen,
+    targets: currentTargets,
+    speaking: frame.runtime.speaking,
+    delta,
+    seconds,
+  });
+  rig.applyState?.(frame, currentTargets, mouth, seconds, delta);
 }
 
 

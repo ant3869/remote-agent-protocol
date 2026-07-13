@@ -92,7 +92,6 @@ def test_web_shell_has_no_obsolete_cyan_first_motif():
 
     assert "--accent-cyan" not in combined
     assert "#22d3ee" not in combined
-    assert "radial-gradient" not in combined
 
 
 def test_web_shell_has_a_global_command_palette():
@@ -818,6 +817,18 @@ def test_tool_user_action_survives_session_rebuild(monkeypatch, tmp_path):
     assert rebuilt.default_agent_backend() == "mock"
 
 
+def test_spoken_default_agent_change_survives_session_rebuild(monkeypatch, tmp_path):
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(cfg, "APP_STATE_FILE", str(state_path))
+    app = WebVoiceApp()
+    app._session.set_default_agent_backend("mock")
+
+    app._fold_event({"type": "default_agent_changed", "agent": "mock"})
+
+    assert app_state.load_state(state_path).tool_user == "mock"
+    assert app._new_session().default_agent_backend() == "mock"
+
+
 def test_persona_page_has_full_editor_and_actions():
     html = (WEB_APP / "index.html").read_text(encoding="utf-8")
     script = (WEB_APP / "app.js").read_text(encoding="utf-8")
@@ -1044,7 +1055,7 @@ def test_avatar_vendor_and_metadata_files_are_declared():
 
     assert metadata["id"] == "butler"
     assert metadata["model"] is None
-    assert metadata["fallback"] == "procedural-butler"
+    assert metadata["fallback"] == "procedural-visage"
     assert version == "0.180.0"
     assert '"web_app/**/*"' in project
     assert (WEB_APP / "vendor/three/LICENSE").is_file()

@@ -155,6 +155,11 @@ _PRODUCT_RESEARCH_RE = re.compile(
     r"product|accessor(?:y|ies)|head\s+strap|quest|oculus|metaquest)\b",
     re.IGNORECASE,
 )
+_PERSONA_STYLE_RE = re.compile(
+    r"\b(?:respond|answer|say|talk|speak|act|sound|voice|avatar|persona)\w*\b.*"
+    r"\b(?:angry|angrily|mad|happy|sad|excited|calm|annoyed|tone|style|personality)\b",
+    re.IGNORECASE,
+)
 
 # Mirrors the "Examples:" block in _CLASSIFIER_SYSTEM -- kept as data (not
 # parsed from the prompt string) so a leaked example can be recognized
@@ -593,6 +598,14 @@ class IntentRouter:
                 text=text,
                 confidence=1.0,
                 reason="short acknowledgment or reaction",
+                source="gate",
+            )
+
+        if _PERSONA_STYLE_RE.search(text):
+            return RoutingDecision(
+                text=text,
+                confidence=1.0,
+                reason="asks the persona to respond in a particular style",
                 source="gate",
             )
 

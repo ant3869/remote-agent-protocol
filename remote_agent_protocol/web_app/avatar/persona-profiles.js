@@ -1,5 +1,7 @@
 import { normalizeName } from "./math.js";
 
+// Persona-level character tuning consumed by the controller, gaze controller,
+// and rig. Profiles are frozen; profileForPersona returns a mutable copy.
 const BUTLER = Object.freeze({
   personaId: "jess",
   avatarId: "butler",
@@ -14,6 +16,17 @@ const BUTLER = Object.freeze({
   saccadeIntervalSeconds: Object.freeze([1.8, 4.5]),
   saccadeIntensity: 0.18,
   speakingHeadMotion: 0.16,
+  glitchIntensity: 0.9,
+  glitchFrequency: 0.9,
+  monocleActivity: 1,
+  scanlineIntensity: 1,
+  primaryColor: 0x22d3ee,
+  secondaryColor: 0x38e0f0,
+  errorAccent: 0xf87171,
+  warningAccent: 0xfbbf24,
+  speakingGlow: 1.1,
+  formality: 0.9,
+  mouthMotionScale: 0.9,
 });
 
 const NEUTRAL = Object.freeze({
@@ -24,6 +37,10 @@ const NEUTRAL = Object.freeze({
   eyeContact: 0.72,
   expressiveness: 0.5,
   emotionBias: Object.freeze({}),
+  doubleBlinkChance: 0.06,
+  glitchIntensity: 0.75,
+  monocleActivity: 0.8,
+  formality: 0.6,
 });
 
 export function profileForPersona(name, selectedAvatarId = "butler") {

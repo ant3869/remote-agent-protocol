@@ -1083,6 +1083,33 @@ class VoiceSession:
 
     async def _maybe_handle_model_control(self, text: str) -> str | None:
         """Handle a spoken model switch or one-shot retry after provider failure."""
+        control = voice_commands.parse_agent_control(
+            text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
+        )
+        if control is not None:
+            action, agent = control
+            if action == "list":
+                names = ", ".join(self._bridge.backend_names())
+                return (
+                    f"[Agent control: available agents are {names}; "
+                    f"default is {self._default_agent_backend}.]"
+                )
+            if action == "get_default":
+                return f"[Agent control: the default agent is {self._default_agent_backend}.]"
+            assert agent is not None
+            self.set_default_agent_backend(agent)
+            self._emit({"type": "default_agent_changed", "agent": agent})
+            return f"[Agent control: the default agent is now {agent}.]"
+
+        cancel_request = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
+        if cancel_request is not None:
+            agent, all_jobs = cancel_request
+            count = await self._bridge.cancel_active(agent, all_jobs=all_jobs)
+            if count:
+                noun = "task" if count == 1 else "tasks"
+                return f"[Agent update: cancelled {count} active {noun}.]"
+            return "[Agent update: there were no matching active tasks to cancel.]"
+
         correction = voice_commands.parse_task_correction(text)
         if correction is not None:
             if self._pending_confirmations:

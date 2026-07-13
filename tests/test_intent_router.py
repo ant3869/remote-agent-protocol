@@ -154,6 +154,14 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, "dispatch")
         self.assertEqual(classify.calls, [])
 
+    async def test_avatar_style_request_stays_with_the_persona(self):
+        classify = FakeClassify(result=verdict())
+        decision = await self.route(classify, "Can you run me a test and answer angrily?")
+
+        self.assertEqual(decision.action, "none")
+        self.assertEqual(decision.source, "gate")
+        self.assertEqual(classify.calls, [])
+
     async def test_coding_keyword_task_selects_code_puppy(self):
         classify = FakeClassify(result=verdict(intent="chat", category="none", task=""))
 

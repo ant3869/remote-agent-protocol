@@ -73,7 +73,6 @@ class TestCliAgents(unittest.TestCase):
         self.assertEqual(status.executable_path, "/usr/local/bin/claude")
         self.assertIn("Not authenticated", status.error)
 
-
     @patch("shutil.which")
     def test_hermes_is_available(self, mock_which):
         mock_which.return_value = r"C:\hermes\hermes.exe"

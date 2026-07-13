@@ -117,17 +117,13 @@ class VramStatusTests(unittest.TestCase):
         self.assertIn("not found", status.error)
 
     def test_parses_csv_output_from_the_first_gpu(self):
-        completed = SimpleNamespace(
-            returncode=0, stdout="8192, 16384, 42\n", stderr=""
-        )
+        completed = SimpleNamespace(returncode=0, stdout="8192, 16384, 42\n", stderr="")
         with (
             mock.patch(
                 "remote_agent_protocol.dashboard.shutil.which",
                 return_value=r"C:\nvidia-smi.exe",
             ),
-            mock.patch(
-                "remote_agent_protocol.dashboard.subprocess.run", return_value=completed
-            ),
+            mock.patch("remote_agent_protocol.dashboard.subprocess.run", return_value=completed),
         ):
             status = dashboard.vram_status()
         self.assertTrue(status.available)
@@ -146,9 +142,7 @@ class VramStatusTests(unittest.TestCase):
                 "remote_agent_protocol.dashboard.shutil.which",
                 return_value=r"C:\nvidia-smi.exe",
             ),
-            mock.patch(
-                "remote_agent_protocol.dashboard.subprocess.run", return_value=completed
-            ),
+            mock.patch("remote_agent_protocol.dashboard.subprocess.run", return_value=completed),
         ):
             status = dashboard.vram_status()
         self.assertEqual(status.used_mb, 1024)
@@ -160,9 +154,7 @@ class VramStatusTests(unittest.TestCase):
                 "remote_agent_protocol.dashboard.shutil.which",
                 return_value=r"C:\nvidia-smi.exe",
             ),
-            mock.patch(
-                "remote_agent_protocol.dashboard.subprocess.run", return_value=completed
-            ),
+            mock.patch("remote_agent_protocol.dashboard.subprocess.run", return_value=completed),
         ):
             status = dashboard.vram_status()
         self.assertFalse(status.available)
