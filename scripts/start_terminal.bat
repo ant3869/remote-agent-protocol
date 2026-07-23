@@ -1,5 +1,5 @@
 @echo off
-cd /d "%~dp0"
+cd /d "%~dp0.."
 echo Starting Remote Agent Protocol -- terminal mode (no GUI)...
 echo.
 echo   Same voice pipeline as the desktop app: STT, Ollama, TTS, agent bridge.

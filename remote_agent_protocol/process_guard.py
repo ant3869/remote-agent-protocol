@@ -91,7 +91,7 @@ _console_handler_ref = None
 def install_close_handler(on_close: Callable[[], None]) -> None:
     """Run ``on_close`` on window close, logoff, or shutdown -- not just Ctrl+C.
 
-    Why this exists: start_gui.bat's own instructions say "Close the window
+    Why this exists: scripts\start_gui.bat's own instructions say "Close the window
     to quit", but clicking that X sends CTRL_CLOSE_EVENT, which CPython does
     not turn into KeyboardInterrupt the way it does Ctrl+C. Left unhandled,
     Windows gives the process a few seconds and then force-terminates it --

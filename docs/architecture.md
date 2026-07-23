@@ -6,8 +6,8 @@ is an application layer over Pipecat, not a renamed copy of the
 while giving the desktop product its own identity and release path.
 
 The application lives in the `remote_agent_protocol/` package. Launch the desktop app with
-`python -m remote_agent_protocol` (or `start_gui.bat`) and the terminal mode with
-`python -m remote_agent_protocol.terminal` (or `start_terminal.bat`). Module references below
+`python -m remote_agent_protocol` (or `scripts\start_gui.bat`) and the terminal mode with
+`python -m remote_agent_protocol.terminal` (or `scripts\start_terminal.bat`). Module references below
 are relative to `remote_agent_protocol/`.
 
 ## Runtime flow

@@ -1,5 +1,5 @@
 @echo off
-cd /d "%~dp0"
+cd /d "%~dp0.."
 echo Starting Remote Agent Protocol -- desktop agent switchboard...
 echo.
 echo   Pick a persona, override the voice, mute the mic, watch the transcript.

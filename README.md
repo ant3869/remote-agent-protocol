@@ -92,8 +92,8 @@ the local environment can import and run it.
 
 | What | Command |
 | --- | --- |
-| Web control center | `start_gui.bat` or `.venv\Scripts\python -m remote_agent_protocol` |
-| Terminal mode (no GUI) | `start_terminal.bat` or `.venv\Scripts\python -m remote_agent_protocol.terminal` |
+| Web control center | `scripts\start_gui.bat` or `.venv\Scripts\python -m remote_agent_protocol` |
+| Terminal mode (no GUI) | `scripts\start_terminal.bat` or `.venv\Scripts\python -m remote_agent_protocol.terminal` |
 | Startup doctor (read-only checks) | `.venv\Scripts\python -m remote_agent_protocol.doctor` |
 | List audio devices | `.venv\Scripts\python scripts\list_audio_devices.py` |
 | App tests | `.venv\Scripts\python -m pytest tests\test_agent_bridge.py tests\test_session_controls.py ...` |
@@ -110,15 +110,15 @@ configured is healthy, `1` means at least one check failed.
 
 | Path | Purpose |
 | --- | --- |
-| `remote_agent_protocol/` | The application package: web UI (`web_gui.py` + `web_app/`, including the avatar), voice session, agent bridge, wake word, memory, personas, config |
-| `wake_word/` | Optional repo-local wake models and training helpers for openwakeword |
+| `remote_agent_protocol/` | The application package: web UI (`web_gui.py` + `web_app/`, including the avatar), voice session, agent bridge, memory, personas, config |
+| `remote_agent_protocol/wake_word/` | Optional repo-local wake models and training helpers for openwakeword |
+| `remote_agent_protocol/models/` | Ollama Modelfiles for local GGUFs |
+| `remote_agent_protocol/config_examples/` | `persona_overrides.example.json` -- template for `data/persona_overrides.json` |
 | `src/pipecat/` | Vendored Pipecat framework (merge from the `upstream` remote; do not mix app code in) |
 | `tests/test_*.py` | App unit tests live alongside the framework's tests |
-| `scripts/` | `mock_agent.py`, `smoke_agent_bridge.py`, `list_audio_devices.py`, plus upstream tooling |
-| `config/` | `persona_overrides.example.json` -- template for `data/persona_overrides.json` |
-| `models/` | Ollama Modelfiles for local GGUFs |
+| `scripts/` | `start_gui.bat`, `start_terminal.bat`, `mock_agent.py`, `smoke_agent_bridge.py`, `list_audio_devices.py`, plus upstream tooling |
 | `data/` | Runtime state (memory, vector store, logs, job history) -- gitignored |
-| `docs/` | [Architecture](docs/architecture.md), [model map](docs/MODELS.md), [wake-word research](docs/wake_word_research.md), framework changelog, assets |
+| `docs/` | [Architecture](docs/architecture.md), [model map](docs/MODELS.md), [wake-word research](docs/wake_word_research.md), framework changelog, assets, `docs/notes/` (plans/tasks/wargame notes) |
 | `VERSION`, `CHANGELOG.md` | Product version and changelog (`docs/CHANGELOG.pipecat.md` is the framework's) |
 
 See the [architecture guide](docs/architecture.md) for the application

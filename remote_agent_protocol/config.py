@@ -156,7 +156,7 @@ WHISPER_COMPUTE_TYPE = _env("WHISPER_COMPUTE_TYPE", "float16")
 # LLM
 # ---------------------------------------------------------------------------
 # Ollama serves any model you've registered via 'ollama create'.
-# See models/README.md for how to load your own GGUFs from H:/Models.
+# See remote_agent_protocol/models/README.md for how to load your own GGUFs from H:/Models.
 #
 # To list what's currently loaded in Ollama:
 #   ollama list

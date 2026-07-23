@@ -7,14 +7,14 @@ it** with a Modelfile, then set `LLM_MODEL` in `.env` (or `remote_agent_protocol
 ## How to register & use a model
 
 ```bat
-:: 1. Register (one-time). Modelfiles live in .\models\
-ollama create <name> -f models\<name>.Modelfile
+:: 1. Register (one-time). Modelfiles live in remote_agent_protocol\models\
+ollama create <name> -f remote_agent_protocol\models\<name>.Modelfile
 
 :: 2. Point Jess at it -- set in .env (or remote_agent_protocol/config.py):
 ::    LLM_MODEL=<name>
 
 :: 3. Run
-start_gui.bat        (desktop app)  or  start_terminal.bat  (terminal mode)
+scripts\start_gui.bat        (desktop app)  or  scripts\start_terminal.bat  (terminal mode)
 ```
 
 A Modelfile is just one line: `FROM H:\Models\path\to\model.gguf`

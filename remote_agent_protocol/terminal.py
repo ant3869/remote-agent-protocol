@@ -10,10 +10,10 @@ All the real work lives in remote_agent_protocol.session.VoiceSession, shared wi
 This file is just the terminal entry point: pick the default persona, run.
 
 Run:
-  .venv\Scripts\python -m remote_agent_protocol.terminal    (or double-click scriptsstart_terminal.bat)
+  .venv\Scripts\python -m remote_agent_protocol.terminal    (or double-click scripts\start_terminal.bat)
 
 Want the pretty control panel with live voice/persona switching instead?
-  .venv\Scripts\python -m remote_agent_protocol             (or double-click scriptsstart_gui.bat)
+  .venv\Scripts\python -m remote_agent_protocol             (or double-click scripts\start_gui.bat)
 """
 
 import asyncio
