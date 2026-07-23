@@ -10,6 +10,23 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ## [Unreleased]
 
+### Changed
+
+- Restructured the repository layout: loose top-level notes and assets
+  (`plans/`, `tasks/`, `war_games/`, `ledger.md`, `success.md`, `config/`,
+  `models/`, `wake_word/`, `start_*.bat`) now live under `docs/notes/`,
+  `remote_agent_protocol/`, and `scripts/` instead of the repo root.
+- Local git history was squashed to a single commit to drop the inherited
+  pipecat-ai/pipecat commit history; the `upstream` remote and vendored
+  `src/pipecat` tree are unaffected.
+
+### Removed
+
+- Dropped pipecat-ai/Daily.co-specific project files not used by this
+  fork: `codecov.yml`, `SECURITY.md`, `MANIFEST.in`, `.readthedocs.yaml`.
+  `CONTRIBUTING.md` moved to `src/pipecat/CONTRIBUTING.md` since its
+  conventions govern the vendored framework rather than the app.
+
 ## [1.12.0] - 2026-07-12
 
 ### Changed
