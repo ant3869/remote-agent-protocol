@@ -1,0 +1,7 @@
+.venv-train/
+data/positive/*.wav
+data/negative/*.wav
+data/negatives_cache/
+models/*.onnx
+__pycache__/
+*.pyc

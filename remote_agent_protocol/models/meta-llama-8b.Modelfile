@@ -1,0 +1,8 @@
+FROM H:\Models\Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf
+
+# Voice-tuned for this 16GB-GPU demo: a small context keeps the whole model on
+# the GPU (the stock 128K default inflates the KV cache and spills onto CPU ->
+# slow), and a short num_predict caps spoken replies. Thinking models also need
+# LLM_REASONING_EFFORT="none" in config.py to mute the hidden <think> monologue.
+PARAMETER num_ctx 8192
+PARAMETER num_predict 160

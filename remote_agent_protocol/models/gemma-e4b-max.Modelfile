@@ -1,0 +1,12 @@
+FROM H:\Models\mradermacher\gemma-4-E4B-it-Uncensored-MAX-i1-GGUF\gemma-4-E4B-it-Uncensored-MAX.i1-IQ4_NL.gguf
+
+# --- Tuned for a LOCAL VOICE assistant on a 16GB GPU ---
+# The stock model defaults to a 128K context window, which inflates the KV
+# cache to ~18GB and spills the model 33% onto CPU -> ~40s prefill. A voice
+# turn never needs more than a few thousand tokens of history, so cap it small
+# and the whole model lives on the GPU -> fast prefill.
+PARAMETER num_ctx 8192
+
+# Hard cap on response length. She speaks 1-2 sentences; without this the model
+# rambles 300+ tokens you never hear but pay GPU time for.
+PARAMETER num_predict 160

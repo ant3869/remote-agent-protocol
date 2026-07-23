@@ -1,0 +1,18 @@
+extend = "../pyproject.toml"
+
+# Dead-code checks (unused imports/vars, commented-out code) scoped to the
+# app layer only. The repo root intentionally omits these because enabling
+# them for the vendored src/pipecat tree surfaces ~1400 pre-existing hits
+# there; see AGENTS.md on treating src/pipecat as a library, not app code.
+[lint]
+extend-select = ["F", "ERA"]
+
+[lint.isort]
+# Nested config changes ruff's first-party auto-detection root; pin it
+# explicitly so import grouping matches the repo-root config exactly.
+known-first-party = ["remote_agent_protocol", "pipecat"]
+
+[lint.per-file-ignores]
+# Model-name and routing-heuristic reference lists read as commented-out
+# code to eradicate's heuristic; they're prose, not dead code.
+"config.py" = ["ERA001"]

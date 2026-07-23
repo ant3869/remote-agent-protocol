@@ -1,0 +1,31 @@
+# Training-only dependencies. Keep separate from the runtime environment.
+# Runtime needs: openwakeword, faster-whisper, pyaudio, keyboard, numpy.
+# These are for *training* new wake word models.
+
+# Core ML
+torch>=2.1.0
+torchaudio>=2.1.0
+numpy>=1.24
+scipy>=1.11
+
+# Wake-word engine (training utilities)
+openwakeword[train]>=0.6.0
+
+# Synthetic positive generation
+piper-tts>=1.2.0
+
+# Audio augmentation (noise, reverb, pitch shift, etc.)
+audiomentations>=0.34.0
+
+# Negative-corpus download + audio loading
+datasets>=2.16.0
+soundfile>=0.12
+librosa>=0.10
+
+# Export
+onnx>=1.15
+onnxruntime>=1.16
+
+# Progress + config
+tqdm>=4.66
+pyyaml>=6.0

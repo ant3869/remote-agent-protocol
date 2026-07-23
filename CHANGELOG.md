@@ -1,0 +1,573 @@
+# Changelog
+
+All notable changes to **Remote Agent Protocol** are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Changes to the vendored Pipecat framework (`src/pipecat`) are tracked upstream;
+see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
+
+## [Unreleased]
+
+## [1.12.0] - 2026-07-12
+
+### Changed
+
+- The selected tool user is now an actual default rather than an exclusive
+  route: natural one-turn addressing can target Hermes, Code Puppy, Codex, or
+  Claude Code without changing that default. Voice commands can list agents,
+  report the default, or deliberately change and persist it, and the Agents
+  roster labels the current default.
+- The animated companion avatar is now a **scanline retro holographic
+  butler**: a stylized male bust with swept-back hair, a curled mustache,
+  an animated diagnostic monocle, curved expressive brows, shaped lips,
+  a bow tie, lapels, and jacket shoulders, rendered as a slightly
+  unstable cyan hologram. Every surface carries CRT transmission
+  scanlines, and a structured glitch scheduler produces micro-flickers,
+  horizontal tears (shader band displacement), channel splits
+  (violet/magenta echoes), transmission dropouts, point scatters,
+  monocle desyncs, data fragments, and a boot-up reconstruction sweep --
+  paced by assistant state (calm while speaking, stormy on error, near
+  silent while sleeping) and disabled down to flicker under reduced
+  motion. States now keep the figure cyan and move restrained accents
+  instead of recoloring the whole avatar. The metadata now selects the richer
+  `procedural-visage` fallback; conventional GLTF/procedural rigs remain
+  supported by the shared avatar loader.
+- Avatar expressions expanded (happy, excited, sad, angry, calm,
+  skeptical, listening, sleeping) over a richer target schema (brow
+  arch/asymmetry, eye squint, pupil scale, mouth roundness/asymmetry,
+  monocle and glow/glitch biases). The avatar state controller adds
+  `disconnected` (UI connection lost), `transcribing`, `warning`, and
+  `passive` resolution, and persona profiles gain hologram tuning
+  (glitch intensity, monocle activity, scanline intensity, colors).
+- Avatar lip-sync's synthetic fallback is now phrase-like (syllable
+  pulses, consonant closures, pauses) instead of a bare sinusoid, and
+  real envelope data drives extra articulation channels (roundness,
+  closure, asymmetry). Quality tiers expose visage-specific parameters
+  (mote counts, glitch band limits, fragment/scatter gates).
+- `window.remoteAgentAvatar` gains a development `debug` surface
+  (`setState`, `setEmotion`, `setSpeaking`, `setAudioLevel`,
+  `setLookTarget`, `triggerGlitch`, `setGlitchesEnabled`,
+  `setReducedMotion`, `reset`, `getDiagnostics`).
+
+### Fixed
+
+- Agent prompts now lead with the actual task so first-block prompt hooks cannot
+  discard it; spoken job-cancellation commands stop active bridge jobs locally
+  instead of queuing another agent task.
+- Persona and avatar style requests such as "answer angrily" stay in chat rather
+  than being misrouted to a tool agent.
+- One-time multimodal constraints such as "don't change code" are no longer
+  persisted as durable semantic preferences.
+- The avatar audio envelope stream (`/api/avatar-audio`) crashed with
+  "Illegal invocation" when scheduling a reconnect in real browsers
+  (bare `setTimeout` reference invoked as a method); reconnect backoff
+  now works.
+
+## [1.11.0] - 2026-07-11
+
+### Added
+
+- The main page now shows a live VRAM stat (used / total, GPU utilization)
+  via `nvidia-smi` when an NVIDIA GPU is present, in the topbar and the
+  detailed status dashboard.
+- POST `/api/action` now requires a per-launch session token in a custom
+  header. Without it, any webpage open in the same browser could have
+  silently dispatched or approved a real delegated agent task -- the
+  server had no auth of its own, and a "simple request" (`Content-Type:
+  text/plain`) skips the CORS preflight a browser would otherwise block it
+  with.
+- The Agents panel now keeps a rolling history of resolved confirmations
+  (approved/denied), including *why* each one was held -- previously that
+  reasoning only existed on the live pending banner and vanished the
+  moment you answered it.
+- Added availability/version status checks for the Hermes and Code Puppy
+  CLIs alongside the existing Codex/Claude Code checks (auth state is
+  intentionally not probed for these two -- see cli_agents.py).
+
+### Removed
+
+- Deleted the legacy Tkinter desktop UI (`gui.py` and its five exclusive
+  support modules, ~3,000 lines). It had no process-lifecycle protection
+  of its own, hadn't been touched since the web control center replaced
+  it, and nothing in the app referenced it anymore.
+
+### Fixed
+
+- Fixed an inconsistent `escapeHtml()` gap in the agent-backend status
+  chips (values were server-controlled, so not exploitable, but
+  inconsistent with the rest of the file).
+- Hardened a vendored-tooling script (`scripts/deprecations/
+  generate_removals.py`) against the same subprocess decode crash fixed
+  elsewhere this cycle.
+
+## [1.10.1] - 2026-07-11
+
+### Fixed
+
+- Running the test suite no longer pollutes the real runtime log
+  (`data/jess_runtime.log`) with synthetic test-fixture noise. Importing the
+  GUI/terminal entry points from a test file (not even running them)
+  silently redirected all app logging into the real log for the rest of
+  that test run, so bursts of rapid mock-agent activity and deliberately
+  triggered failures ended up interleaved with real conversation history --
+  reading as the app "piling answers on top of each other" when reviewed
+  afterward. Tests now log to a separate `data/test_runtime.log` instead.
+
+## [1.10.0] - 2026-07-11
+
+### Added
+
+- The web Control Center now includes an optional, local-first animated butler
+  companion with listening, thinking, speaking, agent-work, completion, and
+  error states; natural blinking, gaze, restrained idle motion, and facial
+  expressions; amplitude-driven lip-sync for every TTS backend including
+  Coqui; persisted quality and motion controls; safe GLB/GLTF loading; and an
+  accessible static fallback when Three.js, WebGL, or a model is unavailable.
+- Closing the console window (the documented way to quit -- "Close the
+  window to quit") now shuts everything down cleanly instead of Windows
+  force-killing the process a few seconds later. That force-kill used to
+  skip the app's own cleanup entirely, leaving the voice session, any
+  delegated agent subprocesses, and the Voicebox server running invisibly
+  in the background until the next launch reaped them.
+- The GUI and terminal entry points no longer duplicate their startup/
+  shutdown logic; `python -m remote_agent_protocol` now delegates to a
+  single canonical launcher.
+
+### Fixed
+
+- Coding-agent CLI status checks (Codex, Claude Code) no longer crash a
+  background thread with `UnicodeDecodeError` when the CLI's own output
+  contains a character outside the OS locale codec -- decoding is now
+  pinned to UTF-8, which also fixed the same latent risk in Ollama
+  model-unload and process-identity checks.
+
+## [1.9.0] - 2026-07-11
+
+### Added
+
+- The app now refuses to start a second instance instead of silently running
+  two side by side (or worse, the second launch killing the first, healthy
+  one). A launch that loses the race prints "Remote Agent Protocol is
+  already running." and exits immediately, leaving the running instance
+  untouched.
+
+## [1.8.2] - 2026-07-10
+
+### Fixed
+
+- Two delegated turns to the same Hermes-family agent no longer run
+  concurrently. Hermes resumes one shared on-disk session per agent name, so
+  overlapping turns could both touch it at once and a job could "complete"
+  with a different, unrelated job's answer instead of its own. A later turn
+  for the same agent now queues (shown as waiting) until the current one
+  fully finishes.
+
+## [1.8.1] - 2026-07-10
+
+### Fixed
+
+- The persona no longer refers to every delegated tool agent as "Hermes" --
+  the gender/name note in the runtime system prompt is now only added when
+  the active tool agent actually is a Hermes variant.
+- The Codex tool user no longer fails immediately with "the system cannot
+  find the file specified": npm-installed `.CMD` shims are now resolved to
+  their real executable path before launch (Windows only launches bare
+  commands as `.EXE` automatically, never `.CMD`/`.BAT`).
+- The Claude Code tool user no longer hangs for the full job timeout and
+  fails: headless dispatch now skips the interactive tool-permission prompt,
+  which previously blocked forever with no TTY to answer it.
+
+## [1.8.0] - 2026-07-10
+
+### Added
+
+- `python -m remote_agent_protocol.doctor` runs read-only startup checks --
+  Python version, Ollama reachability and whether the configured chat/intent
+  models are actually registered, the TTS backend, STT/TTS/wake-word package
+  availability, configured audio device indices, and each agent backend's
+  executable -- before you ever open the GUI.
+- The web control center has a global command palette (`Ctrl+K` / `Meta+K`)
+  for jumping to any panel, running runtime actions (mute, new chat, refresh
+  memory, export diagnostics, start Ollama, free VRAM), or opening a persona,
+  agent job, or memory row by search.
+- Added status checks for the Codex and Claude Code CLIs (availability,
+  version, and whether each appears authenticated).
+
+### Changed
+
+- The distributable wheel now includes the `remote_agent_protocol` package
+  and the web UI's static assets, not just the vendored Pipecat framework;
+  CI installs the `kokoro` extra and measures app coverage alongside it.
+
+### Fixed
+
+- Rebuilding a session no longer reissues a job ID a still-visible row in the
+  Agents panel already holds.
+- "Clear finished" in the Agents panel now actually deletes the persisted
+  job history from disk, instead of only hiding it until the next restart.
+- Fixed a set of circular symlinks in the shared Claude Code skill
+  directories that silently broke skill loading from every tool integration
+  except the one location the loop happened to resolve through.
+
+## [1.7.0] - 2026-07-09
+
+### Added
+
+- Added a full web Agents screen with live job history, current move summaries,
+  raw output inspection, backend status, and editable agent prompt templates.
+- Added Coqui as an optional local TTS backend, including web controls for
+  provider, model, speaker, language, and device selection.
+- Added richer web runtime controls for personas, voice/model selection, wake
+  behavior, memory refresh, diagnostics, Ollama/VRAM status, chat restart, and
+  session reboot.
+
+### Changed
+
+- The application now cleans up web threads, owned Voicebox processes, PID locks,
+  and loaded Ollama models more consistently when stopping or rebooting.
+- Wake-word mode now reports clearer UI phases and a short follow-up window after
+  the assistant speaks.
+
+### Fixed
+
+- Agent results no longer relay system prompts, previous conversation text,
+  status-protocol guidance, or CLI startup/update banners as user-facing answers.
+- Product and shopping research that is misclassified as file/app work now routes
+  to the research agent instead of Code Puppy.
+- Previously persisted injected agent-result memory is stripped before it is
+  loaded back into the assistant context.
+
+## [1.6.0] - 2026-07-08
+
+### Added
+
+- `python -m remote_agent_protocol` now opens a local web control center with
+  the operational graphite UI, dense status panels, memory/setup views, live
+  agent state, and the same `VoiceSession` backend.
+- The shared prompt composer can bundle held voice, typed notes, links, images,
+  and files into one reviewed LLM turn, with context-aware draft holding and
+  optional direct delegation.
+- Voice mode is now persisted and switchable between Free Talk, Wake Word, and
+  Push To Talk; push-to-talk gates microphone input without rebuilding the
+  pipeline.
+- Local wake models under `wake_word/wake_models` are discovered automatically,
+  mapped to personas, and loaded lazily only when wake mode is active.
+
+### Changed
+
+- VAD sensitivity is now configurable from `.env`, and the default start window
+  is shorter so low-gain microphones can begin turns reliably.
+- The Tk interface remains available as a fallback/reference shell, while the
+  default launcher uses the web UI.
+
+### Fixed
+
+- Web status polling now uses cached session state instead of repeatedly
+  exporting the full voice snapshot.
+- Web sends now wait for the backend transcript event, avoiding duplicate user
+  rows while a prompt is in flight.
+
+## [1.5.1] - 2026-07-08
+
+### Fixed
+
+- Code Puppy delegations now quick-resume the latest session scoped to the
+  working directory's Git root and branch, so follow-up jobs retain context.
+- Hermes delegations now use single-query sessions; the bridge captures each
+  backend's session ID and resumes it for follow-up jobs while leaving progress
+  output visible to the host.
+- Agent timeouts now measure consecutive silence instead of total wall-clock
+  runtime, so active multi-step installs are not killed at the five-minute mark.
+- Markerless replies such as "I am having code-puppy update..." now trigger the
+  existing confirmation guard instead of claiming work that was never launched.
+
+## [1.5.0] - 2026-07-07
+
+### Added
+
+- The conversation now shows a live feed of what a delegated agent is doing --
+  each progress step ("code-puppy: checking for an open Command Prompt window")
+  streams in as a dim line between the "task started" and "task done" markers,
+  so a long job reads as a running narration instead of a silent wait. Raw
+  stdout still lives in the Agents panel; only the distilled per-step action is
+  surfaced in the conversation.
+
+### Fixed
+
+- A context-dependent follow-up question ("what is it supposed to do", "how does
+  that work") is no longer turned into a bogus task. The intent classifier only
+  sees the single utterance, so it used to guess at the pronoun and invent a
+  task about a program literally named "it". When an ungrounded classifier
+  verdict comes from a bare pronoun like that, the turn is now handed back to
+  the assistant, which has the conversation (and staged agent results) to
+  resolve what "it" refers to.
+
+## [1.4.5] - 2026-07-07
+
+### Fixed
+
+- Agent follow-up questions are now relayed with context and only when the
+  agent actually asked one. Before, any question mark in a coding agent's
+  streamed reasoning (e.g. "Are you running cmd.exe?") was spoken verbatim in
+  the assistant's voice, as if it were asking out of nowhere -- so the user
+  couldn't tell what was being asked, and their confused reply got misrouted
+  into brand-new tasks. Now only an explicitly marked question, or one the
+  agent ends on, counts, and it is spoken as "Agent 'X' needs your input: ...".
+  A finished job otherwise relays its result.
+
+## [1.4.4] - 2026-07-07
+
+### Changed
+
+- The intent classifier's context is now capped, so it reserves far less VRAM
+  and stays resident beside the voice model instead of being reloaded (and
+  timing out) every turn. This lets a genuinely capable classifier co-reside
+  with a 12B voice model on a 16GB GPU.
+- Default classifier is now `qwen2.5:3b` (`ollama pull qwen2.5:3b`), which routes
+  at 81% on the voice_probe corpus -- far better than the tiny `llama3.2:1b`
+  (~49%) -- while loading at ~2.3GB, so it fits beside the 12B voice with room to
+  spare. So a 16GB box can now run 12B voice smarts *and* solid routing at once.
+  (The 92% `gemma-e4b-aggressive` is still too large to pair with a 12B voice;
+  use it with the small-voice "Snappy" preset -- see `env.example`.)
+
+## [1.4.3] - 2026-07-07
+
+### Fixed
+
+- The intent classifier no longer times out on every turn. Pairing the 5GB
+  `gemma-e4b-aggressive` classifier with a 12B voice model overflowed a 16GB
+  GPU: their combined loaded footprint didn't fit, so Ollama reloaded a model
+  each turn and the classifier hit its timeout every time -- indirect requests
+  silently fell back to chat, so the assistant appeared to restate the request
+  instead of dispatching it and relaying the agent's answer. The default
+  classifier is `llama3.2:1b` again, which co-resides with a 12B voice model.
+- `env.example` presets now spell out the VRAM constraint: on 16GB you can pair
+  a 12B voice model with the tiny classifier, or a small voice model with the
+  accurate `gemma-e4b-aggressive` classifier, but not both large at once.
+
+## [1.4.2] - 2026-07-07
+
+### Fixed
+
+- A single request no longer triggers the agent twice or loops the
+  confirmation prompt. When the deterministic router had already dispatched or
+  held a task for the turn, the assistant's own acknowledgement could carry a
+  delegation marker that fired a second job -- or, for a held task, re-asked
+  for confirmation on every reply in an endless loop. Delegation markers are
+  now ignored on turns that are merely acknowledging or confirming an
+  already-handled task, so one request maps to at most one delegation.
+
+## [1.4.1] - 2026-07-07
+
+### Changed
+
+- Default voice model is now `gemma-12b-huihui` -- a 6.9GB abliterated 12B that
+  replies in ~710ms and, unlike the 12GB Q8 build, stays resident alongside the
+  intent classifier instead of evicting it. `gemma-e4b-max` remains the
+  low-latency "snappy" option (see the preset block in `env.example`).
+- Default intent classifier is now `gemma-e4b-aggressive` (was `llama3.2:1b`),
+  with the per-turn budget raised to 3s. Benchmarked at 92% routing accuracy
+  versus ~49% for the old default, which invented tasks from ordinary chat.
+- `env.example` documents the Snappy and Quality model presets with their
+  measured latency and VRAM footprint.
+
+## [1.4.0] - 2026-07-06
+
+### Added
+
+- A text-driven test harness (`voice_probe`) for the routing / delegation /
+  confirmation mediator. It feeds a deliberate corpus of ~130 prompts through
+  the exact brain the voice path uses, scores each decision (chat / dispatch /
+  confirm) against a grounded expectation, classifies every failure, and writes
+  JSON, Markdown, and HTML reports. Run it with
+  `python -m voice_probe run --classifier {stub|live|off}`.
+- The harness can benchmark any local Ollama model as the intent classifier
+  (`--model <tag> --timeout <secs>`), reporting pass rate and latency so a
+  classifier can be chosen on evidence rather than guesswork.
+
+### Changed
+
+- The intent classifier now disables the model's hidden "thinking" pass. Some
+  local models spent their whole output budget reasoning and returned nothing,
+  which silently degraded every routed turn to plain chat; thinking-capable
+  models now work as the classifier.
+
+### Fixed
+
+- The confirmation gate for destructive actions now matches whole words (with
+  common inflections) instead of loose substrings. Data-loss and system
+  commands that previously slipped through unconfirmed -- "empty the recycle
+  bin", "kill the process", "disable the firewall", `rm` -- now correctly ask
+  first, while lookalikes ("installer", "dropbox", "a new skill") no longer
+  trigger a spurious confirmation.
+- Asking how to do something destructive ("search the web for how to delete an
+  account") is now treated as the read-only lookup it is, instead of being held
+  for confirmation.
+
+## [1.3.1] - 2026-07-06
+
+### Fixed
+
+- The Agents panel's "Last completed" milestone now advances on every step
+  instead of freezing after the first one, and falls back to the final summary
+  when a backend never reports a milestone at all.
+- Delegated agents that exit by asking for permission now create a real
+  confirmation. Approval relaunches the task with the original working
+  directory, and repeated confirmation loops stop after two retries by default.
+- Spoken completion announcements now relay the agent's actual answer instead
+  of its short internal label. Delegated agents are told to keep spoken results
+  brief so the useful answer is heard in one pass.
+
+## [1.3.0] - 2026-07-06
+
+### Added
+
+- Multi-model wake-word persona routing discovers installed openwakeword
+  models, selects the highest-confidence trigger, and applies persona/voice
+  settings before releasing command audio to STT.
+- A loopback-only, versioned lifecycle WebSocket at
+  `ws://127.0.0.1:8765/events` broadcasts allowlisted agent metadata to local
+  dashboards without exposing raw output or backpressuring voice.
+
+### Changed
+
+- Directly addressed agent commands now route deterministically. Delegated
+  prompts include bounded untrusted conversation context, and rapid corrections
+  cancel-and-replace the newest pending or active task without overlapping
+  subprocess launches. Concrete coding tasks prefer Code Puppy when configured.
+- Long-term memory now captures facts stated casually -- phrasings with a
+  leading filler word ("well, my...") or a contraction ("I've got...") that a
+  stricter prefix filter previously dropped.
+- Spoken agent status updates (started, still working, finished, cancelled,
+  failed) now lead with a short result summary or task label instead of reading
+  the full, often long, task sentence back verbatim on every update.
+
+### Fixed
+
+- Delegated conversation context remains private to the agent execution prompt
+  instead of leaking into lifecycle events, history, UI labels, or spoken progress.
+- Completed delegated tasks now relay their actual result -- both spoken and into
+  the assistant's context -- so a follow-up like "what were they?" is answered
+  from the result instead of restating the original request.
+- Requests that merely contain the word "code" (for example "find my validation
+  code in an email") no longer get misrouted to the coding agent.
+- The Agents panel live-output pane refreshes while a job runs and surfaces the
+  final result on completion, so a long-running task no longer appears frozen.
+- The Agents panel no longer crashes when it renders legacy task-history rows
+  that predate status tracking (their null state/action previously killed the
+  GUI event loop).
+- Injected agent status speech (task started, still working, finished, handoff)
+  now appears in the on-screen transcript. It previously bypassed the LLM text
+  path, so later-stage updates were spoken aloud but never shown.
+- Whisper's stock silence-hallucinations ("thank you", "thanks for watching",
+  a bare "you", etc.) are dropped when they are the entire utterance, so they no
+  longer trigger a spurious reply or get parsed as a command.
+- An ungrounded read-only lookup the classifier invents with no connection to
+  what was said (the small local model regurgitating its weather few-shot
+  example is the classic case) is now discarded silently instead of prompting
+  you to confirm a task you never asked for. Ungrounded *mutating* tasks still
+  ask first, since a state change is worth one question.
+## [1.2.0] - 2026-07-05
+
+### Added
+
+- Tiered intent routing keeps explicit commands, acknowledgments, and keyword
+  matches on a zero-model-call path, using the resident `llama3.2:1b` model
+  only for ambiguous requests with a 1.5-second fallback budget.
+- Markerless agent-promise detection prevents claimed-but-unsent work from
+  disappearing as an ordinary chat reply.
+- Vague capability references ("there's a package that does X, I forgot the
+  name, make sure we have it") are detected deterministically and shipped to
+  the agent verbatim as an identify-then-install task held for spoken
+  confirmation, instead of being rewritten into a generic action prompt.
+- Agent scope guardrails: delegated jobs run in a neutral sandbox directory
+  (`data/agent_workspace/`) instead of inheriting this repository as their
+  working directory, every task carries a scope preamble telling the agent its
+  cwd is not the subject of the task, and each job is checked afterwards for
+  silent modifications to this application's own working tree -- flagged in
+  the job history and announced out loud.
+
+### Changed
+
+- `env.example` now documents only Remote Agent Protocol settings, with every
+  optional override disabled by default; `OLLAMA_HOST` consistently configures
+  chat, memory, intent routing, model discovery, and health checks.
+
+### Fixed
+
+- Capability audits such as checking for missing skills now route
+  deterministically in command and question form; classifier warmup gets a
+  cold-start budget without increasing live-turn latency.
+- Markerless promises now create a real pending confirmation instead of asking
+  the LLM to correct itself, and background-task failures are logged rather
+  than silently discarded.
+- Agent CLIs that echo status-protocol examples or print terminal rate-limit
+  errors no longer report false successful completion.
+- Runtime logs and persisted agent jobs now carry full ISO timestamps, and
+  silent agent subprocesses fail after five minutes instead of running forever.
+- Provider quota/rate/capacity failures are classified from streaming output;
+  fatal quota exhaustion is announced immediately and supports spoken OpenAI
+  model switching plus an explicit one-shot retry for CodePuppy and Hermes.
+- "Install" (not just "uninstall") is treated as a destructive task word, so a
+  spoken request that ends up running `pip install` from a third-party source
+  now holds for confirmation like any other system-mutating action.
+
+## [1.1.0] - 2026-07-04
+
+Project renamed to **remote-agent-protocol** (the desktop assistant persona is
+still Jess) and restructured into a production-style layout.
+
+### Changed
+
+- Application package renamed `jess/` → `remote_agent_protocol/`; entry points
+  are now `python -m remote_agent_protocol` (GUI) and
+  `python -m remote_agent_protocol.terminal`.
+- All runtime state moved into a gitignored `data/` directory
+  (`jess_memory.json`, `jess_app_state.json`, `jess_agent_history.json`,
+  `jess_qdrant/`, `persona_overrides.json`, `jess_runtime.log`, diagnostics
+  bundles); existing files were migrated in place.
+- Root decluttered: framework changelog → `docs/CHANGELOG.pipecat.md`,
+  community-integrations guide → `docs/`, `pipecat.png` → `docs/assets/`,
+  `persona_overrides.example.json` → `config/`,
+  `docs/jess-voice-hub.md` → `docs/architecture.md`,
+  `tests/test_jess_dashboard.py` → `tests/test_dashboard.py`.
+- In-app product branding ("Remote Agent Protocol" window title and
+  diagnostics header) follows the new name via `APP_NAME`.
+
+## [1.0.0] - 2026-07-04
+
+First versioned release as a standalone repository.
+
+### Added
+
+- `jess/` application package: the desktop control panel (`python -m jess`),
+  terminal mode (`python -m jess.terminal`), voice session, agent bridge,
+  wake-word gate, personas, transcript + semantic memory, diagnostics, and
+  configuration, all previously loose top-level modules.
+- `AgentBridge.shutdown()`: stops and reaps every live agent subprocess before
+  the event loop closes. `VoiceSession.run()` now calls it on exit, fixing the
+  "Exception ignored in BaseSubprocessTransport.__del__ / I/O operation on
+  closed pipe" crash printed at exit on Windows when an agent job was still
+  running.
+- Project staples: `VERSION`, this changelog, `jess.__version__`.
+
+### Changed
+
+- Entry points: `gui.py` → `python -m jess` (or `start_gui.bat`);
+  `demo_local.py` → `python -m jess.terminal` (or `start_terminal.bat`, which
+  replaces `start_demo.bat`); `list_audio_devices.py` →
+  `scripts/list_audio_devices.py`; `MODELS.md` → `docs/MODELS.md`.
+- Configuration, state files (`jess_memory.json`, `jess_app_state.json`,
+  `jess_agent_history.json`, `jess_qdrant/`), the runtime log, `.env`, and
+  `persona_overrides.json` are now resolved relative to the repository root,
+  so the app works from any working directory.
+- Pipecat's framework changelog moved to `CHANGELOG.pipecat.md` (towncrier and
+  release tooling updated accordingly).
+
+### Removed
+
+- Unused `AGENT_QUESTION_PROMPT` template (agent follow-up questions are spoken
+  directly by the bridge; the memory-strip prefix remains so old transcripts
+  still clean up).

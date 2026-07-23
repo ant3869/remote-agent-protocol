@@ -1,0 +1,39 @@
+phrase: "hey nexus"
+
+# Synthetic positives
+positives:
+  count: 2000
+  voices: all              # 'all' = every Piper en_* voice; or list voice ids
+  sample_rate: 16000
+  augmentations:
+    pitch_shift: [-2, 2]   # semitones
+    time_stretch: [0.9, 1.1]
+    add_noise_snr: [5, 30] # dB
+    reverb_prob: 0.4
+
+# Negatives
+negatives:
+  dataset: "mozilla-foundation/common_voice_13_0"
+  language: "en"
+  count: 50000
+  cache_dir: ./data/negatives_cache
+
+# Model architecture (openWakeWord-compatible)
+model:
+  hidden_size: 64
+  embedding_size: 96
+
+# Training
+training:
+  batch_size: 64
+  epochs: 50
+  lr: 1.0e-4
+  device: cuda
+  val_split: 0.1
+  early_stop_patience: 5
+  output_dir: ./models
+
+# Acceptance gates (model must beat these before being exported)
+acceptance:
+  min_recall: 0.95         # ≥95% of your own positive recordings must trigger
+  max_fp_per_hour: 0.5     # ≤0.5 false positives per hour on a 1h negative stream

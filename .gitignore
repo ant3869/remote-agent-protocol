@@ -1,0 +1,103 @@
+.vscode
+env/
+__pycache__/
+*~
+venv
+.venv
+.idea
+.gradle
+.next
+next-env.d.ts
+local.properties
+*.log
+*.lock
+smart_turn_audio_log
+#*#
+
+# Distribution / Packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.DS_Store
+.env*
+fly.toml
+
+# Examples
+examples/**/node_modules/
+examples/**/.expo/
+examples/**/dist/
+examples/**/.vite/
+examples/**/*.local
+examples/**/npm-debug.*
+examples/**/*.jks
+examples/**/*.p8
+examples/**/*.p12
+examples/**/*.key
+examples/**/*.mobileprovision
+examples/**/*.orig.*
+examples/**/web-build/
+
+# macOS
+.DS_Store
+
+# Documentation
+docs/api/_build/
+docs/api/api
+
+# uv
+.python-version
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# Pipecat
+whisker_setup.py
+
+# Remote Agent Protocol runtime state (may contain conversation content --
+# never commit). Everything the app writes at runtime lives under data/.
+data/
+.codebase-memory/
+.agent/
+
+# Machine-generated AI-editor configs (Codebase Memory MCP rules sync).
+# They embed absolute local paths, so they stay per-machine.
+.cursor/
+.zed/
+.codex/
+.claude/CLAUDE.md
+.github/copilot-instructions.md
+.github/instructions/
+.github/skills/
+
+# Vendored/nested tooling and scratch artifacts -- not part of this app,
+# not submodules, and too large/foreign to track here.
+/TTS/
+/output/
+.playwright-cli/
+.playwright-mcp/
+
+# Personal AI-tool skill symlinks and scratch planning notes -- .claude/skills/
+# is the real, tracked source; these are per-machine mirrors/notes and never
+# meant to be committed.
+/.agents/
+/.cline/
+/.roo/
+/skills/
+/tasks/
