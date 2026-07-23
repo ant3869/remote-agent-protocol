@@ -358,21 +358,8 @@ uv run pytest tests/test_name.py
 
 ## 🤝 Contributing
 
-We welcome contributions from the community! Whether you're fixing bugs, improving documentation, or adding new features, here's how you can help:
-
-- **Found a bug?** Open an [issue](https://github.com/pipecat-ai/pipecat/issues)
-- **Have a feature idea?** Start a [discussion](https://discord.gg/pipecat)
-- **Want to contribute code?** Check our [CONTRIBUTING.md](CONTRIBUTING.md) guide
-- **Documentation improvements?** [Docs](https://github.com/pipecat-ai/docs) PRs are always welcome
-
-Before submitting a pull request, please check existing issues and PRs to avoid duplicates.
-
-We aim to review all contributions promptly and provide constructive feedback to help get your changes merged.
-
-## 🛟 Getting help
-
-➡️ [Join our Discord](https://discord.gg/pipecat)
-
-➡️ [Read the docs](https://docs.pipecat.ai)
-
-➡️ [Reach us on X](https://x.com/pipecat_ai)
+- **Found a bug?** Open an [issue](https://github.com/ant3869/remote-agent-protocol/issues)
+- **Contributing to the vendored Pipecat framework** (`src/pipecat`)? See its own
+  [CONTRIBUTING.md](src/pipecat/CONTRIBUTING.md) and merge upstream changes from
+  the `upstream` remote (https://github.com/pipecat-ai/pipecat) rather than
+  editing framework internals directly.
