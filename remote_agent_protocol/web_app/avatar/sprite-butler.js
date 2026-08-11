@@ -7,18 +7,51 @@ const DEFAULT_SHEETS = [
 ];
 
 const IDLE_CELLS = Object.freeze([0, 1, 2, 3, 5, 6, 7, 9, 12, 13, 14, 15]);
+const FINAL_IDLE_CELLS = Object.freeze([0]);
 const EMOTION_CELLS = Object.freeze({
   warm: 1, pleased: 2, happy: 2, excited: 3, surprised: 8,
   thinking: 5, concerned: 10, error: 10, angry: 10,
   confused: 9, skeptical: 9, sad: 9, apologetic: 9,
+});
+const FINAL_EMOTION_CELLS = Object.freeze({
+  warm: 3, pleased: 11, happy: 11, excited: 11, surprised: 10,
+  thinking: 1, concerned: 1, error: 1, angry: 4,
+  confused: 1, skeptical: 1, sad: 8, apologetic: 8,
 });
 
 function cell(animation, sheet, index) {
   return { animation, sheet, column: index % 4, row: Math.floor(index / 4), index };
 }
 
+function finalFrameFor({ lidScale, state, emotion, speaking, mouth, seconds, age,
+  reducedMotion, glitch }) {
+  if (!reducedMotion && age < 1.625) {
+    return cell("materialize", 2, Math.min(12, Math.floor(age * 8)));
+  }
+  if (!reducedMotion && glitch) return cell("glitch", 1, 6 + Math.floor(seconds * 18) % 10);
+  if (state === "sleeping" || lidScale < 0.58) return cell("blink", 0, 2);
+  if (speaking) {
+    if (!mouth || mouth.closure >= 0.55 || mouth.jawOpen <= 0.08) return cell("speech", 0, 0);
+    return cell("speech", 0, mouth.roundness > 0.18 ? 10 : 11);
+  }
+  if (["focused", "listening", "transcribing", "thinking"].includes(state)) {
+    return cell("material", 1, reducedMotion ? 0 : Math.floor(seconds * 4) % 6);
+  }
+  if (FINAL_EMOTION_CELLS[emotion] !== undefined) {
+    return cell("emotion", 0, FINAL_EMOTION_CELLS[emotion]);
+  }
+  const idleIndex = reducedMotion ? 0 : Math.floor(seconds * 2) % FINAL_IDLE_CELLS.length;
+  return cell("idle", 0, FINAL_IDLE_CELLS[idleIndex]);
+}
+
 export function spriteFrameFor({ lidScale = 0.74, state, emotion = "neutral", speaking = false,
-  mouth, seconds = 0, reducedMotion = false } = {}) {
+  mouth, seconds = 0, age = Number.POSITIVE_INFINITY, reducedMotion = false, glitch = null,
+  pack = "legacy-atlas" } = {}) {
+  if (pack === "final-frames") {
+    return finalFrameFor({
+      lidScale, state, emotion, speaking, mouth, seconds, age, reducedMotion, glitch,
+    });
+  }
   if (state === "sleeping") return cell("sleep", 2, 11);
   if (lidScale < 0.2) return cell("blink", 2, 11);
   if (lidScale < 0.58) return cell("blink", 0, 10);
@@ -35,7 +68,13 @@ export function spriteFrameFor({ lidScale = 0.74, state, emotion = "neutral", sp
   return cell("idle", 0, IDLE_CELLS[idleIndex]);
 }
 
-function makeMaterial(THREE, texture) {
+function makeMaterial(THREE, texture, preserveSourceColor = false) {
+  const colorTreatment = preserveSourceColor
+    ? "color *= (1.0 + uFlicker) * (1.0 - inDrop * min(1.0, uDropAmount * 1.15));"
+    : `
+        color = pow(max(color, vec3(0.0)), vec3(0.76)) * 1.35;
+        float scanline = 0.9 + 0.1 * sin(vUv.y * 1050.0 + uTime * 6.5);
+        color *= scanline * (1.0 + uFlicker) * (1.0 - inDrop * min(1.0, uDropAmount * 1.15));`;
   return new THREE.ShaderMaterial({
     uniforms: {
       map: { value: texture }, uTime: { value: 0 }, uFlicker: { value: 0 },
@@ -62,9 +101,7 @@ function makeMaterial(THREE, texture) {
         vec3 color = vec3(texture2D(map, atlasUv + vec2(split, 0.0)).r, base.g,
                           texture2D(map, atlasUv - vec2(split, 0.0)).b);
         float inDrop = step(uDropStart, vUv.y) * step(vUv.y, uDropEnd);
-        color = pow(max(color, vec3(0.0)), vec3(0.76)) * 1.35;
-        float scanline = 0.9 + 0.1 * sin(vUv.y * 1050.0 + uTime * 6.5);
-        color *= scanline * (1.0 + uFlicker) * (1.0 - inDrop * min(1.0, uDropAmount * 1.15));
+        ${colorTreatment}
         gl_FragColor = vec4(color, base.a);
       }
     `,
@@ -78,17 +115,20 @@ export async function createSpriteButler(THREE, options = {}) {
   const loader = new THREE.TextureLoader();
   const loadTexture = options.loadTexture || ((url) => loader.loadAsync(url));
   const sheetUrls = options.sprites?.sheets || (options.sprites?.sheet ? [options.sprites.sheet] : DEFAULT_SHEETS);
+  const pack = options.sprites?.pack || "legacy-atlas";
+  const finalFrames = pack === "final-frames";
   const textures = await Promise.all(sheetUrls.map((url) => loadTexture(url)));
   for (const texture of textures) {
-    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.colorSpace = finalFrames ? THREE.NoColorSpace : THREE.SRGBColorSpace;
     texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
   }
 
   const object = new THREE.Group();
   object.name = "sprite-butler";
-  const material = makeMaterial(THREE, textures[0]);
-  const geometry = new THREE.PlaneGeometry(1.92, 1.92);
+  const material = makeMaterial(THREE, textures[0], finalFrames);
+  const portraitSize = finalFrames ? 1.48 : 1.92;
+  const geometry = new THREE.PlaneGeometry(portraitSize, portraitSize);
   const portrait = new THREE.Mesh(geometry, material);
   portrait.name = "spritePortrait";
   portrait.position.y = 0.95;
@@ -106,7 +146,7 @@ export async function createSpriteButler(THREE, options = {}) {
   controls.lidRight.scale.y = 0.74;
   const glitches = new GlitchScheduler({ quality: options.quality, yRange: [0, 1], intensity: 1.8 });
   let reducedMotion = Boolean(options.reducedMotion);
-  let frame = spriteFrameFor({ reducedMotion });
+  let frame = spriteFrameFor({ reducedMotion, pack, age: 0 });
   let seconds = 0;
 
   const showFrame = (next) => {
@@ -142,7 +182,10 @@ export async function createSpriteButler(THREE, options = {}) {
         speaking: value?.runtime?.speaking,
         mouth,
         seconds: secondsNow,
+        age: seconds,
         reducedMotion,
+        glitch: glitches.activeType,
+        pack,
       });
       glitches.setState(value?.resolved?.state || "idle");
       if (next.animation !== frame.animation || next.index !== frame.index) showFrame(next);

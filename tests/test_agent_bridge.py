@@ -166,7 +166,8 @@ class PureHelperTests(unittest.TestCase):
             await bridge.start("openclaw", "status")
 
         self._run_async(scenario())
-        self.assertEqual(events[-1]["machine"], "Laptop")
+        job_events = [event for event in events if event.get("type") == "agent_job"]
+        self.assertEqual(job_events[-1]["machine"], "Laptop")
 
     @staticmethod
     def _run_async(coro):
@@ -706,7 +707,8 @@ class BridgeLifecycleTests(unittest.TestCase):
         self._run(scenario())
 
         self.assertTrue(any("assistant: hi" in event.get("line", "") for event in events))
-        self.assertTrue(all(event["task"] == "diagnose system" for event in events))
+        job_events = [event for event in events if event.get("type") == "agent_job"]
+        self.assertTrue(all(event["task"] == "diagnose system" for event in job_events))
 
     def test_replace_latest_cancels_before_starting_corrected_task(self):
         async def scenario():
@@ -872,6 +874,29 @@ class BridgeLifecycleTests(unittest.TestCase):
         job = self._run(scenario())
         self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
 
+    def test_all_finished_event_emits_once_after_last_active_job_finishes(self):
+        events: list[dict] = []
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(MOCK_BACKEND, events.append)
+            first_id = await bridge.start("mock", "sleep:0.2 first")
+            second_id = await bridge.start("mock", "sleep:0.05 second")
+            for _ in range(200):
+                idle_events = [e for e in events if e.get("type") == "agent_jobs_idle"]
+                if idle_events:
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(first_id), bridge.get(second_id)
+
+        first, second = self._run(scenario())
+
+        self.assertEqual(first.status, agent_bridge.STATUS_DONE)
+        self.assertEqual(second.status, agent_bridge.STATUS_DONE)
+        idle_events = [e for e in events if e.get("type") == "agent_jobs_idle"]
+        self.assertEqual(len(idle_events), 1)
+        self.assertEqual(idle_events[0]["event"], "all_finished")
+        self.assertEqual(idle_events[0]["active_count"], 0)
+
     def test_unknown_backend_fails_fast(self):
         events: list[dict] = []
 
@@ -882,7 +907,8 @@ class BridgeLifecycleTests(unittest.TestCase):
 
         job = self._run(scenario())
         self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
-        self.assertEqual(events[-1]["event"], "finished")
+        job_events = [event for event in events if event.get("type") == "agent_job"]
+        self.assertEqual(job_events[-1]["event"], "finished")
 
     def test_two_bridges_in_one_process_cannot_collide_on_job_id(self):
         async def scenario():
@@ -972,9 +998,12 @@ class BridgeLifecycleTests(unittest.TestCase):
 
     def test_timeout_measures_inactivity_not_total_runtime(self):
         events: list[dict] = []
+        # Output every 0.1s against a 1.0s inactivity budget: a 10x margin, so a
+        # loaded machine cannot stall long enough to look idle. Total runtime
+        # still outlives the budget, which is the behaviour under test.
         script = (
             "import time; "
-            "[(print(f'progress {i}', flush=True), time.sleep(0.15)) for i in range(5)]; "
+            "[(print(f'progress {i}', flush=True), time.sleep(0.1)) for i in range(20)]; "
             'print(\'@@JESS_STATUS {"state":"completed","summary":"done",'
             '"result":"done"}\', flush=True)'
         )
@@ -983,7 +1012,7 @@ class BridgeLifecycleTests(unittest.TestCase):
             bridge = agent_bridge.AgentBridge(
                 {"mock": ["{python}", "-u", "-c", script]},
                 events.append,
-                timeout_secs=0.3,
+                timeout_secs=1.0,
                 completion_grace_secs=0.01,
             )
             job_id = await bridge.start("mock", "anything")

@@ -1019,7 +1019,7 @@ class VoiceSession:
         if self._recently_delegated(task):
             logger.info(f"Ignoring duplicate LLM delegation marker for handled task: {task!r}")
             return
-        ack, held = self._delegate_ack_ex(self._default_agent_backend, task)
+        ack, held = self._delegate_ack_ex(self._marker_backend(task), task)
         if held:
             self._spawn(self._inject_and_run(ack), name="llm-delegate-confirm")
 
@@ -1049,9 +1049,20 @@ class VoiceSession:
         self._force_confirm_reason = (
             "the assistant talked about agent work without a valid delegation marker"
         )
-        ack, held = self._delegate_ack_ex(self._default_agent_backend, request)
+        ack, held = self._delegate_ack_ex(self._marker_backend(request), request)
         if held:
             self._spawn(self._inject_and_run(ack), name="markerless-promise-confirm")
+
+    def _marker_backend(self, task: str) -> str:
+        """Prefer the agent the user actually named over the configured default.
+
+        Delegation markers carry a task but no agent, so "maybe code puppy can
+        fix it" must not silently dispatch to whatever the default backend is.
+        """
+        named = voice_commands.named_backend(
+            f"{self._last_user_text} {task}", cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
+        )
+        return named or self._default_agent_backend
 
     def _maybe_consume_confirmation(self, text: str) -> str | None:
         """If a job is pending and ``text`` is a yes/no, resolve it. Else None."""
@@ -1443,9 +1454,21 @@ class VoiceSession:
         if event.get("event") == "started" and event.get("announce_start"):
             self._announce_agent_start(event)
             return
+        if event.get("type") == "agent_jobs_idle" and event.get("event") == "all_finished":
+            self._announce_all_agents_finished()
+            return
         if event.get("event") != "progress":
             return
         self._maybe_announce_agent_progress(event)
+
+    def _announce_all_agents_finished(self) -> None:
+        """Narrate the aggregate idle event once active agent jobs finish."""
+        self._spawn(
+            self._worker.queue_frames(
+                [TTSSpeakFrame(text="All active agents completed.", append_to_context=True)]
+            ),
+            name="agent-all-finished",
+        )
 
     def _announce_agent_start(self, event: dict) -> None:
         agent = event.get("agent", "Agent")

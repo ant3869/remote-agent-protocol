@@ -1,10 +1,11 @@
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 from urllib.error import URLError
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import doctor
+from remote_agent_protocol import doctor, voice_stack
 
 
 class FormatAndExitPolicyTests(unittest.TestCase):
@@ -303,6 +304,85 @@ class RunChecksTests(unittest.TestCase):
         )
         with mock.patch.object(doctor, "_CHECKS", mixed):
             self.assertEqual(doctor.exit_code(doctor.run_checks()), 1)
+
+
+class BrainModeCheckTests(unittest.TestCase):
+    """Brain mode's dependencies live outside the repo, so the doctor probes them."""
+
+    def _brain_mode(self):
+        return mock.patch.object(cfg, "RAP_MODE", "brain")
+
+    def test_full_mode_skips_the_brain_checks_entirely(self):
+        with mock.patch.object(cfg, "RAP_MODE", "full"):
+            self.assertEqual(doctor.check_brain_mode(), [])
+
+    def test_missing_frontend_checkout_fails_and_names_s2s_home(self):
+        with (
+            self._brain_mode(),
+            mock.patch.object(cfg, "S2S_HOME", ""),
+            mock.patch.object(voice_stack, "resolve_s2s_home", return_value=None),
+            mock.patch.object(voice_stack, "occupied_ports", return_value=[]),
+        ):
+            results = doctor.check_brain_mode()
+
+        frontend = next(r for r in results if r.name == "s2s-frontend")
+        self.assertEqual(frontend.status, "fail")
+        self.assertIn("S2S_HOME", frontend.message)
+
+    def test_incomplete_frontend_checkout_names_what_is_missing(self):
+        with (
+            self._brain_mode(),
+            mock.patch.object(voice_stack, "resolve_s2s_home", return_value=Path("C:/s2s")),
+            mock.patch.object(voice_stack, "missing_frontend_pieces", return_value=[".venv"]),
+            mock.patch.object(voice_stack, "occupied_ports", return_value=[]),
+        ):
+            results = doctor.check_brain_mode()
+
+        frontend = next(r for r in results if r.name == "s2s-frontend")
+        self.assertEqual(frontend.status, "fail")
+        self.assertIn(".venv", frontend.message)
+
+    def test_complete_frontend_and_free_ports_are_both_ok(self):
+        with (
+            self._brain_mode(),
+            mock.patch.object(voice_stack, "resolve_s2s_home", return_value=Path("C:/s2s")),
+            mock.patch.object(voice_stack, "missing_frontend_pieces", return_value=[]),
+            mock.patch.object(voice_stack, "occupied_ports", return_value=[]),
+        ):
+            results = doctor.check_brain_mode()
+
+        self.assertEqual([r.status for r in results], ["ok", "ok"])
+
+    def test_occupied_port_warns_rather_than_fails(self):
+        # A running stack and a leftover process look the same from here, and
+        # failing on a healthy running stack would be worse than a warning.
+        with (
+            self._brain_mode(),
+            mock.patch.object(voice_stack, "resolve_s2s_home", return_value=Path("C:/s2s")),
+            mock.patch.object(voice_stack, "missing_frontend_pieces", return_value=[]),
+            mock.patch.object(
+                voice_stack, "occupied_ports", return_value=[("RAP brain/GUI", 8788)]
+            ),
+        ):
+            results = doctor.check_brain_mode()
+
+        ports = next(r for r in results if r.name == "s2s-ports")
+        self.assertEqual(ports.status, "warn")
+        self.assertIn("8788", ports.message)
+
+    def test_brain_checks_never_run_the_frontend_interpreter(self):
+        # missing_kokoro_requirements() would shell out to the frontend's
+        # python; the doctor must stay diagnosis-only.
+        with (
+            self._brain_mode(),
+            mock.patch.object(voice_stack, "resolve_s2s_home", return_value=Path("C:/s2s")),
+            mock.patch.object(voice_stack, "missing_frontend_pieces", return_value=[]),
+            mock.patch.object(voice_stack, "occupied_ports", return_value=[]),
+            mock.patch("subprocess.run") as run,
+        ):
+            doctor.check_brain_mode()
+
+        run.assert_not_called()
 
 
 class MainEntryPointTests(unittest.TestCase):

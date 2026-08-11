@@ -88,6 +88,10 @@ def _parse_command_map(raw: str, name: str) -> dict[str, list[str]]:
 
 APP_NAME = "Remote Agent Protocol"
 APP_TAGLINE = "voice switchboard for local and remote agents"
+# full  = GUI/terminal owns local mic -> STT -> LLM -> TTS -> speakers.
+# brain = GUI stays up, but local audio/STT/TTS are disabled; use an external
+#         realtime frontend such as speech-to-speech for ears/mouth.
+RAP_MODE = _env("RAP_MODE", "full").strip().lower()
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +206,9 @@ LLM_MODEL = _env("LLM_MODEL", "gemma-12b-huihui")
 #   thinking ON : ~40s, 300+ tokens (most never spoken)
 #   thinking OFF: ~0.4s, ~25 tokens, clean 1-2 sentence reply
 LLM_REASONING_EFFORT = "none"
+# Ollama model residency. In brain/S2S mode, keeping the chat model forever
+# defeats the whole low-VRAM goal; let env choose a short residency instead.
+LLM_KEEP_ALIVE = _env("LLM_KEEP_ALIVE", "5m" if RAP_MODE == "brain" else "30m")
 
 # The OpenAI-compatible client needs /v1 while mem0 and health checks need the
 # bare host. Keep one override so every Ollama consumer follows the same server.
@@ -423,6 +430,45 @@ LIFECYCLE_WS_PORT = int(_env("LIFECYCLE_WS_PORT", "8765"))
 LIFECYCLE_WS_PATH = "/events"
 LIFECYCLE_WS_QUEUE_SIZE = int(_env("LIFECYCLE_WS_QUEUE_SIZE", "64"))
 
+# Optional OpenAI-compatible text brain for external realtime voice frontends
+# such as Hugging Face speech-to-speech. This is loopback-only by default: it is
+# a local adapter, not a LAN API. The API key is a bearer-token shared secret;
+# local OpenAI-compatible clients still require some key string, even when the
+# upstream brain is fully local.
+S2S_BRIDGE_HOST = "127.0.0.1"
+S2S_BRIDGE_PORT = int(_env("S2S_BRIDGE_PORT", "8788"))
+S2S_BRIDGE_API_KEY = _env("S2S_BRIDGE_API_KEY", "local")
+S2S_BRIDGE_MODEL = _env("S2S_BRIDGE_MODEL", "remote-agent-protocol")
+S2S_BRIDGE_STREAMING = _env_bool("S2S_BRIDGE_STREAMING", True)
+S2S_MIC_MUTE_FILE = _env("S2S_MIC_MUTE_FILE", str(DATA_DIR / "s2s_mic_muted.flag"))
+# Brain mode has no local TTS, so the GUI voice dropdown reaches the external
+# frontend through this file: RAP writes the Kokoro voice id, the realtime
+# client polls it and pushes a session.update. Same one-way file handshake as
+# the mute flag, which keeps RAP free of any outbound socket to the frontend.
+S2S_VOICE_FILE = _env("S2S_VOICE_FILE", str(DATA_DIR / "s2s_voice.txt"))
+# The audio frontend owns the microphone in brain mode. This atomic JSON bridge
+# carries Free Talk / Wake Word plus the detector settings it needs, mirroring
+# the existing mute and voice handshakes.
+S2S_VOICE_MODE_FILE = _env(
+    "S2S_VOICE_MODE_FILE", str(DATA_DIR / "s2s_input_mode.json")
+)
+S2S_VOICE_MODE_STATUS_FILE = _env(
+    "S2S_VOICE_MODE_STATUS_FILE", str(DATA_DIR / "s2s_input_mode_status.json")
+)
+S2S_VOICE_MODE_ACK_TIMEOUT = float(_env("S2S_VOICE_MODE_ACK_TIMEOUT", "8.0"))
+
+# Agent-job announcements for the realtime frontend: the brain adapter drops
+# {id, text} JSON here when a delegated job finishes, and the mic/speaker
+# client replays the text as a turn so the butler actually says what happened.
+S2S_ANNOUNCE_FILE = _env("S2S_ANNOUNCE_FILE", str(DATA_DIR / "s2s_announce.json"))
+# Checkout of the external realtime frontend, launched by scripts\start_voice.bat.
+# Empty means "not installed": the voice stack launcher then explains itself
+# instead of failing on a missing path.
+S2S_HOME = _env("S2S_HOME", "")
+# WebSocket port the frontend serves; the launcher waits on it before starting
+# the client, so the client never races a server that is still loading models.
+S2S_WS_PORT = int(_env("S2S_WS_PORT", "8767"))
+
 # Maximum silence interval for a delegated job. Output resets the timer, so
 # productive multi-step work can exceed it while a stuck backend is still reaped.
 # Set 0 only for deliberately unbounded interactive work.
@@ -529,7 +575,13 @@ AGENT_SPOKEN_ALIASES = {
     "mock": "mock",
     "the mock agent": "mock",
     "codex": "codex",
+    # STT renders "codex" as "codecs" often enough to earn an alias.
+    "codecs": "codex",
     "claude code": "claude-code",
+    # Observed STT spellings of "claude code" from live sessions.
+    "clawed code": "claude-code",
+    "cloud code": "claude-code",
+    "claud code": "claude-code",
 }
 
 # Implicit delegation: no agent named, but the request is clearly a real-world
@@ -568,6 +620,7 @@ INTENT_MODEL = _env("INTENT_MODEL", "") or "qwen2.5:3b"
 # never stalls the pipeline. 2.5s covers qwen2.5:3b's ~1s warm call with headroom
 # for the occasional cold reload; raise it for a larger, slower classifier.
 INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "2.5"))
+INTENT_KEEP_ALIVE = _env("INTENT_KEEP_ALIVE", "5m")
 # At/above dispatch confidence a task runs. Between confirm and dispatch is
 # the uncertain band: read-only lookups run anyway (a wrong lookup is
 # harmless), state-changing tasks are held for a spoken yes/no. Below the
@@ -603,8 +656,13 @@ AGENT_LLM_DELEGATE = _env_bool("AGENT_LLM_DELEGATE", True)
 LLM_DELEGATE_STYLE = (
     " You have no internet access and cannot see files, apps, or live data "
     "yourself; a tool agent does real-world work for you. The ONLY way to "
-    "engage it is to include the exact marker [[delegate: clear task "
-    "description]] in your reply -- saying you are checking, dispatching, "
+    "engage it is to end your reply with a marker shaped like "
+    "[[delegate: TASK]], where you replace TASK with the actual job in your "
+    "own words -- for example, [[delegate: look up tonight's weather in "
+    "Dallas]] or [[delegate: list the files in the project folder]]. Never "
+    "write TASK, 'clear task description', or any other placeholder inside the "
+    "marker: a marker without a real, specific task is discarded and nothing "
+    "runs. Saying you are checking, dispatching, "
     "summoning, or verifying something does NOTHING unless that same reply "
     "carries the marker. When the user wants live information (weather, news, "
     "prices, places, directions, sports results) or an action you cannot do, "
@@ -663,7 +721,19 @@ AGENT_CONFIRM_DENIED_PROMPT = (
 )
 # Task strings that mean the model parroted a prompt example instead of naming
 # a real task; markers carrying one of these are ignored rather than dispatched.
-DELEGATION_PLACEHOLDER_TASKS = ("clear task description", "task", "task description", "...")
+DELEGATION_PLACEHOLDER_TASKS = (
+    "clear task description",
+    "task",
+    "task description",
+    "...",
+    # Smaller models copy the prompt's slot name straight into the marker.
+    "TASK",
+    "<task>",
+    "the task",
+    "your task",
+    "specific task",
+    "actual job",
+)
 
 # Marker that prefixes every memory block mem0 injects into the context. Shared
 # by mem0_setup.py (which writes it) and memory.py (which strips stale copies on

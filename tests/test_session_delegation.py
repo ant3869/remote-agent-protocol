@@ -74,6 +74,24 @@ class SessionDelegationTests(unittest.TestCase):
 
         self.assertEqual(parsed, ("code-puppy", "add tests to the repo"))
 
+    def test_marker_dispatch_honors_the_agent_named_in_the_request(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        voice_session._default_agent_backend = "codex"
+        calls = []
+        voice_session._delegate_ack_ex = lambda agent, task, cwd=None: (
+            calls.append((agent, task)) or ("ack", False)
+        )
+        voice_session._last_user_text = "codex is stuck, maybe code puppy can fix the tests"
+        aliases = {"code puppy": "code-puppy", "codex": "codex"}
+        backends = {"codex": {}, "code-puppy": {}}
+        with (
+            patch.object(session.cfg, "AGENT_BACKENDS", backends),
+            patch.object(session.cfg, "AGENT_SPOKEN_ALIASES", aliases),
+        ):
+            voice_session._llm_delegate("fix the tests")
+
+        self.assertEqual(calls, [("code-puppy", "fix the tests")])
+
     def test_markerless_promise_becomes_a_real_confirmation(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
         spawned = []
@@ -389,6 +407,25 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(worker.frames), 1)
         self.assertIn("started", worker.frames[0].text)
+
+    async def test_all_finished_event_is_spoken(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        worker = RecordingWorker()
+        voice_session._worker = worker
+
+        voice_session._on_agent_event(
+            {
+                "type": "agent_jobs_idle",
+                "event": "all_finished",
+                "active_count": 0,
+            }
+        )
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(worker.frames), 1)
+        self.assertIsInstance(worker.frames[0], TTSSpeakFrame)
+        self.assertIn("All active agents", worker.frames[0].text)
+        self.assertIn("completed", worker.frames[0].text)
 
 
 if __name__ == "__main__":

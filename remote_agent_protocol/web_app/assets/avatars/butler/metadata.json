@@ -4,7 +4,13 @@
   "model": null,
   "fallback": "sprite-butler",
   "sprites": {
+    "pack": "final-frames",
     "sheets": [
+      "/assets/avatars/butler/final_states.png?v=20260724-2",
+      "/assets/avatars/butler/final_effects.png?v=20260724-2",
+      "/assets/avatars/butler/final_materialize.png?v=20260724-2"
+    ],
+    "legacySheets": [
       "/assets/avatars/butler/sheet_idle.png",
       "/assets/avatars/butler/sheet_glow.png",
       "/assets/avatars/butler/sheet_full.png"

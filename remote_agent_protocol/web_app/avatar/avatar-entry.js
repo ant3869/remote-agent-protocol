@@ -2,6 +2,7 @@ import { normalizeAvatarSettings } from "./avatar-settings.js";
 import { AvatarStateController } from "./avatar-controller.js";
 import { createAvatarPanel } from "./avatar-panel.js";
 import { profileForPersona } from "./persona-profiles.js";
+import { SceneLoadGuard } from "./scene-load-guard.js";
 
 const panel = createAvatarPanel();
 const panelElement = document.getElementById("avatarPanel");
@@ -10,17 +11,21 @@ let settings = normalizeAvatarSettings({}, motionQuery?.matches || false);
 let runtime = {};
 let scene = null;
 let loading = null;
-let sceneGeneration = 0;
+const sceneKey = (value) => `${value.avatarId}:${value.quality}`;
+const sceneGuard = new SceneLoadGuard(sceneKey(settings));
 let panelVisible = true;
 let controller = new AvatarStateController(profileForPersona("", settings.avatarId));
 
 async function ensureScene() {
   if (!panel.host || !settings.enabled || settings.panelCollapsed || !panelVisible || scene || loading) return;
-  const generation = sceneGeneration;
-  loading = import("./avatar-scene.js")
+  const request = sceneGuard.token();
+  const sceneModule = settings.avatarId === "butler"
+    ? "./frame-avatar-scene.js"
+    : "./avatar-scene.js";
+  loading = import(sceneModule)
     .then(({ createAvatarScene }) => createAvatarScene(panel.host, settings))
     .then((created) => {
-      if (generation !== sceneGeneration || !settings.enabled || settings.panelCollapsed) {
+      if (!sceneGuard.accepts(request) || !settings.enabled || settings.panelCollapsed) {
         created.dispose();
         return;
       }
@@ -29,10 +34,14 @@ async function ensureScene() {
       panel.showFallback(false);
     })
     .catch((error) => {
+      if (!sceneGuard.accepts(request)) return;
       console.warn("Avatar scene unavailable", error);
       panel.showFallback(true, "renderer-unavailable");
     })
-    .finally(() => { loading = null; });
+    .finally(() => {
+      loading = null;
+      if (!sceneGuard.accepts(request)) void sync();
+    });
   await loading;
 }
 
@@ -45,7 +54,7 @@ async function sync() {
   const resolved = controller.update(runtime);
   panel.render(runtime, resolved, settings.showState);
   if (!settings.enabled || settings.panelCollapsed) {
-    sceneGeneration += 1;
+    sceneGuard.invalidate();
     scene?.dispose();
     scene = null;
     return;
@@ -70,12 +79,9 @@ const api = {
   getDiagnostics() { return scene?.debug?.getDiagnostics() ?? null; },
   debug: debugApi,
   updateSettings(next) {
-    const previousKey = `${settings.avatarId}:${settings.quality}`;
     settings = normalizeAvatarSettings(next, motionQuery?.matches || false);
-    const nextKey = `${settings.avatarId}:${settings.quality}`;
-    if (scene && previousKey !== nextKey) {
-      sceneGeneration += 1;
-      scene.dispose();
+    if (sceneGuard.updateKey(sceneKey(settings))) {
+      scene?.dispose();
       scene = null;
     }
     void sync();
@@ -86,7 +92,7 @@ const api = {
     if (panelVisible) void ensureScene();
   },
   dispose() {
-    sceneGeneration += 1;
+    sceneGuard.invalidate();
     visibilityObserver?.disconnect();
     panel.host?.removeEventListener("rap:avatar-fallback", onFallback);
     panel.host?.removeEventListener("rap:avatar-recovered", onRecovered);

@@ -9,8 +9,8 @@
   --border-strong: #35353c;
   --text-primary: #f4f4f5;
   --text-secondary: #b4b4be;
-  --text-muted: #747482;
-  --text-faint: #50505c;
+  --text-muted: #9494a1;
+  --text-faint: #7f7f8c;
   --status-success: #22c55e;
   --status-warning: #eab308;
   --status-error: #ef4444;
@@ -55,6 +55,11 @@ select:focus-visible {
 }
 
 button:disabled { cursor: not-allowed; opacity: 0.48; }
+
+/* Brain mode leaves local-audio and semantic-memory controls in place so the
+   layout is stable across modes, but they are inert and have to look it.
+   `button:disabled` above covers most of them; text inputs get nothing from it. */
+body.brain-mode :disabled { cursor: not-allowed; opacity: 0.48; }
 
 .app-shell {
   display: grid;
@@ -130,6 +135,17 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 
 .voice-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .voice-controls .ptt { grid-column: 1 / -1; }
+.input-control-status {
+  margin: 9px 0 0;
+  padding: 8px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.input-control-status.warning { border-color: rgba(234, 179, 8, 0.3); color: #facc15; }
+.input-control-status.error { border-color: rgba(239, 68, 68, 0.35); color: #f87171; }
+.input-control-status.success { border-color: rgba(34, 197, 94, 0.3); color: #4ade80; }
 
 .nav-links,
 .sidebar-actions {
@@ -966,6 +982,36 @@ textarea { resize: vertical; line-height: 1.5; }
 .avatar-panel-body { position: relative; padding: 0 1rem 1rem; }
 .avatar-canvas-host { width: 100%; min-height: 260px; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: 14px; background: var(--surface-raised); }
 .avatar-canvas-host canvas { display: block; width: 100%; height: 100%; min-height: 260px; }
+.avatar-canvas-host.avatar-frame-butler {
+  position: relative;
+  min-height: 0;
+  aspect-ratio: 1;
+  background: radial-gradient(circle at 50% 42%, #10233a 0%, #07111f 56%, #02050b 100%);
+  border-color: rgba(96, 165, 250, 0.28);
+  box-shadow: inset 0 0 48px rgba(2, 6, 14, 0.82), 0 0 26px rgba(96, 165, 250, 0.08);
+}
+.avatar-canvas-host.avatar-frame-butler::before {
+  content: "";
+  position: absolute;
+  inset: 8%;
+  border: 1px solid rgba(96, 165, 250, 0.12);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: avatar-frame-breathe 4s ease-in-out infinite;
+}
+.avatar-canvas-host.avatar-frame-butler canvas {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  aspect-ratio: 1;
+  object-fit: contain;
+}
+@keyframes avatar-frame-breathe {
+  0%, 100% { opacity: .45; transform: scale(.985); }
+  50% { opacity: .8; transform: scale(1.015); }
+}
 .avatar-canvas-host.avatar-visage {
   position: relative;
   background: radial-gradient(120% 90% at 50% 32%, #0a1626 0%, #050b16 55%, #02040b 100%);
@@ -1014,6 +1060,8 @@ textarea { resize: vertical; line-height: 1.5; }
 .avatar-settings-grid input[type="range"] { width: 100%; }
 @media (max-width: 900px) {
   .avatar-canvas-host, .avatar-canvas-host canvas { min-height: 210px; }
+  .avatar-canvas-host.avatar-frame-butler,
+  .avatar-canvas-host.avatar-frame-butler canvas { min-height: 0; }
   .avatar-panel { position: static; }
 }
 @media (prefers-reduced-motion: reduce) {

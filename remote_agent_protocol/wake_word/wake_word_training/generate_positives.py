@@ -26,7 +26,8 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from piper import PiperVoice
+    # Availability probe only; voices are synthesized by the piper CLI below.
+    from piper import PiperVoice  # noqa: F401
 except ImportError:
     print("[!] piper-tts missing — run: pip install -r requirements.txt")
     sys.exit(1)

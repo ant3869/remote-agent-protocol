@@ -406,6 +406,99 @@ class ParseCapabilityRequestTests(unittest.TestCase):
         self.assertIsNone(self.parse("   "))
 
 
+class NamedBackendTests(unittest.TestCase):
+    BACKENDS = {"codex": {}, "code-puppy": {}, "hermes": {}}
+    ALIASES = {
+        "code puppy": "code-puppy",
+        "puppy": "code-puppy",
+        "codex": "codex",
+        "hermes": "hermes",
+    }
+
+    def named(self, text):
+        return voice_commands.named_backend(text, self.BACKENDS, self.ALIASES)
+
+    def test_an_agent_mentioned_mid_sentence_is_found(self):
+        self.assertEqual(self.named("maybe code puppy could fix the tests"), "code-puppy")
+
+    def test_no_mention_returns_none(self):
+        self.assertIsNone(self.named("just fix the tests for me"))
+
+    def test_word_boundaries_prevent_partial_matches(self):
+        self.assertIsNone(self.named("ancient codexes are fascinating"))
+
+    def test_longest_alias_wins(self):
+        # "code puppy" and "puppy" both match; the longer, more specific alias
+        # must be the one consulted first.
+        self.assertEqual(self.named("the code puppy should do it"), "code-puppy")
+
+    def test_unknown_backend_aliases_are_ignored(self):
+        aliases = {"ghost": "not-a-backend"}
+        self.assertIsNone(voice_commands.named_backend("ask ghost to help", self.BACKENDS, aliases))
+
+
+class AgentCancelPhrasingTests(unittest.TestCase):
+    ALIASES = {"claude code": "claude-code", "code puppy": "code-puppy"}
+
+    def cancel(self, text):
+        return voice_commands.parse_agent_cancel(text, self.ALIASES)
+
+    def test_cancel_whatever_a_named_agent_is_doing(self):
+        self.assertEqual(
+            self.cancel("Okay, cancel whatever Claude Code is doing currently."),
+            ("claude-code", False),
+        )
+
+    def test_polite_request_prefix_still_cancels(self):
+        # "I want you to cancel all tasks" failed live while two jobs ran on.
+        self.assertEqual(self.cancel("I want you to cancel all tasks."), (None, True))
+
+    def test_leading_correction_words_still_cancel(self):
+        self.assertEqual(self.cancel("No, just cancel that task."), (None, False))
+
+    def test_mere_mention_of_cancelling_is_not_a_command(self):
+        self.assertIsNone(self.cancel("the build was cancelled overnight"))
+
+    def test_bare_cancel_that_cancels_the_latest_job(self):
+        # Live failure: "No, cancel. Cancel that." parsed as chat; the butler
+        # claimed he cancelled while the job ran happily to completion.
+        self.assertEqual(self.cancel("No, cancel. Cancel that."), (None, False))
+
+    def test_bare_cancel_it_cancels_the_latest_job(self):
+        self.assertEqual(self.cancel("Cancel it."), (None, False))
+
+    def test_cancel_them_all_cancels_everything(self):
+        self.assertEqual(self.cancel("cancel them all"), (None, True))
+
+    def test_cancelling_a_calendar_item_is_not_an_agent_command(self):
+        self.assertIsNone(self.cancel("cancel the meeting tomorrow"))
+
+
+class AgentStatusPhrasingTests(unittest.TestCase):
+    ALIASES = {"hermes": "hermes", "claude code": "claude-code"}
+
+    def status(self, text):
+        return voice_commands.parse_agent_status(text, self.ALIASES)
+
+    def test_update_on_a_named_agents_task(self):
+        self.assertEqual(
+            self.status("What about an update on the the Hermes task, the the configuration problem?"),
+            ("hermes",),
+        )
+
+    def test_generic_progress_question_matches_without_an_agent(self):
+        self.assertEqual(
+            self.status("can I get an update? Like how far along is the agent doing?"),
+            (None,),
+        )
+
+    def test_update_about_unrelated_topics_does_not_match(self):
+        self.assertIsNone(self.status("give me an update on the weather situation"))
+
+    def test_plain_chat_does_not_match(self):
+        self.assertIsNone(self.status("tell me a story about progress in medicine"))
+
+
 class RequiresConfirmationTests(unittest.TestCase):
     DESTRUCTIVE = ("delete", "remove", "format", "uninstall")
 

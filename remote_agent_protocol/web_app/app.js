@@ -19,9 +19,12 @@ const state = {
   selectedMemory: null,
   sending: false,
   paletteIndex: 0,
+  paletteOpener: null,
+  setupStep: 0,
 };
 
 const $ = (id) => document.getElementById(id);
+const uiShell = window.RapUiShell;
 const ACTIVE_AGENT_STATUSES = new Set(["running", "waiting", "blocked"]);
 
 function fmtSeconds(value) {
@@ -123,6 +126,7 @@ function wakeLabel(phase) {
     agent_responding: "Agent responding",
     follow_up_window: "Follow-up window",
     returning_to_passive: "Returning to wake-word mode",
+    passive: "Listening for wake word",
     error: "Wake word error",
   }[phase] || "Wake word idle";
 }
@@ -136,7 +140,13 @@ async function post(action, payload = {}) {
     },
     body: JSON.stringify({ action, ...payload }),
   });
-  const data = await response.json();
+  let data;
+  try {
+    data = await response.json();
+  } catch (_error) {
+    throw new Error(`RAP returned HTTP ${response.status} without JSON.`);
+  }
+  if (!response.ok) throw new Error(data.error || `RAP returned HTTP ${response.status}.`);
   if (data.status) {
     state.status = data.status;
     renderStatus();
@@ -144,23 +154,56 @@ async function post(action, payload = {}) {
   return data;
 }
 
+function renderInputControlState(view) {
+  for (const id of ["muteBtn", "modeBtn", "pttBtn", "settingsMuteBtn", "settingsVoiceModeSelect"]) {
+    const control = $(id);
+    if (control) control.disabled = view.disabled;
+  }
+  const notice = $("inputControlStatus");
+  if (!notice) return;
+  notice.hidden = view.hidden;
+  notice.className = `input-control-status ${view.tone || ""}`.trim();
+  notice.textContent = view.text;
+  $("muteBtn")?.setAttribute("aria-busy", String(Boolean(view.disabled)));
+  $("modeBtn")?.setAttribute("aria-busy", String(Boolean(view.disabled)));
+}
+
+const pttControl = uiShell.createMomentaryControl((active) => {
+  $("pttBtn").classList.toggle("active", active);
+  $("pttBtn").setAttribute("aria-pressed", String(active));
+  if (!state.connectionLost) post("ptt", { active });
+});
+
+const inputControls = window.RapInputControls.createInputControlCoordinator({
+  request: post,
+  getStatus: () => state.status,
+  setStatus: (value) => { state.status = value; },
+  getConnectionLost: () => state.connectionLost,
+  setConnectionLost: (value) => { state.connectionLost = value; },
+  render: renderInputControlState,
+});
+
 async function poll() {
   try {
     const response = await fetch(`/api/events?after=${state.latest}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    if (state.connectionLost) {
-      addMessage("sys", "System", "UI connection restored.");
-      state.connectionLost = false;
-    }
+    const restored = state.connectionLost;
     state.latest = data.latest;
     state.status = data.status;
+    if (restored) {
+      addMessage("sys", "System", "UI connection restored.");
+      inputControls.connected();
+    }
     data.events.forEach(handleEvent);
     renderStatus();
   } catch (error) {
     if (!state.connectionLost) {
       state.connectionLost = true;
+      pttControl.cancel();
       addMessage("sys", "System", `UI connection lost: ${error.message}`);
+      inputControls.render();
+      renderCompactHealth();
       syncAvatarRuntime();
     }
   } finally {
@@ -340,10 +383,60 @@ function renderChat() {
   log.scrollTop = log.scrollHeight;
 }
 
+// Brain mode moves the microphone and speakers into an external realtime
+// frontend. The local audio controls still exist but cannot do anything here,
+// so label them for what they are rather than showing a live-looking mic on a
+// process that never opens one.
+//
+// Controls disabled here are the ones BrainSessionAdapter genuinely drops on
+// the floor. Mute and voice selection are not among them: they cross to the
+// frontend as files it polls, so they keep working. Nothing is hidden, so the
+// layout does not shift when the mode changes.
+const BRAIN_INERT = [
+  ["pttBtn", "Hold-to-talk is owned by the realtime frontend."],
+  ["memoryPinBtn", "Semantic memory writes need the full local session."],
+  ["memoryPinInput", "Semantic memory writes need the full local session."],
+];
+
+function applyBrainMode(s) {
+  const brain = s.mode === "brain";
+  document.body.classList.toggle("brain-mode", brain);
+  for (const [id, why] of BRAIN_INERT) {
+    const el = $(id);
+    if (!el) continue;
+    el.disabled = brain;
+    el.title = brain ? `Brain mode: audio is external. ${why}` : "";
+  }
+  if (!brain) return;
+  const external = "audio is external";
+  $("muteBtn").textContent = s.muted ? "Mic muted (external)" : "Mic live (external)";
+  $("ttsPill").textContent = "external frontend";
+  setPillTone("ttsPill", "status-warning");
+  $("chatState").textContent = external;
+}
+
+function renderCompactHealth() {
+  const cluster = $("healthCluster");
+  if (!cluster) return;
+  const summary = uiShell.healthSummary(state.status, state.connectionLost);
+  cluster.classList.remove("status-success", "status-warning", "status-error");
+  cluster.classList.add(summary.tone);
+  $("healthSummaryContent").textContent = summary.label;
+  cluster.title = state.connectionLost ? "Connection lost" : summary.label;
+  if (state.connectionLost) {
+    $("sessionPill").textContent = "connection lost";
+    $("ollamaPill").textContent = "unconfirmed";
+    $("ttsPill").textContent = "unconfirmed";
+    setPillTone("sessionPill", "status-error");
+    setPillTone("ollamaPill", "status-warning");
+    setPillTone("ttsPill", "status-warning");
+  }
+}
+
 function renderStatus() {
   const s = state.status;
   if (!s) return;
-  $("appTitle").textContent = s.appName;
+  $("appShellTitle").textContent = s.appName;
   $("personaName").textContent = s.persona;
   $("personaBlurb").textContent = s.personaBlurb || "";
   $("heroPersona").textContent = s.persona;
@@ -362,9 +455,11 @@ function renderStatus() {
   const activeAgents = s.activeAgentCount || 0;
   $("agentsPill").textContent = activeAgents ? `${activeAgents} active` : "idle";
   $("agentsPill").closest(".status-pill").classList.toggle("busy", activeAgents > 0);
+  renderCompactHealth();
   $("muteBtn").textContent = s.muted ? "Mic muted" : "Mic live";
   $("muteBtn").classList.toggle("status-error", s.muted);
   $("muteBtn").classList.toggle("status-success", !s.muted);
+  applyBrainMode(s);
   $("modeBtn").textContent = labelMode(s.voiceMode);
   $("modeCard").textContent = labelMode(s.voiceMode);
   $("modelCard").textContent = s.model || "--";
@@ -377,6 +472,9 @@ function renderStatus() {
   $("settingsPersona").textContent = s.persona;
   $("settingsVoice").textContent = s.voice;
   $("settingsTtsProvider").textContent = s.tts?.provider || "--";
+  const coquiSelected = s.tts?.provider === "coqui";
+  $("settingsCoquiGroup").classList.toggle("hidden", !coquiSelected);
+  $("settingsCoquiRefreshBtn").hidden = !coquiSelected;
   $("settingsCoquiStatus").textContent = s.tts?.coqui?.label || s.tts?.coqui?.error || "--";
   $("settingsCoquiDevice").textContent = s.tts?.coqui?.device || "--";
   $("setupCoquiStatus").textContent = s.tts?.coqui?.available ? "Installed" : "Missing";
@@ -393,6 +491,7 @@ function renderStatus() {
   renderAgentsPage();
   renderStatusDashboard(s);
   populateAvatarSettings(s.avatar);
+  inputControls.render();
   syncAvatarRuntime();
   if (!state.activeConfirm && s.pendingConfirms?.length) {
     state.activeConfirm = s.pendingConfirms[0];
@@ -401,7 +500,7 @@ function renderStatus() {
 }
 
 function currentWake() {
-  return { ...(state.status?.wake || {}), ...(state.wake || {}) };
+  return state.status?.wake || state.wake || {};
 }
 
 function wakeRemaining(wake) {
@@ -424,6 +523,9 @@ function renderWakeStatus() {
   $("settingsWakeDetector").textContent = wake.detector_loaded ? "Loaded" : (wake.error || "Not loaded");
   $("settingsWakePassive").textContent = wake.passive ? "Passive listening" : "Responsive";
   $("settingsWakeCountdown").textContent = remaining > 0 ? `${remaining.toFixed(1)}s` : "--";
+  if (state.status?.mode === "brain" && state.status?.voiceMode === "wake_word") {
+    $("chatState").textContent = wakeLabel(phase);
+  }
   $("chatState").classList.toggle("accent-agent-label", phase === "wake_word_detected" || phase === "follow_up_window");
 }
 
@@ -453,7 +555,7 @@ function syncSelects(s) {
   fillSelect($("voiceSelect"), s.voices.map((v) => [v.value, v.label]), s.voice);
   fillSelect($("settingsPersonaSelect"), s.personas.map((p) => [p.name, p.name]), s.persona);
   fillSelect($("settingsToolSelect"), s.agentBackends.map((b) => [b, b]), s.toolUser);
-  fillSelect($("settingsVoiceModeSelect"), voiceModeRows(), s.voiceMode);
+  fillSelect($("settingsVoiceModeSelect"), voiceModeRows(s.mode), s.voiceMode);
   fillSelect($("settingsModelSelect"), s.models.map((m) => [m, m]), s.model);
   fillSelect($("settingsVoiceSelect"), s.voices.map((v) => [v.value, v.label]), s.voice);
   fillSelect($("settingsTtsProviderSelect"), (s.tts?.providers || []).map((p) => [p.id, p.label]), s.tts?.provider || "kokoro");
@@ -470,7 +572,20 @@ function selectedPersonaRecord() {
 }
 
 function renderPersonaPage(s) {
-  if (!s.personas?.length) return;
+  const personaActions = ["duplicatePersonaBtn", "deletePersonaBtn", "revertPersonaBtn", "savePersonaBtn"];
+  const editorFields = document.querySelectorAll(".persona-editor-panel input, .persona-editor-panel textarea, .persona-editor-panel select");
+  if (!s.personas?.length) {
+    renderPersonaList({ personas: [] });
+    personaActions.forEach((id) => { $(id).disabled = true; });
+    editorFields.forEach((field) => { field.disabled = true; });
+    $("personaNotice").textContent = "No persona selected. Create a persona to begin editing.";
+    $("personaNotice").className = "persona-notice status-warning";
+    return;
+  }
+  personaActions.forEach((id) => { $(id).disabled = false; });
+  editorFields.forEach((field) => { field.disabled = field.id === "personaTone"; });
+  $("personaNotice").textContent = "";
+  $("personaNotice").className = "persona-notice";
   if (!state.selectedPersona || !s.personas.some((p) => p.name === state.selectedPersona)) {
     state.selectedPersona = s.persona;
   }
@@ -551,6 +666,9 @@ function personaFormPayload() {
 
 function renderPersonaPreview() {
   const payload = personaFormPayload();
+  document.querySelectorAll(".persona-coqui-field").forEach((field) => {
+    field.hidden = payload.voiceBackend !== "coqui";
+  });
   $("personaPreviewName").textContent = payload.name || "--";
   $("personaPreviewDescription").textContent = payload.description || "No description set.";
   $("personaPreviewModel").textContent = payload.model || state.status?.model || "App default";
@@ -603,16 +721,17 @@ function labelMode(mode) {
   return { wake_word: "Wake Word", free_talk: "Free Talk", push_to_talk: "Push To Talk" }[mode] || "Free Talk";
 }
 
-function voiceModeRows() {
-  return [
+function voiceModeRows(appMode = "full") {
+  const modes = [
     ["free_talk", "Free Talk"],
     ["wake_word", "Wake Word"],
-    ["push_to_talk", "Push To Talk"],
   ];
+  if (appMode !== "brain") modes.push(["push_to_talk", "Push To Talk"]);
+  return modes;
 }
 
-function nextMode(mode) {
-  const modes = ["wake_word", "free_talk", "push_to_talk"];
+function nextMode(mode, appMode = "full") {
+  const modes = voiceModeRows(appMode).map(([value]) => value);
   return modes[(modes.indexOf(mode) + 1) % modes.length] || "free_talk";
 }
 
@@ -734,6 +853,9 @@ function renderAgentRoster() {
     row.innerHTML = `<strong>${escapeHtml(label)}</strong><span>${escapeHtml(detail)}</span><b>${escapeHtml(status)}</b>`;
     roster.appendChild(row);
   });
+  if (!state.status.agentBackends.length) {
+    roster.innerHTML = '<div class="empty-state"><strong>No agent backends.</strong><span>Configure an agent backend to delegate work.</span></div>';
+  }
 }
 
 function renderAgentJobList() {
@@ -774,6 +896,7 @@ function selectedAgentJob() {
 function renderAgentDetail() {
   if (!$("agentDetail")) return;
   const job = selectedAgentJob();
+  $("agentDetailPanel")?.classList.toggle("has-job", Boolean(job));
   if (!job) {
     $("agentDetailTitle").textContent = "No job selected";
     $("agentDetailStatus").textContent = "idle";
@@ -860,20 +983,38 @@ function renderConfirm() {
 }
 
 function renderStatusDashboard(s) {
-  const rows = [
-    ["Session", s.session, s.session === "ready" ? "success" : "warning"],
-    ["Ollama", s.health?.label || "checking", s.health?.ok ? "success" : "error"],
-    ["TTS", s.ttsHealth?.label || "checking", s.ttsHealth?.ok ? "success" : "error"],
-    ["Voice mode", labelMode(s.voiceMode), "info"],
-    ["Memory", s.semanticMemoryEnabled ? "Semantic enabled" : "Short term only", s.memoryEnabled ? "success" : "warning"],
-    ["Default agent", s.toolUser, "info"],
+  const coreServices = [
+    ["Session", s.session, s.session === "ready" ? "success" : "warning", "Runtime entry point"],
+    ["Voice input", labelMode(s.voiceMode), "info", "Capture and wake routing"],
+    ["Ollama", s.health?.label || "checking", s.health?.ok ? "success" : "error", "Local inference"],
+    ["TTS", s.ttsHealth?.label || "checking", s.ttsHealth?.ok ? "success" : "error", "Speech synthesis"],
+    ["Memory", s.semanticMemoryEnabled ? "Semantic enabled" : "Short term only", s.memoryEnabled ? "success" : "warning", "Recall and persistence"],
   ];
+  const resources = [["Default agent", s.toolUser, "info"]];
   if (s.vram?.available) {
-    rows.push(["VRAM", s.vram.label, vramTone(s.vram.percent).replace("status-", "")]);
+    resources.push(["VRAM", s.vram.label, vramTone(s.vram.percent).replace("status-", "")]);
   }
-  $("statusDashboard").innerHTML = rows.map(([label, value, tone]) => (
-    `<article class="status-row-card"><span class="status-icon">${label.slice(0, 2).toUpperCase()}</span><div><strong>${label}</strong><p class="muted">${value}</p></div><b class="${tone}">${tone}</b></article>`
+  const incidents = coreServices.filter(([, , tone]) => tone === "error" || tone === "warning");
+  const serviceNodes = coreServices.map(([label, value, tone, role]) => (
+    `<article class="status-service-node"><span class="status-icon">${label.slice(0, 2).toUpperCase()}</span><div><small>${escapeHtml(role)}</small><strong>${escapeHtml(label)}</strong><p>${escapeHtml(value)}</p></div><b class="status-${tone}">${tone}</b></article>`
   )).join("");
+  const resourceCards = resources.map(([label, value, tone]) => (
+    `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "--")}</strong><i class="status-${tone}">${tone}</i></article>`
+  )).join("");
+  const incidentBody = incidents.length
+    ? incidents.map(([label, value, tone]) => `<p><i class="status-${tone}"></i><span><strong>${escapeHtml(label)}</strong>${escapeHtml(value)}</span></p>`).join("")
+    : '<div class="status-clear"><span class="presence-dot"></span><strong>No active incidents</strong><small>Core dependencies are responding.</small></div>';
+
+  $("statusDashboard").innerHTML = `
+    <section class="status-flow" aria-label="Core service dependency chain">
+      <header><span>Runtime chain</span><strong>Input → inference → speech → recall</strong></header>
+      <div class="status-flow-list">${serviceNodes}</div>
+    </section>
+    <aside class="status-inspection" aria-label="Runtime incidents and resources">
+      <section class="status-incidents"><header><span>Incidents</span><b>${incidents.length}</b></header>${incidentBody}</section>
+      <section class="status-resource-stack"><header>Resources and routing</header>${resourceCards}</section>
+      <section class="status-timeline"><span>Latest snapshot</span><strong>Live state received</strong><small>Refresh or wait for the next runtime event.</small></section>
+    </aside>`;
 }
 
 function renderMemory() {
@@ -885,19 +1026,23 @@ function renderMemory() {
   if (state.selectedMemory && !rows.some((row) => row.id === state.selectedMemory?.id && row.scope === state.selectedMemory?.scope)) {
     state.selectedMemory = null;
   }
+  $("memoryLayout")?.classList.toggle("has-selection", Boolean(state.selectedMemory));
   renderMemoryDetail();
   if (!rows.length) {
     list.innerHTML = '<div class="empty-state"><strong>No memories match.</strong><span>Change tab, tree filter, or search text.</span></div>';
     return;
   }
   rows.forEach((row) => {
-    const card = document.createElement("article");
+    const card = document.createElement("button");
+    card.type = "button";
     const selected = state.selectedMemory?.id === row.id && state.selectedMemory?.scope === row.scope;
     card.className = `memory-card${selected ? " active" : ""}`;
+    card.setAttribute("aria-pressed", String(selected));
     card.innerHTML = `<h4>${escapeHtml(memoryTitle(row))}</h4><p>${escapeHtml(row.text)}</p><div class="tag-row"><span class="tag">${escapeHtml(memoryScopeLabel(row))}</span><span class="tag">${escapeHtml(memoryScore(row))}</span></div>`;
     card.addEventListener("click", () => {
       state.selectedMemory = row;
       renderMemory();
+      $("memoryList").querySelector(".memory-card.active")?.focus();
     });
     list.appendChild(card);
   });
@@ -1116,8 +1261,8 @@ function commandPaletteItems() {
 
   items.push(
     { id: "action:focus-message", group: "Actions", label: "Focus message", hint: "Ctrl L", action: () => $("messageInput").focus() },
-    { id: "action:toggle-mic", group: "Actions", label: "Toggle mic", hint: "Ctrl M", action: () => post("mute", { muted: !state.status?.muted }) },
-    { id: "action:cycle-voice-mode", group: "Actions", label: "Cycle voice mode", hint: "", action: () => post("voice_mode", { mode: nextMode(state.status?.voiceMode) }) },
+    { id: "action:toggle-mic", group: "Actions", label: "Toggle mic", hint: "Ctrl M", action: () => inputControls.run("mute", { muted: !state.status?.muted }) },
+    { id: "action:cycle-voice-mode", group: "Actions", label: "Cycle voice mode", hint: "", action: () => inputControls.run("voice_mode", { mode: nextMode(state.status?.voiceMode, state.status?.mode) }) },
     { id: "action:new-chat", group: "Actions", label: "New chat", hint: "", action: () => { state.messages = []; renderChat(); post("restart_chat"); } },
     { id: "action:refresh-memory", group: "Actions", label: "Refresh memory", hint: "", action: () => { navigateTo("memory"); post("refresh_memory", { query: $("memorySearch").value }); } },
     { id: "action:export-diagnostics", group: "Actions", label: "Export diagnostics", hint: "", action: () => post("export_diagnostics") },
@@ -1191,6 +1336,7 @@ function renderCommandPalette() {
   if (state.paletteIndex >= items.length) state.paletteIndex = Math.max(0, items.length - 1);
   results.innerHTML = "";
   if (!items.length) {
+    $("paletteInput").removeAttribute("aria-activedescendant");
     results.innerHTML = '<div class="empty-state"><strong>No matches.</strong><span>Try a different search.</span></div>';
     return;
   }
@@ -1200,17 +1346,30 @@ function renderCommandPalette() {
       currentGroup = item.group;
       const heading = document.createElement("p");
       heading.className = "palette-group";
+      heading.setAttribute("role", "presentation");
       heading.textContent = currentGroup;
       results.appendChild(heading);
     }
     const button = document.createElement("button");
     button.type = "button";
+    button.id = `paletteOption${index}`;
+    button.tabIndex = -1;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(index === state.paletteIndex));
     button.className = `palette-result${index === state.paletteIndex ? " active" : ""}`;
     button.innerHTML = `<span>${escapeHtml(item.label)}</span>${item.hint ? `<em>${escapeHtml(item.hint)}</em>` : ""}`;
-    button.addEventListener("mouseenter", () => { state.paletteIndex = index; renderCommandPalette(); });
+    button.addEventListener("mouseenter", () => {
+      state.paletteIndex = index;
+      results.querySelectorAll(".palette-result").forEach((option, optionIndex) => {
+        option.classList.toggle("active", optionIndex === index);
+        option.setAttribute("aria-selected", String(optionIndex === index));
+      });
+      $("paletteInput").setAttribute("aria-activedescendant", button.id);
+    });
     button.addEventListener("click", () => runPaletteItem(item));
     results.appendChild(button);
   });
+  $("paletteInput").setAttribute("aria-activedescendant", `paletteOption${state.paletteIndex}`);
 }
 
 function runPaletteItem(item) {
@@ -1221,7 +1380,11 @@ function runPaletteItem(item) {
 function openCommandPalette(initialQuery = "") {
   const palette = $("commandPalette");
   if (!palette) return;
+  state.paletteOpener = document.activeElement instanceof HTMLElement ? document.activeElement : $("paletteOpenBtn");
   palette.classList.remove("hidden");
+  palette.setAttribute("aria-hidden", "false");
+  $("paletteInput").setAttribute("aria-expanded", "true");
+  uiShell.setModalState({ shell: document.querySelector(".app-shell"), body: document.body, open: true, opener: state.paletteOpener });
   state.paletteIndex = 0;
   $("paletteInput").value = initialQuery;
   renderCommandPalette();
@@ -1232,15 +1395,55 @@ function closeCommandPalette() {
   const palette = $("commandPalette");
   if (!palette || palette.classList.contains("hidden")) return;
   palette.classList.add("hidden");
-  $("paletteOpenBtn")?.focus();
+  palette.setAttribute("aria-hidden", "true");
+  $("paletteInput").setAttribute("aria-expanded", "false");
+  uiShell.setModalState({ shell: document.querySelector(".app-shell"), body: document.body, open: false, opener: state.paletteOpener || $("paletteOpenBtn") });
+  state.paletteOpener = null;
 }
 
 function isCommandPaletteOpen() {
   return !$("commandPalette")?.classList.contains("hidden");
 }
 
+const SETUP_MODEL_SUMMARIES = [
+  "Tiny · ~75MB · ~1GB VRAM · fastest",
+  "Base · ~145MB · ~1GB VRAM · balanced",
+  "Small · ~465MB · ~2GB VRAM · accurate",
+  "Medium · ~1.5GB · ~5GB VRAM · highest accuracy",
+];
+let responsiveDisclosureModes = { health: null, activity: null };
+
+function renderSetupStep(index) {
+  const steps = [...document.querySelectorAll(".wizard-step")];
+  state.setupStep = Math.max(0, Math.min(index, steps.length - 1));
+  steps.forEach((step, stepIndex) => { step.open = stepIndex === state.setupStep; });
+  $("setupBackBtn").disabled = state.setupStep === 0;
+  $("setupNextBtn").textContent = state.setupStep === steps.length - 1 ? "Finish" : "Next";
+  $("setupProgress").textContent = state.setupStep === steps.length - 1 ? "Ready to finish review" : `Step ${state.setupStep + 1} of ${steps.length}`;
+}
+
+function selectSetupLanguage(multilingual) {
+  $("setupEnglishBtn").classList.toggle("selected", !multilingual);
+  $("setupMultilingualBtn").classList.toggle("selected", multilingual);
+  $("setupEnglishBtn").setAttribute("aria-pressed", String(!multilingual));
+  $("setupMultilingualBtn").setAttribute("aria-pressed", String(multilingual));
+}
+
+function syncResponsiveDisclosures() {
+  responsiveDisclosureModes = uiShell.applyResponsiveDisclosures({
+    width: window.innerWidth,
+    health: $("healthCluster"),
+    activity: document.querySelector(".activity-panel"),
+    previous: responsiveDisclosureModes,
+  });
+}
+
 function bind() {
   window.addEventListener("rap:avatar-ready", syncAvatarRuntime);
+  window.addEventListener("resize", syncResponsiveDisclosures);
+  window.addEventListener("pageshow", syncResponsiveDisclosures);
+  syncResponsiveDisclosures();
+  requestAnimationFrame(syncResponsiveDisclosures);
   window.addEventListener("rap:avatar-collapse", (event) => {
     const collapsed = Boolean(event.detail?.collapsed);
     $('avatarSettingCollapsed').value = String(collapsed);
@@ -1249,25 +1452,44 @@ function bind() {
   $('avatarSettingsSaveBtn').addEventListener('click', () => void saveAvatarSettings());
   document.querySelectorAll(".nav-link").forEach((button) => {
     button.addEventListener("click", () => {
-      document.querySelectorAll(".nav-link").forEach((item) => item.classList.remove("active"));
+      document.querySelectorAll(".nav-link").forEach((item) => {
+        item.classList.remove("active");
+        item.removeAttribute("aria-current");
+      });
       document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
       button.classList.add("active");
+      button.setAttribute("aria-current", "page");
       $(`${button.dataset.view}View`).classList.add("active");
+      $("appTitle").textContent = uiShell.viewTitle(button.dataset.view);
       if (button.dataset.view === "memory") post("refresh_memory", { query: $("memorySearch").value });
       if (button.dataset.view === "agents") loadAgentsPage().catch((error) => showAgentPromptNotice(`Agents refresh failed: ${error.message}`, false));
     });
   });
-  $("muteBtn").addEventListener("click", () => post("mute", { muted: !state.status?.muted }));
-  $("modeBtn").addEventListener("click", () => post("voice_mode", { mode: nextMode(state.status?.voiceMode) }));
-  $("pttBtn").addEventListener("pointerdown", () => { $("pttBtn").classList.add("active"); post("ptt", { active: true }); });
-  $("pttBtn").addEventListener("pointerup", () => { $("pttBtn").classList.remove("active"); post("ptt", { active: false }); });
+  $("muteBtn").addEventListener("click", () => inputControls.run("mute", { muted: !state.status?.muted }));
+  $("modeBtn").addEventListener("click", () => inputControls.run("voice_mode", {
+    mode: nextMode(state.status?.voiceMode, state.status?.mode),
+  }));
+  $("pttBtn").addEventListener("pointerdown", (event) => {
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    pttControl.start();
+  });
+  $("pttBtn").addEventListener("pointerup", pttControl.stop);
+  $("pttBtn").addEventListener("pointercancel", pttControl.cancel);
+  $("pttBtn").addEventListener("lostpointercapture", pttControl.cancel);
+  $("pttBtn").addEventListener("keydown", pttControl.keyDown);
+  $("pttBtn").addEventListener("keyup", pttControl.keyUp);
+  window.addEventListener("blur", pttControl.cancel);
   $("personaSelect").addEventListener("change", (event) => post("persona", { name: event.target.value }));
   $("toolSelect").addEventListener("change", (event) => post("tool_user", { backend: event.target.value }));
   $("modelSelect").addEventListener("change", (event) => post("model", { model: event.target.value }));
   $("voiceSelect").addEventListener("change", (event) => post("voice", { voice: event.target.value }));
   $("settingsPersonaSelect").addEventListener("change", (event) => post("persona", { name: event.target.value }));
   $("settingsToolSelect").addEventListener("change", (event) => post("tool_user", { backend: event.target.value }));
-  $("settingsVoiceModeSelect").addEventListener("change", (event) => post("voice_mode", { mode: event.target.value }));
+  $("settingsVoiceModeSelect").addEventListener("change", (event) => {
+    const requested = event.target.value;
+    event.target.value = state.status?.voiceMode || "free_talk";
+    inputControls.run("voice_mode", { mode: requested });
+  });
   $("settingsModelSelect").addEventListener("change", (event) => post("model", { model: event.target.value }));
   $("settingsVoiceSelect").addEventListener("change", applyTtsSettings);
   ["settingsTtsProviderSelect", "settingsCoquiModelSelect", "settingsCoquiSpeakerSelect", "settingsCoquiLanguageSelect", "settingsCoquiDeviceSelect"].forEach((id) => {
@@ -1309,7 +1531,7 @@ function bind() {
   $("startOllamaBtn").addEventListener("click", () => post("start_ollama"));
   $("diagnosticsBtn").addEventListener("click", () => post("export_diagnostics"));
   $("rebootBtn").addEventListener("click", () => post("reboot_session"));
-  $("settingsMuteBtn").addEventListener("click", () => post("mute", { muted: !state.status?.muted }));
+  $("settingsMuteBtn").addEventListener("click", () => inputControls.run("mute", { muted: !state.status?.muted }));
   $("settingsRestartBtn").addEventListener("click", () => { state.messages = []; renderChat(); post("restart_chat"); });
   $("settingsMemoryBtn").addEventListener("click", () => post("refresh_memory", { query: $("memorySearch").value }));
   $("settingsDiagnosticsBtn").addEventListener("click", () => post("export_diagnostics"));
@@ -1319,6 +1541,28 @@ function bind() {
   $("agentRefreshBtn").addEventListener("click", () => loadAgentsPage().catch((error) => showAgentPromptNotice(`Agents refresh failed: ${error.message}`, false)));
   $("agentPromptSaveBtn").addEventListener("click", saveAgentPrompts);
   $("refreshCliBtn").addEventListener("click", fetchCliDiagnostics);
+  $("statusRefreshBtn").addEventListener("click", () => { renderStatus(); fetchCliDiagnostics(); });
+  $("setupEnglishBtn").addEventListener("click", () => selectSetupLanguage(false));
+  $("setupMultilingualBtn").addEventListener("click", () => selectSetupLanguage(true));
+  selectSetupLanguage(false);
+  document.querySelectorAll(".wizard-step").forEach((step, index) => {
+    step.querySelector("summary").addEventListener("click", (event) => {
+      event.preventDefault();
+      renderSetupStep(index);
+    });
+  });
+  $("setupModelRange").addEventListener("input", (event) => {
+    $("setupModelSummary").textContent = SETUP_MODEL_SUMMARIES[Number(event.target.value)] || SETUP_MODEL_SUMMARIES[0];
+  });
+  $("setupBackBtn").addEventListener("click", () => renderSetupStep(state.setupStep - 1));
+  $("setupNextBtn").addEventListener("click", () => {
+    const finalStep = document.querySelectorAll(".wizard-step").length - 1;
+    if (state.setupStep < finalStep) renderSetupStep(state.setupStep + 1);
+    else $("setupProgress").textContent = "Review complete · no changes applied";
+  });
+  renderSetupStep(0);
+  renderMemory();
+  renderPersonaPage({ personas: [] });
 
   $("memorySearch").addEventListener("input", (event) => { renderMemory(); post("refresh_memory", { query: event.target.value }); });
   $("memoryPinBtn").addEventListener("click", async () => {
@@ -1372,8 +1616,12 @@ function bind() {
   $("savePersonaBtn").addEventListener("click", savePersona);
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
+      document.querySelectorAll(".tab").forEach((item) => {
+        item.classList.remove("active");
+        item.setAttribute("aria-pressed", "false");
+      });
       tab.classList.add("active");
+      tab.setAttribute("aria-pressed", "true");
       if (tab.dataset.memoryTab === "transcript") {
         document.querySelector('.tree-item[data-memory-filter="short"]')?.click();
       } else if (tab.dataset.memoryTab === "pinned") {
@@ -1387,13 +1635,18 @@ function bind() {
   });
   document.querySelectorAll(".tree-item").forEach((item) => {
     item.addEventListener("click", () => {
-      document.querySelectorAll(".tree-item").forEach((row) => row.classList.remove("active"));
+      document.querySelectorAll(".tree-item").forEach((row) => {
+        row.classList.remove("active");
+        row.setAttribute("aria-pressed", "false");
+      });
       item.classList.add("active");
+      item.setAttribute("aria-pressed", "true");
       state.selectedMemory = null;
       renderMemory();
     });
   });
   $("paletteOpenBtn").addEventListener("click", () => openCommandPalette());
+  $("paletteCloseBtn").addEventListener("click", closeCommandPalette);
   $("paletteInput").addEventListener("input", () => { state.paletteIndex = 0; renderCommandPalette(); });
   $("commandPalette").addEventListener("click", (event) => {
     if (event.target === $("commandPalette")) closeCommandPalette();
@@ -1405,6 +1658,7 @@ function bind() {
       return;
     }
     if (isCommandPaletteOpen()) {
+      if (uiShell.trapModalTab(event, $("commandPalette"))) return;
       if (event.key === "Escape") { event.preventDefault(); closeCommandPalette(); return; }
       if (event.key === "ArrowDown") { event.preventDefault(); state.paletteIndex += 1; renderCommandPalette(); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); state.paletteIndex = Math.max(0, state.paletteIndex - 1); renderCommandPalette(); return; }
@@ -1417,7 +1671,7 @@ function bind() {
       return;
     }
     if (event.ctrlKey && event.key.toLowerCase() === "l") $("messageInput").focus();
-    if (event.ctrlKey && event.key.toLowerCase() === "m") post("mute", { muted: !state.status?.muted });
+    if (event.ctrlKey && event.key.toLowerCase() === "m") inputControls.run("mute", { muted: !state.status?.muted });
   });
 }
 

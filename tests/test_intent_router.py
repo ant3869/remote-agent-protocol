@@ -57,6 +57,48 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.task, "open steam")
         self.assertEqual(classify.calls, [])  # tier 1 never pays for tier 2
 
+    async def test_a_named_agent_overrides_the_default_backend(self):
+        # "on codex, asking for code puppy still used codex" -- the classifier
+        # tier extracted the task but threw away the agent the user named.
+        classify = FakeClassify(
+            result=verdict(category="files_or_apps", task="Fix the failing tests", conf=0.9)
+        )
+        with (
+            patch.object(intent_router.cfg, "AGENT_BACKENDS", {"codex": {}, "code-puppy": {}}),
+            patch.object(
+                intent_router.cfg,
+                "AGENT_SPOKEN_ALIASES",
+                {"code puppy": "code-puppy", "codex": "codex"},
+            ),
+        ):
+            decision = await make_router(classify).route(
+                "the tests are still broken, maybe code puppy can fix the failing tests",
+                "codex",
+            )
+
+        self.assertNotEqual(decision.action, "none")
+        self.assertEqual(decision.agent, "code-puppy")
+
+    async def test_no_named_agent_keeps_the_default_backend(self):
+        classify = FakeClassify(
+            result=verdict(category="files_or_apps", task="Fix the failing tests", conf=0.9)
+        )
+        with (
+            patch.object(intent_router.cfg, "AGENT_BACKENDS", {"codex": {}, "code-puppy": {}}),
+            patch.object(
+                intent_router.cfg,
+                "AGENT_SPOKEN_ALIASES",
+                {"code puppy": "code-puppy", "codex": "codex"},
+            ),
+        ):
+            decision = await make_router(classify).route(
+                "the tests are still broken, someone should fix the failing tests",
+                "codex",
+            )
+
+        self.assertNotEqual(decision.action, "none")
+        self.assertEqual(decision.agent, "codex")
+
     async def test_confident_lookup_dispatches_via_classifier(self):
         classify = FakeClassify(
             result=verdict(task="Get the storm forecast for Bentonville", conf=0.92)
@@ -312,9 +354,11 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(classify.calls, ["hello"])
 
     async def test_default_warmup_has_a_cold_start_budget(self):
+        # enabled= is pinned so a .env with INTENT_ROUTER_ENABLED=false cannot
+        # skip the warmup call and make this assertion vacuous.
         classify = AsyncMock(return_value=verdict(intent="chat", category="none", task=""))
         with patch.object(intent_router, "classify_with_ollama", classify):
-            await intent_router.IntentRouter(timeout_secs=0.05).warmup()
+            await intent_router.IntentRouter(enabled=True, timeout_secs=0.05).warmup()
 
         self.assertEqual(classify.await_args.kwargs["timeout_secs"], 30.0)
 

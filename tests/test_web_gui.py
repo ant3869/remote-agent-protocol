@@ -6,6 +6,8 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 from remote_agent_protocol import (
     agent_bridge,
     app_state,
@@ -17,6 +19,16 @@ from remote_agent_protocol import config as cfg
 from remote_agent_protocol.web_gui import WebVoiceApp, _bundle_from_payload
 
 WEB_APP = Path("remote_agent_protocol/web_app")
+
+
+@pytest.fixture(autouse=True)
+def default_full_mode(monkeypatch):
+    """Pin full mode so a developer's RAP_MODE=brain .env cannot flip these tests.
+
+    Most cases here assert on the local-audio VoiceSession path; brain-mode cases
+    override this with their own monkeypatch.
+    """
+    monkeypatch.setattr(cfg, "RAP_MODE", "full")
 
 
 def test_web_shell_uses_operational_graphite_design_tokens():
@@ -129,13 +141,18 @@ def test_web_shell_has_a_global_command_palette():
     assert ".command-palette" in palette_mobile_rule
 
 
-def test_web_shell_uses_dense_mission_control_structure():
+def test_web_shell_uses_command_frame_structure():
     html = (WEB_APP / "index.html").read_text(encoding="utf-8")
 
-    assert 'class="control-grid"' in html
+    assert 'class="command-header"' in html
+    assert 'class="destination-rail"' in html
+    assert 'class="context-rail"' in html
+    assert 'class="task-canvas workspace"' in html
+    assert 'class="runtime-statusline"' in html
     assert 'class="activity-panel"' in html
     assert 'class="system-strip"' in html
-    assert 'class="assistant-control"' in html
+    assert 'class="assistant-transceiver"' in html
+    assert 'class="control-grid"' not in html
     assert 'class="hero-panel"' not in html
     assert 'class="orb"' not in html
 
@@ -236,6 +253,69 @@ def _post_action(port, action, token=None, payload=None):
     return urllib.request.urlopen(req, timeout=5)
 
 
+@pytest.mark.parametrize("session_state", ["starting", "building", "failed", "stopped"])
+def test_brain_health_rejects_a_session_that_cannot_accept_turns(monkeypatch, session_state):
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    app = WebVoiceApp()
+    app._session_state = session_state
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5)
+        assert caught.value.code == 503
+        payload = json.loads(caught.value.read())
+        assert payload == {
+            "ok": False,
+            "mode": "brain",
+            "model": cfg.S2S_BRIDGE_MODEL,
+            "session": session_state,
+            "muteReady": True,
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_brain_boot_does_not_publish_ready_before_the_adapter_runs(monkeypatch):
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    events = []
+
+    class FakeBrainAdapter:
+        def build(self):
+            return None
+
+        async def run(self):
+            assert {"type": "session", "state": "ready"} not in events
+
+    app = WebVoiceApp.__new__(WebVoiceApp)
+    app._session = FakeBrainAdapter()
+    app._publish = events.append
+
+    app._boot_thread()
+
+    assert {"type": "session", "state": "ready"} not in events
+
+
+def test_brain_health_accepts_a_ready_session(monkeypatch):
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    app = WebVoiceApp()
+    app._session_state = "ready"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5)
+        assert response.status == 200
+        assert json.loads(response.read())["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_post_action_requires_a_matching_csrf_token():
     # A foreign webpage open in the same browser has no way to read this
     # server's token, so it can't forge a valid X-Session-Token header --
@@ -273,6 +353,23 @@ def test_index_html_serves_the_real_csrf_token():
         html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode()
         assert f'window.__CSRF_TOKEN__ = "{app._csrf_token}"' in html
         assert "__CSRF_TOKEN_PLACEHOLDER__" not in html
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_avatar_frames_are_served_with_immutable_browser_cache():
+    app = WebVoiceApp()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/assets/avatars/butler/runtime_512_v1/base.webp",
+            timeout=5,
+        )
+        assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
     finally:
         server.shutdown()
         server.server_close()
@@ -486,7 +583,7 @@ def test_agents_page_explains_agent_moves():
     assert "function fallbackAgentMoves" in script
     assert "last_completed_step" in script
     assert "Current move" in script
-    assert "Move timeline" in (WEB_APP / "index.html").read_text(encoding="utf-8")
+    assert "Execution timeline" in (WEB_APP / "index.html").read_text(encoding="utf-8")
     assert ".agent-move-timeline" in css
     assert ".agent-now-card" in css
 
@@ -661,6 +758,28 @@ def test_wake_event_scores_do_not_poison_event_polling():
     json.dumps(payload)
 
 
+def test_failed_action_returns_authoritative_input_state(monkeypatch):
+    app = WebVoiceApp()
+    app._muted = True
+    app._s2s_mute_ready = False
+    app._actions["mute"] = lambda _payload: {"ok": False, "error": "mute bridge failed"}
+
+    result = app._action("mute", {"muted": False})
+
+    assert result["ok"] is False
+    assert result["status"]["muted"] is True
+    assert result["status"]["inputControl"]["muteReady"] is False
+
+
+def test_unknown_action_also_returns_authoritative_status():
+    app = WebVoiceApp()
+
+    result = app._action("not-real", {})
+
+    assert result["ok"] is False
+    assert result["status"]["voiceMode"] == app._voice_mode
+
+
 def test_status_payload_exposes_wake_word_state():
     app = WebVoiceApp()
     app._voice_mode = "wake_word"
@@ -687,6 +806,12 @@ def test_status_payload_exposes_wake_word_state():
     assert wake["detector_loaded"] is True
 
 
+def test_authoritative_wake_status_wins_over_stale_browser_event_cache():
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+
+    assert "return state.status?.wake || state.wake || {};" in script
+
+
 def test_poll_connection_errors_are_deduped_and_backed_off():
     script = (WEB_APP / "app.js").read_text(encoding="utf-8")
 
@@ -702,7 +827,8 @@ def test_settings_page_controls_call_existing_actions():
     assert 'settingsPersonaSelect").addEventListener("change"' in script
     assert 'post("persona", { name: event.target.value })' in script
     assert 'settingsVoiceModeSelect").addEventListener("change"' in script
-    assert 'post("voice_mode", { mode: event.target.value })' in script
+    assert 'inputControls.run("voice_mode", { mode: requested })' in script
+    assert 'event.target.value = state.status?.voiceMode || "free_talk"' in script
     assert 'settingsModelSelect").addEventListener("change"' in script
     assert 'settingsVoiceSelect").addEventListener("change"' in script
     assert "settingsTtsProviderSelect" in script
@@ -988,6 +1114,41 @@ def _restore_agent_prompts(snapshot: dict[str, str]) -> None:
     cfg.AGENT_CONFIRM_DENIED_PROMPT = snapshot["confirmDenied"]
 
 
+def test_new_session_uses_brain_adapter_in_brain_mode(monkeypatch):
+    captured = {}
+
+    class FakeBrainAdapter:
+        def __init__(self, persona, on_event=None):
+            captured["persona"] = persona
+            captured["on_event"] = on_event
+
+        def set_manual_prompt_mode(self, value):
+            return None
+
+        def set_voice_mode(self, value):
+            return None
+
+        def set_muted(self, value):
+            return None
+
+        def set_startup_defaults(self, **kwargs):
+            captured["startup"] = kwargs
+
+        def set_voicebox_warmup_personas(self, personas):
+            return None
+
+        def set_default_agent_backend(self, backend):
+            captured["backend"] = backend
+
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    monkeypatch.setattr(web_gui, "BrainSessionAdapter", FakeBrainAdapter)
+    app = WebVoiceApp()
+
+    assert isinstance(app._session, FakeBrainAdapter)
+    assert captured["on_event"] == app._events_in.put
+    assert "voice_backend" in captured["startup"]
+
+
 def test_new_session_receives_avatar_audio_callback(monkeypatch):
     captured = {}
 
@@ -1035,7 +1196,23 @@ def test_avatar_audio_route_calls_streamer():
     app = WebVoiceApp()
     handler_class = app._handler_class()
 
-    assert "/api/avatar-audio" in inspect.getsource(handler_class.do_GET)
+    # do_GET only wraps the router in error handling; the routes live here.
+    assert "/api/avatar-audio" in inspect.getsource(handler_class._dispatch_get)
+
+
+def test_gui_exposes_openai_chat_completion_route_for_s2s():
+    app = WebVoiceApp()
+    handler_class = app._handler_class()
+    source = inspect.getsource(handler_class._dispatch_post)
+
+    assert "/v1/chat/completions" in source
+    assert "complete_text" in source
+
+
+def test_gui_brain_mode_uses_stable_s2s_bridge_port():
+    source = inspect.getsource(WebVoiceApp.run)
+
+    assert "cfg.S2S_BRIDGE_PORT if cfg.RAP_MODE == \"brain\" else 0" in source
 
 
 def test_avatar_audio_tap_sits_between_tts_and_local_output():
@@ -1056,6 +1233,12 @@ def test_avatar_vendor_and_metadata_files_are_declared():
     assert metadata["id"] == "butler"
     assert metadata["model"] is None
     assert metadata["fallback"] == "sprite-butler"
+    assert metadata["sprites"]["pack"] == "final-frames"
+    assert all(
+        (WEB_APP / path.partition("?")[0].removeprefix("/")).is_file()
+        for path in metadata["sprites"]["sheets"] + metadata["sprites"]["legacySheets"]
+    )
+    assert all("?v=" in path for path in metadata["sprites"]["sheets"])
     assert version == "0.180.0"
     assert '"web_app/**/*"' in project
     assert (WEB_APP / "vendor/three/LICENSE").is_file()
@@ -1105,7 +1288,7 @@ def test_web_shell_contains_avatar_panel_import_map_and_settings():
     ]:
         assert marker in html
     assert 'type="importmap"' in html
-    assert '"three": "/vendor/three/three.module.min.js"' in html
+    assert '"three":"/vendor/three/three.module.min.js"' in html
     assert 'src="/avatar/avatar-entry.js"' in html
     assert "function syncAvatarRuntime" in script
     assert "post('avatar_settings'" in script
@@ -1181,6 +1364,7 @@ def test_package_data_covers_nested_avatar_assets():
     for relative in [
         "avatar/avatar-entry.js",
         "avatar/avatar-scene.js",
+        "avatar/scene-load-guard.js",
         "assets/avatars/butler/metadata.json",
         "vendor/three/three.module.min.js",
         "vendor/three/three.core.min.js",
@@ -1196,7 +1380,7 @@ def test_avatar_review_gaps_are_covered():
     scene = (WEB_APP / "avatar/avatar-scene.js").read_text(encoding="utf-8")
 
     assert "lastActivityAt" in app and "sleeping:" in app
-    assert "previousKey" in entry and "nextKey" in entry
+    assert "sceneGuard.updateKey(sceneKey(settings))" in entry
     assert "AnimationMixer" in scene
     assert "morphTargetInfluences" in scene
     assert "cameraTarget" in scene

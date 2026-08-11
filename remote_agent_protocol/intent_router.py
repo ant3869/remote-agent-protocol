@@ -434,9 +434,9 @@ async def classify_with_ollama(
         # fails and every turn silently degrades to chat. Ollama accepts this
         # flag as a no-op on non-thinking models, so it is always safe to send.
         "think": False,
-        # Keep the (small) classifier model resident between turns; a cold
-        # reload would eat the whole latency budget.
-        "keep_alive": "30m",
+        # Keep the classifier resident only as long as configured. Brain/S2S
+        # low-VRAM mode can disable the router entirely, or keep this short.
+        "keep_alive": cfg.INTENT_KEEP_ALIVE,
     }
     timeout = aiohttp.ClientTimeout(total=timeout_secs)
     async with aiohttp.ClientSession(timeout=timeout) as http:
@@ -569,10 +569,23 @@ class IntentRouter:
         """Decide what to do with one user utterance, with full provenance."""
         t0 = time.perf_counter()
         decision = await self._route(text, default_backend)
+        # The user naming an agent outranks every tier's default-backend choice.
+        # The explicit tier already honors names; this catches looser phrasings
+        # ("maybe code puppy could fix it") that reach the keyword or classifier
+        # tiers, which otherwise dispatch to whatever the default happens to be.
+        named = voice_commands.named_backend(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)
+        if named and decision.action != ACTION_NONE and decision.agent != named:
+            decision.agent = named
+            decision.reason += " -- routed to the agent named in the request"
         decision.elapsed_ms = int((time.perf_counter() - t0) * 1000)
         return decision
 
-    async def _route(self, text: str, default_backend: str) -> RoutingDecision:
+    def _route_deterministic(self, text: str, default_backend: str) -> RoutingDecision | None:
+        """Tiers 1-5: everything decidable without spending classifier budget.
+
+        Ordered cheapest-and-most-certain first. Returns None only when no tier
+        matched, which is the sole condition for paying for classification.
+        """
         # Tier 1: the user named the agent -- deterministic, always wins.
         parsed = voice_commands.parse_delegation(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)
         if parsed is not None:
@@ -677,34 +690,51 @@ class IntentRouter:
                 risk=_classify_risk(agent, task, grounded=True, confident=True),
             )
 
+        return None
+
+    async def _classify_verdict(self, text: str) -> tuple[dict | None, str]:
+        """Run the classifier, returning its verdict and why it has none.
+
+        Every way this can go wrong -- disabled, timed out, unparseable, or a
+        few-shot example echoed back verbatim -- yields ``(None, reason)`` and
+        lets the caller fall through to chat, so a bad classifier degrades to
+        conversation rather than to a wrong dispatch.
+        """
+        if not self._enabled:
+            return None, "disabled"
+        # Parsing stays inside the try: a classifier can return anything at all,
+        # and a malformed verdict must degrade to chat like any other failure
+        # rather than raise through the voice turn.
+        try:
+            raw = await asyncio.wait_for(self._classify(text), self._timeout + 0.5)
+            verdict = _normalize_verdict(raw)
+            leaked = None if verdict is None else _example_echo(verdict, text)
+        except TimeoutError:
+            logger.warning(f"Intent classifier timed out after {self._timeout:.1f}s")
+            return None, "timeout"
+        except Exception as exc:
+            logger.warning(f"Intent classifier failed ({exc}); treating as chat")
+            return None, "error"
+
+        if verdict is None:
+            logger.warning(f"Intent classifier returned unusable verdict: {raw!r}")
+            return None, "invalid"
+        if leaked is not None:
+            logger.warning(
+                f"Intent classifier echoed the {leaked!r} example verbatim for "
+                f"unrelated utterance {text!r}; discarding verdict {verdict!r}"
+            )
+            return None, "invalid"
+        return verdict, ""
+
+    async def _route(self, text: str, default_backend: str) -> RoutingDecision:
+        decision = self._route_deterministic(text, default_backend)
+        if decision is not None:
+            return decision
+
         # Tier 6: semantic classification -- only for utterances the free
         # tiers above could not place.
-        verdict: dict | None = None
-        fallback = ""
-        if not self._enabled:
-            fallback = "disabled"
-        else:
-            try:
-                raw = await asyncio.wait_for(self._classify(text), self._timeout + 0.5)
-                verdict = _normalize_verdict(raw)
-                if verdict is None:
-                    fallback = "invalid"
-                    logger.warning(f"Intent classifier returned unusable verdict: {raw!r}")
-                else:
-                    leaked = _example_echo(verdict, text)
-                    if leaked is not None:
-                        fallback = "invalid"
-                        logger.warning(
-                            f"Intent classifier echoed the {leaked!r} example verbatim for "
-                            f"unrelated utterance {text!r}; discarding verdict {verdict!r}"
-                        )
-                        verdict = None
-            except TimeoutError:
-                fallback = "timeout"
-                logger.warning(f"Intent classifier timed out after {self._timeout:.1f}s")
-            except Exception as exc:
-                fallback = "error"
-                logger.warning(f"Intent classifier failed ({exc}); treating as chat")
+        verdict, fallback = await self._classify_verdict(text)
 
         if (
             verdict is not None

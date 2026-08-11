@@ -101,3 +101,13 @@ data/
 /.roo/
 /skills/
 /tasks/
+
+# Redirected stdout/stderr from hand-launched brain/GUI processes
+# (`... > rap_gui_brain.out 2> rap_gui_brain.err`) while debugging brain mode.
+/rap_*.out
+/rap_*.err
+/output.txt
+/[0-9]*]
+
+# Superseded layout experiment; layout-v4.css is the shipped command frame.
+/remote_agent_protocol/web_app/layout-v3.css

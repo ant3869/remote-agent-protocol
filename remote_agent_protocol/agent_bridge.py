@@ -734,6 +734,7 @@ class AgentBridge:
         # references, so an untracked task can be garbage-collected mid-job --
         # silently dropping the agent output and the completion announcement.
         self._tasks: set[asyncio.Task] = set()
+        self._idle_notified = True
 
     # -- queries ------------------------------------------------------------
 
@@ -790,6 +791,7 @@ class AgentBridge:
         job._t0 = time.monotonic()
         job._last_status = job._t0
         self._jobs[job.job_id] = job
+        self._idle_notified = False
 
         if agent not in self._backends:
             result = await self._fail_fast(job, f"unknown agent backend '{agent}'")
@@ -846,6 +848,7 @@ class AgentBridge:
             job.finished_at = _now_iso()
             self._emit_job(job, "finished", summary=job.summary, secs=job.secs)
             await self._notify_finished(job)
+            self._emit_all_finished_if_idle()
             job._launch_done.set()
             return
         command_task = (
@@ -907,13 +910,17 @@ class AgentBridge:
             return
         await self._terminate(proc)
 
-    async def cancel_active(self, agent: str | None = None, *, all_jobs: bool = False) -> int:
-        """Cancel the newest matching job, or every matching active job."""
-        jobs = [
+    def active_jobs(self, agent: str | None = None) -> list:
+        """Active jobs, oldest first, optionally filtered by agent."""
+        return [
             job
-            for job in reversed(self._jobs.values())
+            for job in self._jobs.values()
             if job.status in _ACTIVE_STATUSES and (agent is None or job.agent == agent)
         ]
+
+    async def cancel_active(self, agent: str | None = None, *, all_jobs: bool = False) -> int:
+        """Cancel the newest matching job, or every matching active job."""
+        jobs = list(reversed(self.active_jobs(agent)))
         if not all_jobs:
             jobs = jobs[:1]
         await asyncio.gather(*(self.cancel(job.job_id) for job in jobs))
@@ -961,6 +968,7 @@ class AgentBridge:
         logger.warning(f"Agent job {job.job_id} failed to start: {reason}")
         self._emit_job(job, "finished", summary=reason)
         await self._notify_finished(job)
+        self._emit_all_finished_if_idle()
         return job.job_id
 
     async def _consume(self, job: AgentJob, proc: asyncio.subprocess.Process) -> None:
@@ -1107,6 +1115,7 @@ class AgentBridge:
         logger.info(f"Agent job {job.job_id} [{job.agent}] -> {job.status}")
 
         await self._notify_finished(job)
+        self._emit_all_finished_if_idle()
 
     async def _host_snapshot(self) -> str | None:
         """``git status --porcelain`` of the host repo; None when disabled/unavailable."""
@@ -1153,6 +1162,23 @@ class AgentBridge:
                 await self._on_finished(job)
             except Exception as e:  # announcing must never crash the bridge
                 logger.warning(f"agent on_finished raised: {e}")
+
+    def _emit_all_finished_if_idle(self) -> None:
+        """Emit one aggregate event when the active job set becomes empty."""
+        if self._idle_notified or self.has_active():
+            return
+        self._idle_notified = True
+        payload = {
+            "type": "agent_jobs_idle",
+            "event": "all_finished",
+            "active_count": 0,
+            "job_count": len(self._jobs),
+            "finished_at": _now_iso(),
+        }
+        try:
+            self._on_event(payload)
+        except Exception as e:  # aggregate notifications are best-effort too
+            logger.warning(f"agent all_finished event raised: {e}")
 
     async def _heartbeat(self, job: AgentJob, proc: asyncio.subprocess.Process) -> None:
         """Emit bounded progress while an otherwise-silent process is alive."""

@@ -10,22 +10,79 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-08-10
+
+### Added
+
+- Low-VRAM brain mode (`RAP_MODE=brain`) keeps routing, confirmations,
+  short-term transcript context, personas, delegation, and agent lifecycle
+  while an external realtime frontend owns VAD/STT/TTS and audio devices. The
+  brain is available through loopback OpenAI-compatible chat-completions routes
+  in either the GUI or a headless bridge.
+- `scripts\start_voice.bat` launches the GUI brain, speech server, and audio
+  client in readiness order with dynamic loopback ports, a random per-launch
+  bridge key, per-stage logs, a real Realtime handshake, graceful shutdown, and
+  process-tree escalation only when a child refuses to stop.
+- Brain-mode control and telemetry channels now cover mute, Kokoro voice,
+  generation-tagged Free Talk/Wake Word requests with acknowledgement and
+  rollback, avatar playback envelopes, input phases, end-to-end turn timing,
+  and an immutable queue of agent-result announcements. Push To Talk and
+  semantic-memory writes report their unsupported state instead of pretending
+  to succeed.
+- Replaced the dashboard-style web UI with a command-frame shell: compact
+  destination and context rails, task-focused Control Center, Agents, Personas,
+  Memory, Settings, Status, and Setup views, clearer runtime status, responsive
+  layouts, and improved labels, contrast, focus, and live-region semantics.
+- The bundled butler now uses a local Canvas 2D frame renderer backed by
+  `runtime_512_v1` WebP frames for expression, gaze, blinking, mouth shapes,
+  materialization, and glitch states. Scene-load generations prevent stale
+  asynchronous loads from replacing the active avatar.
+- Startup doctor checks the external frontend checkout, launchers, virtualenv,
+  and configured ports in brain mode without installing, downloading, or
+  launching anything.
+- Added configurable Ollama residency windows (`LLM_KEEP_ALIVE` and
+  `INTENT_KEEP_ALIVE`) so brain mode can trade warm latency against VRAM.
+
+### Fixed
+
+- Agent status questions such as "any update on the agent?" now read live job
+  state instead of creating another delegated job, and completion narration can
+  no longer recursively spawn work.
+- Spoken cancellation accepts safe polite/corrective forms and common STT
+  aliases (`codecs`, `cloud code`, `clawed code`, `claud code`) without treating
+  unrelated phrases such as "stop the meeting" as agent cancellation.
+- Named-agent requests and delegation markers prefer the backend the user
+  actually named; placeholder markers such as `TASK`, `<task>`, and "the task"
+  are rejected rather than launching junk jobs.
+- Slow agent cancellation can no longer hold the brain turn lock indefinitely;
+  the user receives a bounded status response while process termination
+  continues in the background.
+- Concurrent completed-agent announcements are queued and narrated exactly once
+  instead of overwriting one another, and the regular voice path emits one
+  aggregate all-agents-completed event when the active set becomes empty.
+- Brain-mode audio controls fail closed and roll back visibly when the external
+  frontend cannot acknowledge them; announcement speech is detached from stale
+  microphone-turn identity so speculative TTS does not discard its audio.
+- Wake-word mode requires consecutive positive detector frames before opening
+  the microphone, reducing isolated false activations.
+
 ### Changed
 
-- Restructured the repository layout: loose top-level notes and assets
-  (`plans/`, `tasks/`, `war_games/`, `ledger.md`, `success.md`, `config/`,
-  `models/`, `wake_word/`, `start_*.bat`) now live under `docs/notes/`,
-  `remote_agent_protocol/`, and `scripts/` instead of the repo root.
-- Local git history was squashed to a single commit to drop the inherited
-  pipecat-ai/pipecat commit history; the `upstream` remote and vendored
-  `src/pipecat` tree are unaffected.
+- Refactored intent routing into deterministic and classifier stages while
+  preserving tier order; classifier timeouts, malformed output, and leaked
+  examples now degrade safely to chat.
+- Split the vendored Pipecat README into `docs/README.pipecat.md`, reworked the
+  root README around Remote Agent Protocol, and moved loose plans, models,
+  wake-word assets, and launchers under their owning `docs/`, package, and
+  `scripts/` directories.
+- Started standalone project history while retaining `upstream` and the vendored
+  `src/pipecat` tree for explicit framework synchronization.
 
 ### Removed
 
-- Dropped pipecat-ai/Daily.co-specific project files not used by this
-  fork: `codecov.yml`, `SECURITY.md`, `MANIFEST.in`, `.readthedocs.yaml`.
-  `CONTRIBUTING.md` moved to `src/pipecat/CONTRIBUTING.md` since its
-  conventions govern the vendored framework rather than the app.
+- Dropped unused Pipecat/Daily.co project boilerplate (`codecov.yml`,
+  `SECURITY.md`, `MANIFEST.in`, `.readthedocs.yaml`). Pipecat contribution
+  guidance now lives under `src/pipecat/`.
 
 ## [1.12.0] - 2026-07-12
 

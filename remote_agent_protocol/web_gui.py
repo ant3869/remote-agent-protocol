@@ -9,6 +9,7 @@ import queue
 import secrets
 import sys
 import threading
+import time
 import webbrowser
 from collections import deque
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from remote_agent_protocol import (
     logging_setup,
     multimodal_prompt,
     ollama_models,
+    openai_bridge,
     persona_config,
     personas,
     process_guard,
@@ -39,7 +41,12 @@ from remote_agent_protocol import (
     wake_word,
 )
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol.avatar_audio import AvatarAudioEnvelopeHub, sse_data
+from remote_agent_protocol.avatar_audio import (
+    AvatarAudioEnvelope,
+    AvatarAudioEnvelopeHub,
+    sse_data,
+)
+from remote_agent_protocol.brain_adapter import BrainSessionAdapter
 from remote_agent_protocol.session import VoiceSession
 
 logging_setup.setup_logging(cfg.DEBUG_MODE)
@@ -136,6 +143,10 @@ class WebVoiceApp:
             self._voice = self._coqui_speaker
         self._voice_mode = multimodal_prompt.normalize_voice_mode(self._app_state.voice_mode)
         self._muted = True
+        self._s2s_mute_ready = True
+        self._s2s_mode_ready = True
+        self._s2s_mode_generation = 0
+        self._s2s_mode_transition_lock = threading.Lock()
         self._session_state = "starting"
         self._health = {"ok": False, "label": "Ollama checking"}
         self._tts_health = {"ok": False, "label": "TTS checking"}
@@ -152,7 +163,11 @@ class WebVoiceApp:
         self._confirm_history: deque[dict] = deque(maxlen=30)
         self._agent_jobs: dict[str, dict] = {}
         self._avatar_audio = AvatarAudioEnvelopeHub()
+        self._avatar_speaking = False
         self._session = self._new_session()
+        if cfg.RAP_MODE == "brain":
+            self._s2s_mute_ready = self._write_s2s_mute_flag(self._muted)
+            self._write_s2s_voice_mode(self._voice_mode)
         self._thread: threading.Thread | None = None
         self._event_thread: threading.Thread | None = None
         self._health_thread: threading.Thread | None = None
@@ -198,7 +213,21 @@ class WebVoiceApp:
         self._event_thread.start()
         self._health_thread.start()
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler_class())
+        server_port = cfg.S2S_BRIDGE_PORT if cfg.RAP_MODE == "brain" else 0
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", server_port), self._handler_class())
+        except OSError as exc:
+            if server_port == 0:
+                raise
+            # Brain mode serves the brain endpoint itself, so the standalone
+            # bridge is an alternative to this GUI, never a companion to it.
+            raise SystemExit(
+                f"Port {server_port} is already in use, so the brain endpoint cannot start.\n"
+                f"In brain mode the GUI already serves /v1/chat/completions; do not also run\n"
+                f"scripts\\start_brain_bridge.bat. Stop whichever one you do not want, or set\n"
+                f"S2S_BRIDGE_PORT to a free port.\n"
+                f"Original error: {exc}"
+            ) from exc
         cleanup_done = threading.Event()
 
         def _on_console_close() -> None:
@@ -252,12 +281,18 @@ class WebVoiceApp:
         self._event_thread = None
         self._health_thread = None
 
-    def _new_session(self) -> VoiceSession:
-        session = VoiceSession(
-            self._persona,
-            on_event=self._events_in.put,
-            on_avatar_audio=self._avatar_audio.publish,
-        )
+    def _new_session(self) -> VoiceSession | BrainSessionAdapter:
+        if cfg.RAP_MODE == "brain":
+            session = BrainSessionAdapter(
+                self._persona,
+                on_event=self._events_in.put,
+            )
+        else:
+            session = VoiceSession(
+                self._persona,
+                on_event=self._events_in.put,
+                on_avatar_audio=self._avatar_audio.publish,
+            )
         session.set_manual_prompt_mode(True)
         session.set_voice_mode(self._voice_mode)
         session.set_muted(self._muted)
@@ -280,7 +315,8 @@ class WebVoiceApp:
             self._publish({"type": "session", "state": "building"})
             self._session.build()
             self._publish({"type": "speaking", "value": False})
-            self._publish({"type": "session", "state": "ready"})
+            if cfg.RAP_MODE != "brain":
+                self._publish({"type": "session", "state": "ready"})
             await self._session.run()
             self._publish({"type": "session", "state": "stopped"})
 
@@ -302,8 +338,8 @@ class WebVoiceApp:
 
     def _publish(self, evt: dict) -> None:
         evt = _json_safe(evt)
-        self._fold_event(evt)
         with self._lock:
+            self._fold_event(evt)
             self._event_id += 1
             row = {"id": self._event_id, **evt}
             self._event_log.append(row)
@@ -327,6 +363,10 @@ class WebVoiceApp:
             }
         elif kind == "metric":
             self._latency.update(evt.get("bucket", ""), evt.get("kind", ""), evt.get("value", 0.0))
+        elif kind == "turn_timing":
+            for bucket in ("stt", "llm", "tts", "total"):
+                if bucket in evt:
+                    self._latency.update(bucket, "processing", evt[bucket])
         elif kind == "turn":
             if evt.get("event") == "user_stopped":
                 self._latency.mark_user_turn_complete()
@@ -660,9 +700,14 @@ class WebVoiceApp:
         return {
             "appName": cfg.APP_NAME,
             "subtitle": "Premium local AI control center",
+            "mode": cfg.RAP_MODE,
             "session": self._session_state,
             "muted": self._muted,
             "voiceMode": self._voice_mode,
+            "inputControl": {
+                "muteReady": self._s2s_mute_ready,
+                "modeReady": self._s2s_mode_ready,
+            },
             "persona": self._persona.name,
             "personaBlurb": self._persona.blurb,
             "model": self._model,
@@ -707,11 +752,17 @@ class WebVoiceApp:
             "score": None,
             "error": "",
             "window_secs": settings.active_window_secs,
+            "threshold": target.threshold,
             "remaining_secs": 0.0,
             "detector_loaded": False,
             "passive": False,
             "available": [
-                {"model": item.model, "persona": item.persona, "model_path": item.model_path}
+                {
+                    "model": item.model,
+                    "persona": item.persona,
+                    "model_path": item.model_path,
+                    "threshold": item.threshold,
+                }
                 for item in settings.effective_targets
             ],
         }
@@ -735,18 +786,254 @@ class WebVoiceApp:
     def _action(self, name: str, payload: dict) -> dict:
         handler = self._actions.get(name)
         if handler is None:
-            return {"ok": False, "error": f"unknown action: {name}"}
-        result = handler(payload)
-        return result if result is not None else {"ok": True, "status": self._status_payload()}
+            return {
+                "ok": False,
+                "error": f"unknown action: {name}",
+                "status": self._status_payload(),
+            }
+        result = handler(payload) or {"ok": True}
+        result.setdefault("status", self._status_payload())
+        return result
 
-    def _action_mute(self, payload: dict) -> None:
-        self._muted = bool(payload.get("muted"))
-        self._session.set_muted(self._muted)
+    def _action_mute(self, payload: dict) -> dict | None:
+        requested = bool(payload.get("muted"))
+        if cfg.RAP_MODE == "brain" and not self._write_s2s_mute_flag(requested):
+            self._s2s_mute_ready = False
+            return {
+                "ok": False,
+                "error": "Could not synchronize the external microphone mute state.",
+            }
+        self._s2s_mute_ready = True
+        self._muted = requested
+        self._session.set_muted(requested)
+        return None
 
-    def _action_voice_mode(self, payload: dict) -> None:
-        self._voice_mode = multimodal_prompt.normalize_voice_mode(payload.get("mode"))
+    def _ingest_avatar_envelope(self, payload: dict) -> None:
+        """Publish a mouth envelope measured by the external realtime frontend.
+
+        Brain mode never sees TTS audio, so loudness has to arrive from whoever
+        owns the speakers for the avatar to lip-sync instead of sitting still.
+        """
+        try:
+            rms = max(0.0, min(1.0, float(payload.get("rms", 0.0))))
+            peak = max(0.0, min(1.0, float(payload.get("peak", 0.0))))
+            sample_rate = max(0, int(payload.get("sample_rate", 0)))
+            channels = max(1, int(payload.get("channels", 1)))
+        except (TypeError, ValueError):
+            return
+        self._avatar_audio.publish(
+            AvatarAudioEnvelope(
+                rms=rms,
+                peak=peak,
+                voiced=bool(payload.get("voiced", rms >= 0.012)),
+                sample_rate=sample_rate,
+                channels=channels,
+                timestamp=time.time(),
+            )
+        )
+        # Envelopes arrive ~25x/second. The hub above keeps only the latest, but
+        # the event log is a bounded history, so only announce the transition --
+        # publishing every frame would evict real transcript events.
+        speaking = rms > 0.0
+        with self._lock:
+            if speaking != self._avatar_speaking:
+                self._avatar_speaking = speaking
+                self._publish({"type": "speaking", "value": speaking})
+
+    def _write_s2s_mute_flag(self, muted: bool) -> bool:
+        if not cfg.S2S_MIC_MUTE_FILE:
+            return False
+        path = Path(cfg.S2S_MIC_MUTE_FILE)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if muted:
+                path.write_text("muted\n", encoding="utf-8")
+            else:
+                path.unlink(missing_ok=True)
+            return True
+        except OSError as exc:
+            logger.warning(f"Failed to update S2S mic mute flag {path}: {exc}")
+            return False
+
+    def _write_s2s_voice_mode(self, mode: str) -> int | None:
+        if not cfg.S2S_VOICE_MODE_FILE:
+            return None
+        if mode == multimodal_prompt.VOICE_MODE_WAKE_WORD:
+            settings = wake_word.settings_from_config(cfg, enabled=True)
+            selected = settings.effective_targets[0]
+            available = [
+                {
+                    "model": item.model,
+                    "persona": item.persona,
+                    "model_path": item.model_path,
+                    "threshold": item.threshold,
+                }
+                for item in settings.effective_targets
+            ]
+            self._wake_status = {
+                **self._wake_status,
+                "model": selected.model,
+                "model_path": selected.model_path,
+                "persona": selected.persona,
+                "threshold": selected.threshold,
+                "window_secs": settings.active_window_secs,
+                "available": available,
+            }
+        target = self._wake_status.get("available", [{}])[0]
+        self._s2s_mode_generation += 1
+        body = {
+            "generation": self._s2s_mode_generation,
+            "mode": mode,
+            "model": target.get("model", ""),
+            "model_path": target.get("model_path", ""),
+            "threshold": float(self._wake_status.get("threshold", cfg.WAKE_WORD_THRESHOLD)),
+            "active_window_secs": float(
+                self._wake_status.get("window_secs", cfg.WAKE_WORD_ACTIVE_WINDOW_SECS)
+            ),
+        }
+        path = Path(cfg.S2S_VOICE_MODE_FILE)
+        staged = path.with_suffix(f"{path.suffix}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_text(json.dumps(body), encoding="utf-8")
+            staged.replace(path)
+            return self._s2s_mode_generation
+        except OSError as exc:
+            staged.unlink(missing_ok=True)
+            logger.warning(f"Failed to update S2S input mode file {path}: {exc}")
+            return None
+
+    def _await_s2s_voice_mode(self, mode: str, generation: int) -> tuple[bool, str]:
+        timeout = max(0.0, cfg.S2S_VOICE_MODE_ACK_TIMEOUT)
+        if timeout == 0 or not cfg.S2S_VOICE_MODE_STATUS_FILE:
+            return True, ""
+        deadline = time.monotonic() + timeout
+        path = Path(cfg.S2S_VOICE_MODE_STATUS_FILE)
+        while time.monotonic() < deadline:
+            try:
+                status = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                time.sleep(0.05)
+                continue
+            if status.get("generation") != generation:
+                time.sleep(0.05)
+                continue
+            state = status.get("state")
+            if state == "ready" and status.get("mode") == mode:
+                self._wake_status["phase"] = "passive" if mode == "wake_word" else "idle"
+                self._wake_status["detector_loaded"] = mode == "wake_word"
+                return True, ""
+            if state == "error":
+                self._wake_status["phase"] = "error"
+                self._wake_status["detector_loaded"] = False
+                return False, "The external wake-word detector could not load."
+            time.sleep(0.05)
+        return False, "The external microphone did not acknowledge the input mode in time."
+
+    def _ingest_input_state(self, payload: dict) -> bool:
+        allowed = {
+            "idle",
+            "waiting_for_wake_word",
+            "wake_word_detected",
+            "listening_for_command",
+            "transcribing",
+            "agent_responding",
+            "follow_up_window",
+            "returning_to_passive",
+            "error",
+        }
+        try:
+            generation = int(payload["generation"])
+            phase = str(payload["phase"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if generation != self._s2s_mode_generation or phase not in allowed:
+            return False
+        if self._voice_mode != "wake_word" and phase != "idle":
+            return False
+        self._s2s_mode_ready = True
+        event = {"type": "wake", "phase": phase}
+        if "remaining_secs" in payload:
+            try:
+                event["remaining_secs"] = max(0.0, float(payload["remaining_secs"]))
+            except (TypeError, ValueError):
+                return False
+        for key in ("passive", "detector_loaded"):
+            if key in payload:
+                event[key] = bool(payload[key])
+        if "error" in payload:
+            event["error"] = str(payload["error"])[:300]
+        self._publish(event)
+        return True
+
+    def _ingest_turn_timing(self, payload: dict) -> bool:
+        try:
+            stt = float(payload["stt_s"])
+            audio = float(payload["first_audio_s"])
+            response_value = payload.get("response_start_s")
+            response = None if response_value is None else float(response_value)
+        except (KeyError, TypeError, ValueError):
+            return False
+        if stt < 0 or audio < stt or (response is not None and not stt <= response <= audio):
+            return False
+        event = {
+            "type": "turn_timing",
+            "stt": round(stt, 3),
+            "total": round(audio, 3),
+        }
+        if response is not None:
+            event.update(
+                llm=round(response - stt, 3),
+                tts=round(audio - response, 3),
+            )
+        self._publish(event)
+        return True
+
+    def _action_voice_mode(self, payload: dict) -> dict | None:
+        requested = multimodal_prompt.normalize_voice_mode(payload.get("mode"))
+        if cfg.RAP_MODE == "brain" and requested == multimodal_prompt.VOICE_MODE_PUSH_TO_TALK:
+            return {
+                "ok": False,
+                "error": "Push To Talk is unavailable while the external audio frontend owns the microphone.",
+            }
+        if cfg.RAP_MODE == "brain":
+            with self._s2s_mode_transition_lock:
+                confirmed_mode = self._voice_mode
+                generation = self._write_s2s_voice_mode(requested)
+                if generation is None:
+                    return {
+                        "ok": False,
+                        "error": "Could not synchronize the external microphone input mode.",
+                    }
+                acknowledged, error = self._await_s2s_voice_mode(requested, generation)
+                if not acknowledged:
+                    # Roll back to the last acknowledged state. Hard-coding Free
+                    # Talk here could falsely claim an open microphone after a
+                    # failed Wake Word -> Free Talk transition.
+                    recovery_generation = self._write_s2s_voice_mode(confirmed_mode)
+                    recovered = recovery_generation is not None and self._await_s2s_voice_mode(
+                        confirmed_mode, recovery_generation
+                    )[0]
+                    self._s2s_mode_ready = recovered
+                    self._voice_mode = confirmed_mode
+                    self._session.set_voice_mode(confirmed_mode)
+                    self._save_state()
+                    if not recovered:
+                        label = confirmed_mode.replace("_", " ").title()
+                        error += (
+                            f" Rollback to {label} was not acknowledged; "
+                            "input mode synchronization is unconfirmed."
+                        )
+                    return {"ok": False, "error": error}
+                self._s2s_mode_ready = True
+                self._voice_mode = requested
+                self._session.set_voice_mode(requested)
+                self._save_state()
+                return None
+        self._voice_mode = requested
         self._session.set_voice_mode(self._voice_mode)
         self._save_state()
+        return None
 
     def _action_avatar_settings(self, payload: dict) -> None:
         self._app_state = app_state.normalize_avatar_settings(
@@ -794,6 +1081,15 @@ class WebVoiceApp:
         return {"ok": True, "status": self._status_payload()}
 
     def _action_tts_test(self, payload: dict) -> dict:
+        if cfg.RAP_MODE == "brain":
+            # The external frontend owns the speakers and offers no verbatim-TTS
+            # entry point, so say so rather than reporting a queued phrase that
+            # will never be heard.
+            return {
+                "ok": False,
+                "message": "Brain mode: the realtime frontend speaks. Say something to hear the voice.",
+                "status": self._status_payload(),
+            }
         self._apply_current_tts()
         self._session.speak_text("This is the selected text to speech voice.")
         return {"ok": True, "message": "Test voice queued.", "status": self._status_payload()}
@@ -1070,10 +1366,51 @@ class WebVoiceApp:
         app = self
 
         class Handler(BaseHTTPRequestHandler):
+            # SSE chunks here are small and latency-critical: each one is a
+            # sentence the frontend can start speaking. Nagle would hold them
+            # back to coalesce, turning a stream into one late delivery.
+            disable_nagle_algorithm = True
+
             def do_GET(self) -> None:
+                # Same contract as do_POST: never leave a request unanswered.
+                try:
+                    self._dispatch_get()
+                except Exception as exc:
+                    logger.exception(f"GET {self.path} failed: {exc}")
+                    try:
+                        self._send_json(
+                            {"error": {"message": str(exc), "type": "server_error"}},
+                            status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                        )
+                    except Exception:
+                        pass
+
+            def _dispatch_get(self) -> None:
                 parsed = urlparse(self.path)
                 if parsed.path == "/api/avatar-audio":
                     app._stream_avatar_audio(self)
+                    return
+                if parsed.path == "/health":
+                    brain_ready = (
+                        app._session_state == "ready"
+                        and getattr(app, "_s2s_mute_ready", False)
+                    )
+                    ready = cfg.RAP_MODE != "brain" or brain_ready
+                    payload = {
+                        "ok": ready,
+                        "model": cfg.S2S_BRIDGE_MODEL,
+                        "mode": cfg.RAP_MODE,
+                    }
+                    if cfg.RAP_MODE == "brain":
+                        payload["session"] = app._session_state
+                        payload["muteReady"] = app._s2s_mute_ready
+                    self._send_json(
+                        payload,
+                        status=HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                    return
+                if parsed.path == "/v1/models":
+                    self._send_json({"object": "list", "data": [{"id": cfg.S2S_BRIDGE_MODEL, "object": "model"}]})
                     return
                 if parsed.path == "/api/status":
                     self._send_json(app._status_payload())
@@ -1091,7 +1428,103 @@ class WebVoiceApp:
                 self._send_static(parsed.path)
 
             def do_POST(self) -> None:
+                # Any handler raising past this point would leave the request
+                # without a response, so the caller hangs until its own timeout.
+                # The realtime frontend sits behind this endpoint, so a hang
+                # costs a whole conversation turn; answer with an error instead.
+                try:
+                    self._dispatch_post()
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+                    # Expected when barge-in cancels the frontend's streaming
+                    # HTTP request. The brain turn may already have completed;
+                    # dumping a full traceback only buries actual failures.
+                    logger.info(f"POST {self.path} client disconnected: {exc}")
+                except Exception as exc:
+                    logger.exception(f"POST {self.path} failed: {exc}")
+                    try:
+                        self._send_json(
+                            {"error": {"message": str(exc), "type": "server_error"}},
+                            status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                        )
+                    except Exception:
+                        # Headers already went out (a stream, say); nothing left
+                        # to say on this connection.
+                        pass
+
+            def _dispatch_post(self) -> None:
                 parsed = urlparse(self.path)
+                if parsed.path == "/v1/chat/completions":
+                    if not self._authorized_s2s():
+                        self._send_json({"error": {"message": "unauthorized", "type": "authentication_error"}}, status=HTTPStatus.UNAUTHORIZED)
+                        return
+                    payload = self._read_json()
+                    text = openai_bridge._latest_user_text(payload)
+                    if not text:
+                        self._send_json({"error": {"message": "no user message", "type": "invalid_request_error"}}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    if not hasattr(app._session, "complete_text"):
+                        self._send_json({"error": {"message": "GUI session is not in brain mode", "type": "server_error"}}, status=HTTPStatus.CONFLICT)
+                        return
+                    model = str(payload.get("model") or cfg.S2S_BRIDGE_MODEL)
+                    streaming = bool(payload.get("stream")) and cfg.S2S_BRIDGE_STREAMING
+                    if streaming and hasattr(app._session, "stream_text"):
+                        # The whole point of streaming here: the frontend starts
+                        # speaking on the first sentence instead of waiting for
+                        # the model to finish the reply.
+                        self._send_chat_stream(app._session.stream_text(text), model)
+                        return
+                    answer = app._session.complete_text(text)
+                    if streaming:
+                        self._send_chat_stream([answer], model)
+                        return
+                    self._send_json(openai_bridge._chat_completion(answer, model))
+                    return
+                if parsed.path == "/api/stack-shutdown":
+                    if not self._authorized_s2s():
+                        self._send_json(
+                            {"error": {"message": "unauthorized"}},
+                            status=HTTPStatus.UNAUTHORIZED,
+                        )
+                        return
+                    if cfg.RAP_MODE != "brain":
+                        self._send_json(
+                            {"error": {"message": "stack shutdown is brain-mode only"}},
+                            status=HTTPStatus.CONFLICT,
+                        )
+                        return
+                    self._send_json({"ok": True})
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    return
+                if parsed.path == "/api/avatar-envelope":
+                    if not self._authorized_s2s():
+                        self._send_json({"error": {"message": "unauthorized"}}, status=HTTPStatus.UNAUTHORIZED)
+                        return
+                    app._ingest_avatar_envelope(self._read_json())
+                    self._send_json({"ok": True})
+                    return
+                if parsed.path == "/api/turn-timing":
+                    if not self._authorized_s2s():
+                        self._send_json({"error": {"message": "unauthorized"}}, status=HTTPStatus.UNAUTHORIZED)
+                        return
+                    accepted = app._ingest_turn_timing(self._read_json())
+                    self._send_json(
+                        {"ok": accepted},
+                        status=HTTPStatus.OK if accepted else HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                if parsed.path == "/api/input-state":
+                    if not self._authorized_s2s():
+                        self._send_json(
+                            {"error": {"message": "unauthorized"}},
+                            status=HTTPStatus.UNAUTHORIZED,
+                        )
+                        return
+                    accepted = app._ingest_input_state(self._read_json())
+                    self._send_json(
+                        {"ok": accepted},
+                        status=HTTPStatus.OK if accepted else HTTPStatus.CONFLICT,
+                    )
+                    return
                 if parsed.path != "/api/action":
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
@@ -1125,6 +1558,10 @@ class WebVoiceApp:
                     "Content-Type", mimetypes.guess_type(target.name)[0] or "text/plain"
                 )
                 self.send_header("Content-Length", str(len(data)))
+                if rel.startswith("assets/avatars/"):
+                    self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+                else:
+                    self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(data)
 
@@ -1137,9 +1574,40 @@ class WebVoiceApp:
                 except ValueError:
                     return {}
 
-            def _send_json(self, payload: dict) -> None:
-                data = json.dumps(payload).encode("utf-8")
+            def _authorized_s2s(self) -> bool:
+                key = cfg.S2S_BRIDGE_API_KEY
+                header = self.headers.get("Authorization", "")
+                if secrets.compare_digest(header, f"Bearer {key}"):
+                    return True
+                return secrets.compare_digest(self.headers.get("X-API-Key") or "", key)
+
+            def _send_chat_stream(self, pieces, model: str) -> None:
+                """Relay assistant text as SSE, flushing each piece as it arrives."""
                 self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                chunk_id = "chatcmpl-gui"
+                created = int(datetime.now().timestamp())
+
+                def write(chunk: dict) -> None:
+                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+                    self.wfile.flush()
+
+                first = True
+                for piece in pieces:
+                    delta = {"content": piece}
+                    if first:
+                        delta = {"role": "assistant", "content": piece}
+                        first = False
+                    write(openai_bridge._stream_chunk(chunk_id, model, created, delta))
+                write(openai_bridge._stream_chunk(chunk_id, model, created, {}, finish_reason="stop"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+            def _send_json(self, payload: dict, *, status: HTTPStatus = HTTPStatus.OK) -> None:
+                data = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()

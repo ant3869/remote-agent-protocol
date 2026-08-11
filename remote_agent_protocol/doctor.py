@@ -3,7 +3,8 @@
 One deterministic pass over what a voice session needs before it can run
 cleanly: Python version, Ollama reachability and configured models, the
 selected TTS backend, STT/TTS/wake-word Python packages, configured audio
-device indices, and agent backend executables.
+device indices, agent backend executables, and -- in brain mode -- the
+external speech-to-speech checkout that owns the microphone and speakers.
 
 Every check here is diagnosis only. Nothing here installs a package,
 downloads a model, launches a service, or edits configuration. Each check
@@ -267,6 +268,57 @@ def check_agent_backends() -> list[CheckResult]:
     return results
 
 
+def _s2s_frontend_result() -> CheckResult:
+    """Whether the external speech-to-speech checkout is present and complete."""
+    from remote_agent_protocol import voice_stack
+
+    s2s_home = voice_stack.resolve_s2s_home()
+    if s2s_home is None:
+        where = (
+            f"S2S_HOME '{cfg.S2S_HOME}' is not a directory"
+            if cfg.S2S_HOME
+            else f"no 'speech-to-speech' directory beside {voice_stack.REPO_ROOT}"
+        )
+        return CheckResult("s2s-frontend", "fail", f"{where}; clone it there or set S2S_HOME")
+    missing = voice_stack.missing_frontend_pieces(s2s_home)
+    if missing:
+        return CheckResult("s2s-frontend", "fail", f"{s2s_home} is missing {', '.join(missing)}")
+    return CheckResult("s2s-frontend", "ok", f"complete at {s2s_home}")
+
+
+def check_brain_mode() -> list[CheckResult]:
+    """Brain mode's out-of-process dependencies, skipped in full mode.
+
+    In brain mode the microphone and speakers belong to a speech-to-speech
+    checkout that lives outside this repository and is not versioned with it,
+    so a perfectly healthy app still cannot talk. These are filesystem and TCP
+    probes only -- notably not `voice_stack.missing_kokoro_requirements`, which
+    would have to run the frontend's interpreter to answer.
+    """
+    if cfg.RAP_MODE != "brain":
+        return []
+    from remote_agent_protocol import voice_stack
+
+    results = [_s2s_frontend_result()]
+    busy = voice_stack.occupied_ports()
+    if busy:
+        listed = ", ".join(f"{name} (port {port})" for name, port in busy)
+        # Ambiguous by nature: the stack being already up looks identical to a
+        # leftover process holding the port, and only the operator knows which.
+        results.append(
+            CheckResult("s2s-ports", "warn", f"already listening: {listed}; stack up, or stale?")
+        )
+    else:
+        results.append(
+            CheckResult(
+                "s2s-ports",
+                "ok",
+                f"{cfg.S2S_BRIDGE_PORT} (brain) and {cfg.S2S_WS_PORT} (frontend) are free",
+            )
+        )
+    return results
+
+
 # Each entry returns a CheckResult, a list[CheckResult], or None (skipped).
 _CHECKS = (
     check_python,
@@ -277,6 +329,7 @@ _CHECKS = (
     check_wake_word_module,
     check_audio_devices,
     check_agent_backends,
+    check_brain_mode,
 )
 
 
@@ -305,8 +358,9 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Read-only startup checks for Remote Agent Protocol: Python version, "
             "Ollama and configured models, TTS backend, STT/TTS/wake-word packages, "
-            "configured audio devices, and agent backend executables. Never "
-            "installs, downloads, launches, or edits configuration."
+            "configured audio devices, agent backend executables, and the external "
+            "speech-to-speech checkout in brain mode. Never installs, downloads, "
+            "launches, or edits configuration."
         ),
     )
     parser.parse_args(argv)

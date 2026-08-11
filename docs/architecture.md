@@ -13,12 +13,17 @@ are relative to `remote_agent_protocol/`.
 ## Runtime flow
 
 ```text
-microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> AvatarAudioTap -> speakers
-                                      |                         |              |
-                                      +-> AgentBridge ----------+              +-> latest normalized envelope
-                                             |       |                                  |
-                                             |       +-> main PC or configured remote launcher
-                                             +-> loopback lifecycle WebSocket            +-> loopback SSE -> avatar renderer
+Full mode:
+  microphone -> [wake gate] -> STT -> intent router -> transcript/semantic memory
+                                      |                    |
+                                      +-> AgentBridge      +-> Ollama -> TTS -> speakers
+                                             |                              |
+                                             +-> lifecycle WebSocket        +-> avatar envelope
+
+Brain mode:
+  external mic -> external VAD/STT -> OpenAI-compatible RAP brain -> external TTS -> speakers
+                                            |                       |
+                                            +-> router/AgentBridge   +-> input/timing/avatar telemetry
 ```
 
 - `web_gui.py` serves the loopback web control center (a hand-rolled
@@ -38,10 +43,12 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
 - `avatar_audio.py` defines the bounded latest-value envelope hub and SSE
   serialization. `WebVoiceApp` owns and closes one hub, while `VoiceSession`
   receives only its `publish` callback. Raw PCM never crosses the web boundary.
-- `web_app/avatar/` is a zero-build ES-module runtime. It lazy-loads vendored
-  Three.js only when enabled, renders the procedural butler or a safe local GLB,
-  and owns expression, gaze, lip-sync, reduced-motion, fallback, and disposal
-  behavior.
+- `web_app/avatar/` is a zero-build ES-module runtime. The bundled butler uses
+  `frame-avatar-scene.js`, a Canvas 2D renderer over individual
+  `runtime_512_v1/*.webp` expression, mouth, gaze, materialization, and glitch
+  frames. Other avatar IDs can use the vendored Three.js/GLTF path. A generation
+  guard prevents stale asynchronous loads from replacing the current scene;
+  both paths own reduced-motion, fallback, visibility, and disposal behavior.
 - `intent_router.py` routes explicit commands and high-confidence keyword
   matches without model latency, skips pure acknowledgments, and uses a small
   local classifier only for otherwise-ambiguous requests. Vague references to
@@ -78,6 +85,54 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
   persona overrides.
 - `memory.py`, `memory_manager.py`, and `mem0_setup.py` provide transcript and
   semantic memory.
+
+### Brain mode
+
+`RAP_MODE=brain` keeps everything above except the local audio graph, so a GPU
+too small for Whisper, Ollama, and TTS at once can hand the ears and mouth to an
+external realtime speech-to-speech frontend:
+
+```text
+frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> frontend speakers
+                                       |
+                                       +-> intent router -> memory -> AgentBridge -> Ollama
+```
+
+- `brain.py` is the text-only coordinator: routing, short-term memory, the
+  confirmation gate, the agent bridge, and Ollama generation, with no mic, STT,
+  TTS, or speakers.
+- `brain_adapter.py` presents that coordinator through the `VoiceSession`
+  control surface the GUI expects, so the same web control center drives both
+  modes. Controls with no local audio path degrade explicitly rather than
+  silently: spoken output is reported as text, not voiced.
+- `openai_bridge.py` is the loopback OpenAI-compatible HTTP server
+  (`/health`, `/v1/models`, `/v1/chat/completions`, SSE streaming). `web_gui.py`
+  serves the same routes when the GUI itself is in brain mode; run one or the
+  other, since both bind `S2S_BRIDGE_PORT`.
+- `voice_stack.py` is the ordered launcher for the three processes across two
+  checkouts. Readiness means an initialized RAP brain, a Realtime WebSocket
+  `session.created` handshake whose temporary pool claim has returned idle,
+  then a PID-tagged client signal written only after audio streams open and its
+  own Realtime session exists. RAP forces the S2S listener to loopback, removes
+  stale readiness before spawn, and refuses occupied ports. Shutdown first asks
+  RAP to clean up gracefully, then uses process-tree escalation for wrapper
+  descendants that cannot stop cleanly.
+- The frontend control plane is explicit and loopback-only. Mute and output
+  voice cross through `S2S_MIC_MUTE_FILE` and `S2S_VOICE_FILE`. Free Talk and
+  Wake Word use generation-tagged request/acknowledgement documents at
+  `S2S_VOICE_MODE_FILE` and `S2S_VOICE_MODE_STATUS_FILE`; an acknowledgement
+  timeout rolls the GUI back to its last confirmed mode. Push To Talk remains
+  unavailable because the external process owns microphone capture.
+- The client POSTs input phases to `/api/input-state`, measured STT/response/audio
+  latency to `/api/turn-timing`, and speaker playback loudness to
+  `/api/avatar-envelope`. Completed agents publish immutable queue entries beside
+  `S2S_ANNOUNCE_FILE`; the client claims and narrates each entry exactly once.
+  `/api/stack-shutdown` is reserved for authenticated launcher teardown.
+  Brain-mode health remains unavailable until the initial safe mute state is
+  published, and configured mute-file read errors fail closed.
+- `BrainSession` persists short-term transcript context. Semantic mem0 writes
+  require the full local session and are explicitly unavailable in brain mode;
+  the GUI does not silently claim otherwise.
 
 ## What is solid
 
@@ -121,6 +176,15 @@ microphone -> [wake gate] -> STT -> intent router -> memory -> Ollama -> TTS -> 
   requirement.
 - The lifecycle WebSocket is read-only, future-events-only, and loopback-only.
   It is not the authenticated remote-agent command protocol described above.
+- Brain mode depends on a RAP-aware speech-to-speech frontend checkout that
+  lives outside this repository and is not versioned with it. `voice_stack.py`
+  checks for the launchers and virtualenv it needs and reports what is missing,
+  but the app cannot install or update that side. Conversation/job state and
+  control files live under ignored `data/`; launcher subprocess logs live under
+  ignored `logs/`.
+- The brain endpoint is loopback-only and gated by a shared `S2S_BRIDGE_API_KEY`.
+  It is a local convenience boundary, not the authenticated remote-agent
+  protocol described above.
 - The repository vendors the complete Pipecat framework. Upstream updates should
   be merged from the `upstream` Git remote without mixing custom code into
   `src/pipecat` unless the framework itself must change.

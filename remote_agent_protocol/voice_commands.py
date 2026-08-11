@@ -224,6 +224,25 @@ def _strip_fillers(lowered: str) -> str:
     return lowered
 
 
+def named_backend(text: str, backends: dict, aliases: dict[str, str]) -> str | None:
+    """Return the backend for an agent alias mentioned anywhere in ``text``.
+
+    ``parse_delegation`` only understands rigid command grammars; this is the
+    looser complement for tiers that already decided *something* should run and
+    only need to know WHICH agent the user actually named ("maybe code puppy
+    could fix it"). Longest alias first so "code puppy" beats "puppy", and
+    word boundaries so "codexes" never summons codex.
+    """
+    lowered = text.lower()
+    for alias in sorted(aliases, key=len, reverse=True):
+        if not re.search(rf"\b{re.escape(alias)}\b", lowered):
+            continue
+        backend = aliases[alias]
+        if backend in backends:
+            return backend
+    return None
+
+
 def parse_delegation(
     text: str,
     backends: dict,
@@ -342,7 +361,57 @@ def parse_agent_control(
 def parse_agent_cancel(text: str, aliases: dict[str, str]) -> tuple[str | None, bool] | None:
     """Parse a command to cancel active delegated work, optionally by agent."""
     lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    # Spoken cancels rarely lead with the verb ("No, just cancel...", "I want
+    # you to cancel..."); peel the polite/corrective preamble before anchoring.
+    lowered = re.sub(
+        r"^(?:no[,.! ]+|please[, ]+|just[, ]+|i (?:want|need) you to[, ]+"
+        r"|(?:can|could|would) you(?: please)?[, ]+)+",
+        "",
+        lowered,
+    )
     if not re.match(r"^(?:cancel|stop|abort|end)\b", lowered):
+        return None
+    agent = next(
+        (
+            aliases[alias]
+            for alias in sorted(aliases, key=len, reverse=True)
+            if re.search(rf"\b{re.escape(alias)}\b", lowered)
+        ),
+        None,
+    )
+    all_jobs = bool(re.search(r"\b(?:all|every|everything)\b", lowered))
+    has_work_noun = bool(re.search(r"\b(?:agent|job|task|process)(?:es|s)?\b", lowered))
+    if agent is None and not has_work_noun:
+        # Bare follow-ups are normal speech after the user already named work:
+        # "cancel it", "stop them", or even "no, cancel. cancel that". Accept
+        # only pronoun/filler residue; a meaningful object such as "the meeting"
+        # remains ordinary chat rather than becoming an accidental agent kill.
+        residue = re.sub(r"\b(?:cancel|stop|abort|end)\b", " ", lowered)
+        residue = re.sub(r"[^a-z0-9]+", " ", residue)
+        residue = re.sub(
+            r"\b(?:it|that|this|them|those|these|all|every|everything|of|the|now|please|just)\b",
+            " ",
+            residue,
+        )
+        if residue.strip():
+            return None
+    return agent, all_jobs
+
+
+_STATUS_PHRASES = re.compile(
+    r"\b(?:update on|status|progress|how far along|any update|how(?:'s| is) (?:it|that) (?:going|coming))\b"
+)
+
+
+def parse_agent_status(text: str, aliases: dict[str, str]) -> tuple[str | None] | None:
+    """Parse a spoken request for progress on delegated work.
+
+    Returns a one-tuple carrying the named agent (or None for "any"), or None
+    when the utterance is not a status question. Live sessions showed these
+    being treated as brand-new tasks, spawning a job per polite follow-up.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    if not _STATUS_PHRASES.search(lowered):
         return None
     agent = next(
         (
@@ -354,7 +423,7 @@ def parse_agent_cancel(text: str, aliases: dict[str, str]) -> tuple[str | None, 
     )
     if agent is None and not re.search(r"\b(?:agent|job|task)s?\b", lowered):
         return None
-    return agent, bool(re.search(r"\b(?:all|every)\b", lowered))
+    return (agent,)
 
 
 def parse_task_correction(text: str) -> str | None:
