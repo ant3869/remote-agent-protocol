@@ -20,7 +20,7 @@ from typing import Any
 from loguru import logger
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import voices
+from remote_agent_protocol import job_store, voices
 from remote_agent_protocol.brain import ANNOUNCE_PREFIX, BrainSession
 from remote_agent_protocol.multimodal_prompt import MultimodalPromptBundle
 from remote_agent_protocol.personas import Persona
@@ -185,6 +185,18 @@ class BrainSessionAdapter:
     def forget_semantic_memory(self) -> None:
         """Publish the empty semantic-memory view exposed in brain mode."""
         self._emit({"type": "memory", "scope": "semantic", "rows": []})
+
+    def agent_history(self) -> list[dict]:
+        """Return persisted terminal jobs for the brain-mode Agents panel."""
+        if not cfg.AGENT_HISTORY_FILE:
+            return []
+        return job_store.load_history(cfg.AGENT_HISTORY_FILE, cfg.AGENT_HISTORY_MAX)
+
+    def clear_agent_history(self) -> bool:
+        """Clear persisted terminal jobs through the shared history store."""
+        if not cfg.AGENT_HISTORY_FILE:
+            return True
+        return job_store.clear_history(cfg.AGENT_HISTORY_FILE)
 
     def agent_backends(self) -> list[str]:
         """Return configured agent backend names."""

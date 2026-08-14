@@ -16,11 +16,13 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as websocket_connect
 
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol.doctor import model_registered, ollama_tags
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -136,13 +139,33 @@ def select_stack_ports() -> tuple[int, int]:
     return bridge_port, ws_port
 
 
+def process_is_running(pid: int) -> bool:
+    """Return whether ``pid`` still identifies a live process."""
+    if pid <= 0:
+        return False
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return result.returncode == 0 and str(pid) in result.stdout
+        os.kill(pid, 0)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def file_ready(path: Path) -> Callable[[], bool]:
-    """Build a readiness probe for an atomic PID-tagged handshake file."""
+    """Build a readiness probe for an atomic, live-PID-tagged handshake file."""
 
     def probe() -> bool:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            return payload.get("ready") is True and int(payload.get("pid", 0)) > 0
+            pid = int(payload.get("pid", 0))
+            return payload.get("ready") is True and process_is_running(pid)
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return False
 
@@ -214,18 +237,223 @@ def missing_kokoro_requirements(s2s_home: Path) -> list[str]:
     return result.stdout.split()
 
 
+def local_ollama_address() -> str | None:
+    """``host:port`` to bind a local Ollama on, or None if it lives elsewhere.
+
+    A remote ``OLLAMA_HOST`` is somebody else's server; starting one here would
+    bind a different machine's address and never satisfy the probe.
+    """
+    parsed = urllib.parse.urlsplit(cfg.OLLAMA_HOST)
+    hostname = parsed.hostname or ""
+    if hostname not in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return None
+    return f"{hostname}:{parsed.port or 11434}"
+
+
+def ollama_executable() -> str | None:
+    """Path to the ``ollama`` binary, including the spot its installer uses.
+
+    The Windows installer drops it under LOCALAPPDATA and only adds it to PATH
+    for shells started afterwards, so PATH alone misses a fresh install.
+    """
+    found = shutil.which("ollama")
+    if found:
+        return found
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidate = Path(local_app_data) / "Programs" / "Ollama" / "ollama.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def start_ollama(address: str, timeout: float = 90.0) -> bool:
+    """Serve Ollama on ``address`` and wait until it answers.
+
+    Left running when the stack stops: Ollama is a machine-wide service other
+    parts of RAP talk to, and killing it would evict the models it just spent
+    the launch loading.
+    """
+    executable = ollama_executable()
+    if executable is None:
+        return False
+    log_path = REPO_ROOT / "logs" / "ollama.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, OLLAMA_HOST=address)
+    try:
+        with log_path.open("wb") as log_handle:
+            subprocess.Popen(
+                [executable, "serve"],
+                env=env,
+                # No console of its own, and detached so closing the launcher
+                # window does not take the server down with it.
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "DETACHED_PROCESS", 0),
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+    except OSError:
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ollama_tags(cfg.OLLAMA_HOST, 2.0) is not None:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def ensure_llm_backend() -> str | None:
+    """Start Ollama if needed; explain why the brain has no model if it can't.
+
+    The brain answers the frontend over an OpenAI-compatible endpoint that is
+    really Ollama behind a proxy, so a stopped Ollama surfaces only a minute
+    into the launch -- as an HTTP 500 raised inside the frontend's LLM warmup,
+    which then exits and takes the whole stack down.
+    """
+    tags = ollama_tags(cfg.OLLAMA_HOST, 2.0)
+    if tags is None:
+        address = local_ollama_address()
+        if address is None:
+            return (
+                f"Ollama is not answering at {cfg.OLLAMA_HOST}, and that host is not this "
+                "machine, so the stack cannot start it. Bring it up there, or point "
+                "OLLAMA_HOST at a local server."
+            )
+        logger.info(f"Ollama is not running; starting it on {address}")
+        if not start_ollama(address):
+            return (
+                f"Could not start Ollama on {address}, and the brain has nothing to think "
+                f"with. Check {REPO_ROOT / 'logs' / 'ollama.log'}, or install Ollama if the "
+                "'ollama' command is missing."
+            )
+        logger.info("Ollama is up")
+        tags = ollama_tags(cfg.OLLAMA_HOST, 2.0) or []
+    if not model_registered(cfg.LLM_MODEL, tags):
+        return (
+            f"Ollama has no model named '{cfg.LLM_MODEL}'. Register it -- see "
+            "remote_agent_protocol\\models\\README.md -- or point LLM_MODEL in .env at a "
+            "model 'ollama list' shows."
+        )
+    return None
+
+
+def audio_devices(s2s_home: Path) -> dict | None:
+    """PortAudio's device table as the frontend's venv sees it, or None.
+
+    Asked of that venv rather than this one so the indices are the ones the
+    client will actually open.
+    """
+    python = s2s_home / ".venv/Scripts/python.exe"
+    if not python.exists():
+        return None
+    probe = (
+        "import json, sounddevice as sd;"
+        "print(json.dumps({'default': list(sd.default.device), 'devices': ["
+        "{'index': i, 'name': d['name'], 'inputs': d['max_input_channels'],"
+        " 'outputs': d['max_output_channels']}"
+        " for i, d in enumerate(sd.query_devices())]}))"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-c", probe], capture_output=True, text=True, timeout=60
+        )
+        return json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def resolve_audio_device(table: dict, wanted: str, *, capture: bool) -> int | None:
+    """Index for a configured device name or index; None if there is no match.
+
+    An empty setting means the system default, which is the right answer far
+    more often than a remembered index is.
+    """
+    wanted = wanted.strip()
+    channels = "inputs" if capture else "outputs"
+    if wanted.isdigit():
+        index = int(wanted)
+        return next(
+            (
+                index
+                for device in table.get("devices", [])
+                if device.get("index") == index and device.get(channels, 0) > 0
+            ),
+            None,
+        )
+    if wanted:
+        needle = wanted.casefold()
+        for device in table.get("devices", []):
+            if device.get(channels, 0) > 0 and needle in device.get("name", "").casefold():
+                return int(device["index"])
+        return None
+    default = (table.get("default") or [None, None])[0 if capture else 1]
+    return int(default) if isinstance(default, int) and default >= 0 else None
+
+
+def device_name(table: dict, index: int) -> str:
+    """Human-readable name for a device index, for the launcher's log."""
+    for device in table.get("devices", []):
+        if device.get("index") == index:
+            return str(device.get("name", "")).strip()
+    return f"index {index}"
+
+
+def select_audio_devices(s2s_home: Path) -> tuple[int | None, int | None]:
+    """Microphone and speaker indices to hand the client, either may be None.
+
+    None leaves the frontend's launcher to decide, which is the right fallback
+    when the device table cannot be read but a poor default for the microphone:
+    a stale index there is silent rather than noisy, so it is worth naming the
+    device this stack expects and logging what it picked.
+    """
+    table = audio_devices(s2s_home)
+    if table is None:
+        logger.warning("Could not read the audio devices; the frontend's own choice stands")
+        return None, None
+
+    microphone = resolve_audio_device(table, cfg.S2S_INPUT_DEVICE, capture=True)
+    if microphone is None:
+        logger.warning(
+            f"No microphone matches S2S_INPUT_DEVICE={cfg.S2S_INPUT_DEVICE!r}; "
+            "the frontend's own choice stands"
+        )
+    else:
+        logger.info(f"Microphone: {device_name(table, microphone)} (index {microphone})")
+
+    # Only ever set on request: an unwanted microphone is silence, but an
+    # unwanted speaker moves audio that is currently playing where it should.
+    speakers = None
+    if cfg.S2S_OUTPUT_DEVICE.strip():
+        speakers = resolve_audio_device(table, cfg.S2S_OUTPUT_DEVICE, capture=False)
+        if speakers is None:
+            logger.warning(
+                f"No speakers match S2S_OUTPUT_DEVICE={cfg.S2S_OUTPUT_DEVICE!r}; "
+                "the frontend's own choice stands"
+            )
+        else:
+            logger.info(f"Speakers: {device_name(table, speakers)} (index {speakers})")
+    return microphone, speakers
+
+
 def build_stages(
     s2s_home: Path,
     *,
     bridge_port: int | None = None,
     ws_port: int | None = None,
     bridge_api_key: str | None = None,
+    input_device: int | None = None,
+    output_device: int | None = None,
 ) -> list[Stage]:
     """Describe the three processes in dependency order."""
     bridge_port = cfg.S2S_BRIDGE_PORT if bridge_port is None else bridge_port
     ws_port = cfg.S2S_WS_PORT if ws_port is None else ws_port
     bridge_api_key = bridge_api_key or cfg.S2S_BRIDGE_API_KEY
     client_ready_file = (cfg.DATA_DIR / "s2s_client.ready").resolve()
+    device_args: list[str] = []
+    if input_device is not None:
+        device_args += ["--input-device", str(input_device)]
+    if output_device is not None:
+        device_args += ["--output-device", str(output_device)]
     return [
         Stage(
             name="RAP brain + GUI",
@@ -281,6 +509,8 @@ def build_stages(
                 str(ws_port),
                 "--external-mute-file",
                 str(Path(cfg.S2S_MIC_MUTE_FILE).resolve()),
+                "--external-mute-status-file",
+                str(Path(cfg.S2S_MIC_MUTE_STATUS_FILE).resolve()),
                 "--external-voice-file",
                 str(Path(cfg.S2S_VOICE_FILE).resolve()),
                 "--external-mode-file",
@@ -305,6 +535,7 @@ def build_stages(
                 bridge_api_key,
                 "--ready-file",
                 str(client_ready_file),
+                *device_args,
             ],
             cwd=s2s_home,
             ready=file_ready(client_ready_file),
@@ -366,21 +597,43 @@ def _spawn(stage: Stage, env: dict[str, str]) -> subprocess.Popen:
     return process
 
 
+def log_excerpt(stage_name: str, lines: int = 12) -> str:
+    """The tail of a stage's log, formatted for the launcher console.
+
+    A failing child says nothing here on its own -- its output goes to a file in
+    a windowless process -- so a launch failure would otherwise report only an
+    exit code and leave the real traceback for the reader to go find.
+    """
+    path = stage_log_path(stage_name)
+    try:
+        tail = path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+    except OSError:
+        return f"No log to show; expected it at {path}"
+    body = "\n".join(f"  {line}" for line in tail if line.strip())
+    return f"Last lines of {path}:\n{body}" if body else f"Its log at {path} is empty"
+
+
 def _await_ready(stage: Stage, process: subprocess.Popen) -> bool:
     if stage.ready is None:
         return True
     deadline = time.monotonic() + stage.ready_timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            logger.error(f"{stage.name} exited with code {process.returncode} before becoming ready")
+            logger.error(
+                f"{stage.name} exited with code {process.returncode} before becoming ready\n"
+                f"{log_excerpt(stage.name)}"
+            )
             return False
         if stage.ready():
             if process.poll() is None:
                 return True
-            logger.error(f"{stage.name} exited while publishing readiness")
+            logger.error(f"{stage.name} exited while publishing readiness\n{log_excerpt(stage.name)}")
             return False
         time.sleep(0.5)
-    logger.error(f"{stage.name} did not become ready within {stage.ready_timeout:.0f}s")
+    logger.error(
+        f"{stage.name} did not become ready within {stage.ready_timeout:.0f}s\n"
+        f"{log_excerpt(stage.name)}"
+    )
     return False
 
 
@@ -452,6 +705,9 @@ def run_stack() -> int:
             "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
         )
         return 2
+    if (backend_problem := ensure_llm_backend()) is not None:
+        logger.error(backend_problem)
+        return 2
 
     bridge_port, ws_port = select_stack_ports()
     logger.info(f"Selected dynamic ports: brain/GUI {bridge_port}, Realtime {ws_port}")
@@ -465,6 +721,7 @@ def run_stack() -> int:
         )
         return 2
 
+    input_device, output_device = select_audio_devices(s2s_home)
     bridge_api_key = secrets.token_urlsafe(32)
     env = child_env(
         bridge_port=bridge_port,
@@ -478,6 +735,8 @@ def run_stack() -> int:
             bridge_port=bridge_port,
             ws_port=ws_port,
             bridge_api_key=bridge_api_key,
+            input_device=input_device,
+            output_device=output_device,
         ):
             logger.info(f"Starting {stage.name}")
             process = _spawn(stage, env)

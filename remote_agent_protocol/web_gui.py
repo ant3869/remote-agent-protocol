@@ -144,6 +144,10 @@ class WebVoiceApp:
         self._voice_mode = multimodal_prompt.normalize_voice_mode(self._app_state.voice_mode)
         self._muted = True
         self._s2s_mute_ready = True
+        # Seed above any status left by an earlier process, so a restart cannot
+        # mistake a stale acknowledgement for its first command.
+        self._s2s_mute_generation = time.time_ns()
+        self._s2s_mute_transition_lock = threading.Lock()
         self._s2s_mode_ready = True
         self._s2s_mode_generation = 0
         self._s2s_mode_transition_lock = threading.Lock()
@@ -166,8 +170,18 @@ class WebVoiceApp:
         self._avatar_speaking = False
         self._session = self._new_session()
         if cfg.RAP_MODE == "brain":
-            self._s2s_mute_ready = self._write_s2s_mute_flag(self._muted)
-            self._write_s2s_voice_mode(self._voice_mode)
+            # A published command is pending, not confirmed. The consumer must
+            # echo its generation and applied state before muteReady is truthful.
+            self._s2s_mute_ready = False
+            if self._write_s2s_mute_command(self._muted) is None:
+                logger.warning("Could not publish the initial external mute command")
+            initial_generation = self._write_s2s_voice_mode(self._voice_mode)
+            # Publishing a request is not an acknowledgement. The external
+            # frontend proves the matching generation is active through its
+            # status file or authenticated input-state telemetry.
+            self._s2s_mode_ready = False
+            if initial_generation is None:
+                logger.warning("Could not publish the initial external input mode")
         self._thread: threading.Thread | None = None
         self._event_thread: threading.Thread | None = None
         self._health_thread: threading.Thread | None = None
@@ -688,6 +702,8 @@ class WebVoiceApp:
         }
 
     def _status_payload(self) -> dict:
+        if cfg.RAP_MODE == "brain" and not self._s2s_mute_ready:
+            self._refresh_s2s_mute_ready()
         active_statuses = {"running", "waiting", "blocked"}
         active_jobs = [
             job for job in self._agent_jobs.values() if job.get("status") in active_statuses
@@ -797,12 +813,19 @@ class WebVoiceApp:
 
     def _action_mute(self, payload: dict) -> dict | None:
         requested = bool(payload.get("muted"))
-        if cfg.RAP_MODE == "brain" and not self._write_s2s_mute_flag(requested):
-            self._s2s_mute_ready = False
-            return {
-                "ok": False,
-                "error": "Could not synchronize the external microphone mute state.",
-            }
+        if cfg.RAP_MODE == "brain":
+            with self._s2s_mute_transition_lock:
+                generation = self._write_s2s_mute_command(requested)
+                if generation is None:
+                    self._s2s_mute_ready = False
+                    return {"ok": False, "error": "Could not publish the external mute command."}
+                acknowledged, error = self._await_s2s_mute(requested, generation)
+                if not acknowledged:
+                    # Do not invent state from an unacknowledged request. The
+                    # callback may already have applied it, but only a matching
+                    # status generation is authoritative across the process gap.
+                    self._s2s_mute_ready = False
+                    return {"ok": False, "error": error}
         self._s2s_mute_ready = True
         self._muted = requested
         self._session.set_muted(requested)
@@ -840,20 +863,60 @@ class WebVoiceApp:
                 self._avatar_speaking = speaking
                 self._publish({"type": "speaking", "value": speaking})
 
-    def _write_s2s_mute_flag(self, muted: bool) -> bool:
+    def _write_s2s_mute_command(self, muted: bool) -> int | None:
         if not cfg.S2S_MIC_MUTE_FILE:
-            return False
+            return None
+        self._s2s_mute_generation += 1
+        body = {"generation": self._s2s_mute_generation, "muted": muted}
         path = Path(cfg.S2S_MIC_MUTE_FILE)
+        staged = path.with_suffix(f"{path.suffix}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            if muted:
-                path.write_text("muted\n", encoding="utf-8")
-            else:
-                path.unlink(missing_ok=True)
-            return True
+            staged.write_text(json.dumps(body), encoding="utf-8")
+            staged.replace(path)
+            return self._s2s_mute_generation
         except OSError as exc:
-            logger.warning(f"Failed to update S2S mic mute flag {path}: {exc}")
-            return False
+            staged.unlink(missing_ok=True)
+            logger.warning(f"Failed to update S2S mic mute command {path}: {exc}")
+            return None
+
+    def _refresh_s2s_mute_ready(self) -> None:
+        """Reconcile startup/pending readiness without changing confirmed state."""
+        if not cfg.S2S_MIC_MUTE_STATUS_FILE:
+            return
+        try:
+            status = json.loads(
+                Path(cfg.S2S_MIC_MUTE_STATUS_FILE).read_text(encoding="utf-8-sig")
+            )
+        except (OSError, json.JSONDecodeError):
+            return
+        self._s2s_mute_ready = (
+            status.get("generation") == self._s2s_mute_generation
+            and status.get("state") == "ready"
+            and status.get("muted") == bool(self._muted)
+        )
+
+    def _await_s2s_mute(self, muted: bool, generation: int) -> tuple[bool, str]:
+        timeout = max(0.0, cfg.S2S_MIC_MUTE_ACK_TIMEOUT)
+        if timeout == 0 or not cfg.S2S_MIC_MUTE_STATUS_FILE:
+            return False, "External microphone mute acknowledgement is unavailable."
+        deadline = time.monotonic() + timeout
+        path = Path(cfg.S2S_MIC_MUTE_STATUS_FILE)
+        while time.monotonic() < deadline:
+            try:
+                status = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                time.sleep(0.05)
+                continue
+            if status.get("generation") != generation:
+                time.sleep(0.05)
+                continue
+            if status.get("state") == "ready" and status.get("muted") is muted:
+                return True, ""
+            if status.get("state") == "error":
+                return False, "The external microphone rejected the mute command."
+            time.sleep(0.05)
+        return False, "The external microphone did not acknowledge the mute command in time."
 
     def _write_s2s_voice_mode(self, mode: str) -> int | None:
         if not cfg.S2S_VOICE_MODE_FILE:
@@ -890,6 +953,9 @@ class WebVoiceApp:
             "active_window_secs": float(
                 self._wake_status.get("window_secs", cfg.WAKE_WORD_ACTIVE_WINDOW_SECS)
             ),
+            # Separate from the window above: answering a question the butler
+            # just asked deserves longer than reaching the mic after a wake word.
+            "follow_up_window_secs": float(cfg.WAKE_WORD_FOLLOW_UP_SECS),
         }
         path = Path(cfg.S2S_VOICE_MODE_FILE)
         staged = path.with_suffix(f"{path.suffix}.tmp")
@@ -1391,10 +1457,13 @@ class WebVoiceApp:
                     app._stream_avatar_audio(self)
                     return
                 if parsed.path == "/health":
-                    brain_ready = (
-                        app._session_state == "ready"
-                        and getattr(app, "_s2s_mute_ready", False)
-                    )
+                    # This endpoint gates dependency-ordered stack startup. It
+                    # must report whether the brain can accept requests, not
+                    # whether the later-starting physical mic client has already
+                    # acknowledged its command files. Mic/mode readiness stays
+                    # explicit in the payload and /api/status so the UI remains
+                    # fail-closed without deadlocking the launcher.
+                    brain_ready = app._session_state == "ready"
                     ready = cfg.RAP_MODE != "brain" or brain_ready
                     payload = {
                         "ok": ready,
@@ -1404,6 +1473,7 @@ class WebVoiceApp:
                     if cfg.RAP_MODE == "brain":
                         payload["session"] = app._session_state
                         payload["muteReady"] = app._s2s_mute_ready
+                        payload["modeReady"] = app._s2s_mode_ready
                     self._send_json(
                         payload,
                         status=HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,

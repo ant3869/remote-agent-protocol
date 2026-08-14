@@ -108,7 +108,8 @@ def test_client_readiness_uses_a_rap_owned_file(tmp_path):
     assert client.args[client.args.index("--ready-file") + 1] == str(client.ready_file)
 
 
-def test_client_ready_file_requires_valid_ready_json(tmp_path):
+def test_client_ready_file_requires_valid_ready_json(monkeypatch, tmp_path):
+    monkeypatch.setattr(voice_stack, "process_is_running", lambda pid: pid == 123)
     path = tmp_path / "client.ready"
     probe = voice_stack.file_ready(path)
 
@@ -119,6 +120,14 @@ def test_client_ready_file_requires_valid_ready_json(tmp_path):
     assert probe() is False
     path.write_text('{"ready": true, "pid": 123}', encoding="utf-8")
     assert probe() is True
+
+
+def test_client_ready_file_rejects_a_dead_pid(monkeypatch, tmp_path):
+    path = tmp_path / "client.ready"
+    path.write_text('{"ready": true, "pid": 123}', encoding="utf-8")
+    monkeypatch.setattr(voice_stack, "process_is_running", lambda _pid: False)
+
+    assert voice_stack.file_ready(path)() is False
 
 
 def test_spawn_removes_a_stale_ready_file(monkeypatch, tmp_path):
@@ -250,6 +259,7 @@ def test_run_stack_uses_dynamic_ports_instead_of_legacy_collisions(monkeypatch, 
         "occupied_ports",
         lambda bridge_port=None, ws_port=None: [],
     )
+    monkeypatch.setattr(voice_stack, "ensure_llm_backend", lambda: None)
     spawned = []
 
     def spawn(stage, env):
@@ -261,6 +271,177 @@ def test_run_stack_uses_dynamic_ports_instead_of_legacy_collisions(monkeypatch, 
     assert voice_stack.run_stack() == 1
     assert spawned[0][1]["S2S_BRIDGE_PORT"] == "41001"
     assert spawned[0][1]["S2S_WS_PORT"] == "41002"
+
+
+def _ollama_that_starts_on_demand(monkeypatch, *, tags_once_started):
+    """Report Ollama as down until start_ollama() is called, then serving."""
+    state = {"running": False, "started_on": None}
+
+    def tags(*_args):
+        return list(tags_once_started) if state["running"] else None
+
+    def start(address, timeout=90.0):
+        state["running"] = True
+        state["started_on"] = address
+        return True
+
+    monkeypatch.setattr(voice_stack, "ollama_tags", tags)
+    monkeypatch.setattr(voice_stack, "start_ollama", start)
+    return state
+
+
+def test_a_stopped_ollama_is_started_rather_than_reported(monkeypatch):
+    state = _ollama_that_starts_on_demand(monkeypatch, tags_once_started=[f"{cfg.LLM_MODEL}:latest"])
+
+    assert voice_stack.ensure_llm_backend() is None
+    assert state["started_on"] == "localhost:11434"
+
+
+def test_an_ollama_that_will_not_start_is_reported(monkeypatch):
+    monkeypatch.setattr(voice_stack, "ollama_tags", lambda *_args: None)
+    monkeypatch.setattr(voice_stack, "start_ollama", lambda *_args, **_kwargs: False)
+
+    problem = voice_stack.ensure_llm_backend()
+
+    assert problem is not None and "Could not start Ollama" in problem
+
+
+def test_a_remote_ollama_is_never_started_locally(monkeypatch):
+    monkeypatch.setattr(cfg, "OLLAMA_HOST", "http://192.168.1.50:11434")
+    monkeypatch.setattr(voice_stack, "ollama_tags", lambda *_args: None)
+    monkeypatch.setattr(
+        voice_stack,
+        "start_ollama",
+        lambda *_args, **_kwargs: pytest.fail("started a server for another machine"),
+    )
+
+    assert "not this machine" in (voice_stack.ensure_llm_backend() or "")
+
+
+def test_a_custom_local_port_is_where_ollama_gets_bound(monkeypatch):
+    monkeypatch.setattr(cfg, "OLLAMA_HOST", "http://127.0.0.1:11500")
+
+    assert voice_stack.local_ollama_address() == "127.0.0.1:11500"
+
+
+def test_an_unregistered_chat_model_is_reported_before_launching(monkeypatch):
+    monkeypatch.setattr(voice_stack, "ollama_tags", lambda *_args: ["something-else:latest"])
+
+    problem = voice_stack.ensure_llm_backend()
+
+    assert problem is not None and cfg.LLM_MODEL in problem
+
+
+def test_a_serving_ollama_with_the_chat_model_is_left_alone(monkeypatch):
+    monkeypatch.setattr(voice_stack, "ollama_tags", lambda *_args: [f"{cfg.LLM_MODEL}:latest"])
+    monkeypatch.setattr(
+        voice_stack,
+        "start_ollama",
+        lambda *_args, **_kwargs: pytest.fail("restarted an Ollama that was already serving"),
+    )
+
+    assert voice_stack.ensure_llm_backend() is None
+
+
+_DEVICE_TABLE = {
+    "default": [1, 6],
+    "devices": [
+        {"index": 1, "name": "Microphone (Lenovo Performance Audio)", "inputs": 2, "outputs": 0},
+        {"index": 6, "name": "Speakers (Realtek(R) Audio)", "inputs": 0, "outputs": 8},
+        {"index": 46, "name": "Microphone (Steam Streaming Microphone)", "inputs": 8, "outputs": 0},
+    ],
+}
+
+
+def test_an_unconfigured_microphone_falls_back_to_the_system_default():
+    assert voice_stack.resolve_audio_device(_DEVICE_TABLE, "", capture=True) == 1
+
+
+def test_a_microphone_is_matched_by_name_not_by_remembered_index():
+    index = voice_stack.resolve_audio_device(_DEVICE_TABLE, "steam streaming", capture=True)
+
+    assert index == 46
+
+
+def test_a_valid_literal_index_is_honoured():
+    assert voice_stack.resolve_audio_device(_DEVICE_TABLE, "46", capture=True) == 46
+
+
+def test_a_literal_index_must_exist_and_support_the_requested_direction():
+    assert voice_stack.resolve_audio_device(_DEVICE_TABLE, "999", capture=True) is None
+    assert voice_stack.resolve_audio_device(_DEVICE_TABLE, "6", capture=True) is None
+    assert voice_stack.resolve_audio_device(_DEVICE_TABLE, "1", capture=False) is None
+
+
+def test_a_named_device_that_is_gone_resolves_to_nothing():
+    assert voice_stack.resolve_audio_device(_DEVICE_TABLE, "yeti", capture=True) is None
+
+
+def test_a_microphone_is_never_matched_against_an_output_only_device():
+    assert voice_stack.resolve_audio_device(_DEVICE_TABLE, "realtek", capture=True) is None
+
+
+def test_the_client_is_told_which_devices_to_open(tmp_path):
+    client = voice_stack.build_stages(tmp_path, input_device=1, output_device=6)[2].args
+
+    assert client[client.index("--input-device") + 1] == "1"
+    assert client[client.index("--output-device") + 1] == "6"
+
+
+def test_unresolved_devices_leave_the_frontends_own_choice_alone(tmp_path):
+    client = voice_stack.build_stages(tmp_path)[2].args
+
+    assert "--input-device" not in client and "--output-device" not in client
+
+
+def test_speakers_are_left_alone_unless_explicitly_configured(monkeypatch, tmp_path):
+    monkeypatch.setattr(cfg, "S2S_INPUT_DEVICE", "")
+    monkeypatch.setattr(cfg, "S2S_OUTPUT_DEVICE", "")
+    monkeypatch.setattr(voice_stack, "audio_devices", lambda _home: _DEVICE_TABLE)
+
+    assert voice_stack.select_audio_devices(tmp_path) == (1, None)
+
+
+def test_configured_speakers_are_resolved_too(monkeypatch, tmp_path):
+    monkeypatch.setattr(cfg, "S2S_INPUT_DEVICE", "lenovo")
+    monkeypatch.setattr(cfg, "S2S_OUTPUT_DEVICE", "realtek")
+    monkeypatch.setattr(voice_stack, "audio_devices", lambda _home: _DEVICE_TABLE)
+
+    assert voice_stack.select_audio_devices(tmp_path) == (1, 6)
+
+
+def test_an_unreadable_device_table_defers_to_the_frontend(monkeypatch, tmp_path):
+    monkeypatch.setattr(voice_stack, "audio_devices", lambda _home: None)
+
+    assert voice_stack.select_audio_devices(tmp_path) == (None, None)
+
+
+def test_run_stack_refuses_to_launch_without_a_reachable_brain_backend(monkeypatch, tmp_path):
+    home = _kokoro_frontend(tmp_path, launcher_text="--tts pocket")
+    monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: home)
+    monkeypatch.setattr(voice_stack, "ensure_llm_backend", lambda: "Ollama is not answering")
+    spawned = []
+    monkeypatch.setattr(voice_stack, "_spawn", lambda *a: spawned.append(a))
+
+    assert voice_stack.run_stack() == 2
+    assert spawned == []
+
+
+def test_a_failed_stage_reports_the_tail_of_its_own_log(monkeypatch, tmp_path):
+    monkeypatch.setattr(voice_stack, "REPO_ROOT", tmp_path)
+    log = tmp_path / "logs" / "speech-to-speech-server.log"
+    log.parent.mkdir()
+    log.write_text("loading models\nopenai.InternalServerError: 500\n", encoding="utf-8")
+
+    excerpt = voice_stack.log_excerpt("speech-to-speech server")
+
+    assert "openai.InternalServerError: 500" in excerpt
+
+
+def test_a_missing_stage_log_still_points_at_where_it_should_be(monkeypatch, tmp_path):
+    monkeypatch.setattr(voice_stack, "REPO_ROOT", tmp_path)
+
+    assert "speech-to-speech-server.log" in voice_stack.log_excerpt("speech-to-speech server")
 
 
 def test_run_stack_explains_a_missing_frontend(monkeypatch):
@@ -315,6 +496,7 @@ def test_a_stage_that_dies_before_ready_stops_the_launch(monkeypatch, tmp_path):
     monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: tmp_path)
     # Independent of whether a real stack happens to be running on this machine.
     monkeypatch.setattr(voice_stack, "occupied_ports", lambda *_args: [])
+    monkeypatch.setattr(voice_stack, "ensure_llm_backend", lambda: None)
 
     spawned = []
 
@@ -581,6 +763,7 @@ def test_a_clear_machine_proceeds_past_the_port_guard(monkeypatch, tmp_path):
     home = _kokoro_frontend(tmp_path, launcher_text="--tts pocket")
     monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: home)
     monkeypatch.setattr(voice_stack, "occupied_ports", lambda *_args: [])
+    monkeypatch.setattr(voice_stack, "ensure_llm_backend", lambda: None)
     spawned = []
 
     def fake_spawn(stage, env):

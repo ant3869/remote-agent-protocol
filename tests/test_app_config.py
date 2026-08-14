@@ -15,18 +15,22 @@ class AgentConfigTests(unittest.TestCase):
     def test_agent_jobs_have_a_bounded_default_runtime(self):
         self.assertGreater(config.AGENT_JOB_TIMEOUT_SECS, 0)
 
-    def test_code_puppy_resumes_the_workspace_session(self):
+    def test_code_puppy_jobs_start_from_a_clean_session(self):
+        # --quick-resume shares a session pool with the human's own interactive
+        # runs, so a delegated task arrives mid-conversation in whatever was last
+        # discussed there and gets answered in that context.
         self.assertEqual(
             config.AGENT_BACKENDS["code-puppy"],
-            [
-                "code-puppy",
-                "--model",
-                "chatgpt-gpt-5.5",
-                "--quick-resume",
-                "-p",
-                "{task}",
-            ],
+            ["code-puppy", "-p", "{task}"],
         )
+
+    def test_the_wake_word_leaves_time_to_actually_start_talking(self):
+        # At 3s the window closed before the recognizer reported speech, so the
+        # phrase was heard and the sentence after it was dropped.
+        self.assertGreaterEqual(config.WAKE_WORD_ACTIVE_WINDOW_SECS, 8)
+
+    def test_a_question_can_be_answered_without_saying_the_wake_word_again(self):
+        self.assertGreater(config.WAKE_WORD_FOLLOW_UP_SECS, config.WAKE_WORD_ACTIVE_WINDOW_SECS)
 
     def test_hermes_uses_persistent_single_query_sessions(self):
         self.assertEqual(

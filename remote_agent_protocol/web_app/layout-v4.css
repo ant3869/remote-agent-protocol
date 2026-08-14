@@ -7,6 +7,7 @@
   --queue-width: clamp(280px, 24vw, 340px);
 }
 html, body { width: 100%; height: 100%; overflow: hidden; }
+[hidden] { display: none !important; }
 body { min-width: 320px; }
 [hidden] { display: none !important; }
 .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0,0,0,0) !important; white-space: nowrap !important; border: 0 !important; }
@@ -154,7 +155,11 @@ body { min-width: 320px; }
 .persona-preview dt { color: var(--text-faint); font-size: 9px; text-transform: uppercase; }
 .persona-preview dd { max-width: 110px; margin: 0; overflow: hidden; color: var(--text-secondary); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .persona-document { display: grid; grid-template-columns: minmax(420px,1.35fr) minmax(330px,.75fr); gap: 0; min-height: 0; padding: 0; overflow: hidden; border: 0; border-radius: 0; box-shadow: none; }
-.persona-document > .persona-notice { position: absolute; z-index: 5; margin: 10px; }
+.persona-document > .persona-notice {
+  position: static;
+  grid-column: 1 / -1;
+  margin: 12px 16px 0;
+}
 .prompt-document { display: grid; grid-template-rows: minmax(0,1fr) auto; gap: 12px; min-height: 0; padding: 20px; }
 .prompt-document label:first-child { min-height: 0; }
 #personaEditPrompt { height: 100%; min-height: 260px; resize: none; }
@@ -292,7 +297,46 @@ body.command-palette-open .app-shell { pointer-events: none; user-select: none; 
   .status-row-card, .status-row-card:nth-of-type(n+6) { grid-column: 1; }
 }
 @media (max-width: 620px) {
+  :root { --frame-rail: 72px; --frame-status: 30px; }
+  html, body { overflow: auto; }
+  .app-shell {
+    min-height: 100dvh;
+    height: 100dvh;
+    grid-template: "header" var(--frame-header) "canvas" minmax(0,1fr) "rail" var(--frame-rail) "status" var(--frame-status) / minmax(0,1fr);
+  }
   .command-header { grid-template-columns: 42px minmax(0,1fr) auto; }
+  .context-rail { display: none; }
+  .destination-rail {
+    position: static;
+    display: block;
+    overflow: hidden;
+    border-top: 1px solid var(--border-subtle);
+    border-right: 0;
+  }
+  .destination-rail .nav-links {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(44px,1fr));
+    gap: 2px;
+    height: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px;
+  }
+  .destination-rail .nav-link { width: 100%; min-height: 0; height: 100%; padding: 4px 2px; }
+  .destination-rail .nav-link span { font-size: 16px; }
+  .destination-rail .nav-link b { display: block; font-size: 11px; line-height: 1.2; }
+  .rail-actions { display: none; }
+  .task-canvas .view.active { overflow-y: auto; }
+  #controlView.active, #agentsView.active, #personasView.active, #memoryView.active, #statusView.active {
+    display: block;
+    overflow-y: auto;
+  }
+  .conversation-workbench, .agent-detail-panel, .agent-jobs-panel, .agent-evidence-stage,
+  .persona-document, .memory-layout, #statusDashboard { min-height: auto; height: auto; overflow: visible; }
+  .activity-panel { max-height: none; }
+  .persona-document, .memory-layout, .memory-layout.has-selection, #statusDashboard { display: block; }
+  .persona-inspector, .memory-list, .memory-detail { overflow: visible; }
+  .avatar-panel { display: none; }
   .command-trigger { width: 42px; padding: 7px; }
   .command-trigger span { display: none; }
   .route-identity .section-label, .assistant-transceiver #muteBtn { display: none; }

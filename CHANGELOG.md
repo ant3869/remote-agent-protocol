@@ -10,6 +10,27 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ## [Unreleased]
 
+### Added
+
+- The voice stack starts Ollama when it is not already serving, and reports the
+  tail of a failed stage's log instead of only its exit code.
+- The realtime client's microphone and speakers are resolved by name at launch
+  (`S2S_INPUT_DEVICE`, `S2S_OUTPUT_DEVICE`) rather than by an index that
+  renumbers whenever Windows gains or loses an audio device.
+- A reply that ends in a question can be answered without saying the wake phrase
+  again, including one the assistant starts by itself when an agent job
+  finishes. `WAKE_WORD_FOLLOW_UP_SECS` sets the grace period; 0 disables it.
+
+### Changed
+
+- `WAKE_WORD_ACTIVE_WINDOW_SECS` now defaults to 8 seconds. At 3 the window
+  routinely closed before the recognizer reported speech, so the wake phrase was
+  heard and the sentence after it was dropped.
+- Code Puppy delegations no longer pass `--quick-resume`. It resumes the newest
+  session for the working directory's Git root and branch -- the same pool the
+  human's own interactive runs write to -- so a delegated task arrived
+  mid-conversation in unrelated context. Set `AGENT_BACKENDS_JSON` to opt back in.
+
 ## [1.13.0] - 2026-08-10
 
 ### Added

@@ -1056,6 +1056,26 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertIn("usage", agent_bridge.announcement(job).lower())
         self.assertIn("switch", agent_bridge.announcement(job).lower())
 
+    def test_nonzero_exit_without_output_has_useful_failure_summary(self):
+        events: list[dict] = []
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", "raise SystemExit(7)"]}, events.append
+            )
+            job_id = await bridge.start("mock", "quiet failure")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
+        self.assertEqual(job.returncode, 7)
+        self.assertIn("exit code 7", job.summary.lower())
+        self.assertEqual(job.failure_detail, job.summary)
+
     def test_zero_exit_with_error_tail_reports_failed(self):
         # Regression: code-puppy hit a 429 usage limit, printed the error, and
         # exited 0 -- the job was announced as finished with the raw error JSON

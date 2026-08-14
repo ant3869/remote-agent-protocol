@@ -972,6 +972,21 @@ textarea { resize: vertical; line-height: 1.5; }
   .palette-panel { max-width: 100%; max-height: 100%; overflow-x: hidden; }
 }
 
+.assistant-transceiver.disconnected .presence-dot,
+.runtime-statusline .disconnected .presence-dot {
+  background: var(--status-error);
+  box-shadow: none;
+}
+
+@media (max-width: 620px) {
+  .section-label, .panel-meta, .summary-grid span, .system-strip span,
+  .telemetry-table .table-heading, .palette-group, .status-pill b {
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  .muted, small { line-height: 1.45; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
 }

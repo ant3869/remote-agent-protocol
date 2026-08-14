@@ -1,10 +1,6 @@
 import json
 import threading
-import urllib.error
-import urllib.request
-from http.server import ThreadingHTTPServer
-
-import pytest
+import time
 
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol.web_gui import WebVoiceApp
@@ -18,65 +14,103 @@ class FakeSession:
         self.muted = muted
 
 
-def test_brain_mode_cold_start_synchronizes_the_external_mute_flag(monkeypatch, tmp_path):
-    flag = tmp_path / "s2s_mic_muted.flag"
-    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
-    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(flag))
-
-    app = WebVoiceApp()
-
-    assert app._muted is True
-    assert flag.read_text(encoding="utf-8").strip() == "muted"
-
-
-def test_brain_health_rejects_an_unsynchronized_startup_mute(monkeypatch):
-    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+def make_app(muted=False):
     app = WebVoiceApp.__new__(WebVoiceApp)
-    app._session_state = "ready"
-    app._s2s_mute_ready = False
-    server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        with pytest.raises(urllib.error.HTTPError) as caught:
-            urllib.request.urlopen(
-                f"http://127.0.0.1:{server.server_address[1]}/health", timeout=5
-            )
-        assert caught.value.code == 503
-        assert json.loads(caught.value.read())["muteReady"] is False
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
-def test_failed_external_mute_write_does_not_change_gui_or_session_state(monkeypatch):
-    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
-    app = WebVoiceApp.__new__(WebVoiceApp)
-    app._muted = False
+    app._muted = muted
     app._session = FakeSession()
-    app._write_s2s_mute_flag = lambda _muted: False
+    app._s2s_mute_ready = True
+    app._s2s_mute_generation = 0
+    app._s2s_mute_transition_lock = threading.Lock()
+    return app
+
+
+def test_mute_command_is_atomic_and_generation_tagged(monkeypatch, tmp_path):
+    command = tmp_path / "mute.json"
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(command))
+    app = make_app()
+
+    assert app._write_s2s_mute_command(True) == 1
+    assert json.loads(command.read_text(encoding="utf-8")) == {"generation": 1, "muted": True}
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_startup_ack_reconciles_readiness_without_changing_confirmed_state(
+    monkeypatch, tmp_path
+):
+    status = tmp_path / "mute-status.json"
+    status.write_text(
+        json.dumps({"generation": 42, "muted": True, "state": "ready"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_STATUS_FILE", str(status))
+    app = make_app(muted=True)
+    app._s2s_mute_generation = 42
+    app._s2s_mute_ready = False
+
+    app._refresh_s2s_mute_ready()
+
+    assert app._s2s_mute_ready is True
+    assert app._muted is True
+    assert app._session.muted is None
+
+
+def test_matching_ack_commits_confirmed_mute(monkeypatch, tmp_path):
+    command = tmp_path / "mute.json"
+    status = tmp_path / "mute-status.json"
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(command))
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_STATUS_FILE", str(status))
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_ACK_TIMEOUT", 1.0)
+    app = make_app()
+
+    def acknowledge():
+        while not command.exists():
+            time.sleep(0.005)
+        payload = json.loads(command.read_text(encoding="utf-8"))
+        status.write_text(json.dumps({**payload, "state": "ready"}), encoding="utf-8")
+
+    thread = threading.Thread(target=acknowledge)
+    thread.start()
+    result = app._action_mute({"muted": True})
+    thread.join()
+
+    assert result is None
+    assert app._muted is True
+    assert app._session.muted is True
+    assert app._s2s_mute_ready is True
+
+
+def test_stale_ack_times_out_and_retains_last_confirmed_state(monkeypatch, tmp_path):
+    command = tmp_path / "mute.json"
+    status = tmp_path / "mute-status.json"
+    status.write_text(json.dumps({"generation": 0, "muted": True, "state": "ready"}))
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(command))
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_STATUS_FILE", str(status))
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_ACK_TIMEOUT", 0.08)
+    app = make_app(muted=False)
 
     result = app._action_mute({"muted": True})
 
     assert result["ok"] is False
     assert app._muted is False
     assert app._session.muted is None
+    assert app._s2s_mute_ready is False
 
 
-def test_gui_mute_action_writes_and_removes_s2s_mute_flag(monkeypatch, tmp_path):
-    flag = tmp_path / "s2s_mic_muted.flag"
-    app = WebVoiceApp.__new__(WebVoiceApp)
-    app._muted = False
-    app._session = FakeSession()
+def test_matching_rejection_retains_last_confirmed_state(monkeypatch, tmp_path):
+    status = tmp_path / "mute-status.json"
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(tmp_path / "mute.json"))
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_STATUS_FILE", str(status))
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_ACK_TIMEOUT", 0.2)
+    app = make_app(muted=True)
+    app._write_s2s_mute_command = lambda _muted: 7
+    status.write_text(json.dumps({"generation": 7, "muted": False, "state": "error"}))
 
-    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(flag))
+    result = app._action_mute({"muted": False})
 
-    app._action_mute({"muted": True})
+    assert result["ok"] is False
     assert app._muted is True
-    assert app._session.muted is True
-    assert flag.read_text(encoding="utf-8").strip() == "muted"
-
-    app._action_mute({"muted": False})
-    assert app._muted is False
-    assert app._session.muted is False
-    assert not flag.exists()
+    assert app._session.muted is None
+    assert app._s2s_mute_ready is False

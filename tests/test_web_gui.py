@@ -151,7 +151,7 @@ def test_web_shell_uses_command_frame_structure():
     assert 'class="runtime-statusline"' in html
     assert 'class="activity-panel"' in html
     assert 'class="system-strip"' in html
-    assert 'class="assistant-transceiver"' in html
+    assert 'class="assistant-transceiver ' in html
     assert 'class="control-grid"' not in html
     assert 'class="hero-panel"' not in html
     assert 'class="orb"' not in html
@@ -272,11 +272,35 @@ def test_brain_health_rejects_a_session_that_cannot_accept_turns(monkeypatch, se
             "mode": "brain",
             "model": cfg.S2S_BRIDGE_MODEL,
             "session": session_state,
-            "muteReady": True,
+            "muteReady": False,
+            "modeReady": False,
         }
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_brain_startup_keeps_input_mode_unconfirmed_until_external_telemetry(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(tmp_path / "muted.flag"))
+    monkeypatch.setattr(cfg, "S2S_VOICE_MODE_FILE", str(tmp_path / "mode.json"))
+
+    app = WebVoiceApp()
+
+    assert app._s2s_mode_generation == 1
+    assert app._status_payload()["inputControl"]["modeReady"] is False
+
+
+def test_avatar_speaking_events_do_not_invent_wake_detector_phases():
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+    speaking_branch = script.split('} else if (event.type === "speaking") {', 1)[1].split(
+        '} else if (event.type === "turn") {', 1
+    )[0]
+
+    assert "updateWakePhase" not in speaking_branch
+    assert 'state.wake.window_secs || 3' not in script
 
 
 def test_brain_boot_does_not_publish_ready_before_the_adapter_runs(monkeypatch):
@@ -299,10 +323,12 @@ def test_brain_boot_does_not_publish_ready_before_the_adapter_runs(monkeypatch):
     assert {"type": "session", "state": "ready"} not in events
 
 
-def test_brain_health_accepts_a_ready_session(monkeypatch):
+def test_brain_health_accepts_a_ready_session_before_the_later_audio_client(monkeypatch):
     monkeypatch.setattr(cfg, "RAP_MODE", "brain")
     app = WebVoiceApp()
     app._session_state = "ready"
+    app._s2s_mute_ready = False
+    app._s2s_mode_ready = False
     server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -310,7 +336,10 @@ def test_brain_health_accepts_a_ready_session(monkeypatch):
         port = server.server_address[1]
         response = urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5)
         assert response.status == 200
-        assert json.loads(response.read())["ok"] is True
+        payload = json.loads(response.read())
+        assert payload["ok"] is True
+        assert payload["muteReady"] is False
+        assert payload["modeReady"] is False
     finally:
         server.shutdown()
         server.server_close()
@@ -630,6 +659,18 @@ def test_agents_payload_preserves_live_output_lines_and_prompts(monkeypatch, tmp
     assert payload["jobs"][0]["result"] == "Found the log entries."
     assert "statusProtocol" in payload["prompts"]
     assert payload["prompts"]["scopePreamble"]["required"] == ["{cwd}"]
+
+
+def test_brain_mode_agents_payload_keeps_persisted_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    monkeypatch.setattr(cfg, "APP_STATE_FILE", str(tmp_path / "state.json"))
+    history_file = tmp_path / "history.json"
+    history_file.write_text('[{"job_id":"old-job","status":"done"}]', encoding="utf-8")
+    monkeypatch.setattr(cfg, "AGENT_HISTORY_FILE", str(history_file))
+
+    app = WebVoiceApp()
+
+    assert app._agents_payload()["history"] == [{"job_id": "old-job", "status": "done"}]
 
 
 def test_agents_payload_keeps_resolved_confirmation_history(monkeypatch, tmp_path):

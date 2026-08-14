@@ -42,7 +42,7 @@ class WakeWordConfigTests(unittest.TestCase):
     def test_wake_word_disabled_by_default_config(self):
         self.assertFalse(config.WAKE_WORD_ENABLED)
         self.assertEqual(config.WAKE_WORD_ENGINE, "openwakeword")
-        self.assertEqual(config.WAKE_WORD_ACTIVE_WINDOW_SECS, 3.0)
+        self.assertEqual(config.WAKE_WORD_ACTIVE_WINDOW_SECS, 8.0)
 
     def test_settings_from_config_mirrors_config_values(self):
         settings = wake_word.settings_from_config(config)

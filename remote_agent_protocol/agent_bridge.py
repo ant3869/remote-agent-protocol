@@ -1103,6 +1103,9 @@ class AgentBridge:
                 job.summary = error_line
             if failed and job.failure_kind and not job.summary:
                 job.summary = job.failure_detail
+            if failed and not job.summary and job.returncode is not None:
+                job.summary = f"Agent failed with exit code {job.returncode} without reporting details"
+                job.failure_detail = job.summary
         if job.status == STATUS_DONE and not job.result:
             job.result = fallback_result(job.lines)
         job.secs = round(time.monotonic() - job._t0, 1)

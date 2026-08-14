@@ -76,7 +76,7 @@ def check_python() -> CheckResult:
     return CheckResult("python", "fail", f"Python {version} < {required} required")
 
 
-def _ollama_tags(host: str, timeout: float) -> list[str] | None:
+def ollama_tags(host: str, timeout: float) -> list[str] | None:
     """Raw model names from /api/tags, or None if unreachable.
 
     Deliberately bypasses ollama_models.available(), which substitutes a
@@ -92,16 +92,16 @@ def _ollama_tags(host: str, timeout: float) -> list[str] | None:
     return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
 
 
-def _model_registered(name: str, tags: list[str]) -> bool:
-    """True if `name` matches a tag exactly or with an implicit ':latest'."""
-    bare_tags = {t.split(":", 1)[0] for t in tags}
-    bare_name = name.split(":", 1)[0]
-    return name in tags or bare_name in bare_tags
+def model_registered(name: str, tags: list[str]) -> bool:
+    """True if `name` is installed, allowing only Ollama's implicit ``:latest`` tag."""
+    if ":" in name:
+        return name in tags
+    return name in tags or f"{name}:latest" in tags
 
 
 def check_ollama(timeout: float = 2.0) -> list[CheckResult]:
     """Ollama reachability plus the configured chat and intent models."""
-    tags = _ollama_tags(cfg.OLLAMA_HOST, timeout)
+    tags = ollama_tags(cfg.OLLAMA_HOST, timeout)
     if tags is None:
         results = [
             CheckResult("ollama-server", "fail", f"unreachable at {cfg.OLLAMA_HOST}"),
@@ -114,7 +114,7 @@ def check_ollama(timeout: float = 2.0) -> list[CheckResult]:
         return results
 
     results = [CheckResult("ollama-server", "ok", f"reachable at {cfg.OLLAMA_HOST}")]
-    if _model_registered(cfg.LLM_MODEL, tags):
+    if model_registered(cfg.LLM_MODEL, tags):
         results.append(CheckResult("ollama-chat-model", "ok", f"'{cfg.LLM_MODEL}' registered"))
     else:
         results.append(
@@ -125,7 +125,7 @@ def check_ollama(timeout: float = 2.0) -> list[CheckResult]:
             )
         )
     if cfg.INTENT_ROUTER_ENABLED:
-        if _model_registered(cfg.INTENT_MODEL, tags):
+        if model_registered(cfg.INTENT_MODEL, tags):
             results.append(
                 CheckResult("ollama-intent-model", "ok", f"'{cfg.INTENT_MODEL}' registered")
             )

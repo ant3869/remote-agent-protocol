@@ -181,9 +181,9 @@ class _VersionOnlyCliBackend:
     Codex (`exec`) and Claude Code (`-p`) are one-shot: a no-op prompt is a
     safe, side-effect-free way to also infer auth state. Hermes's `chat` mode
     resumes ONE shared on-disk session per agent name (agent_bridge.py), and
-    code-puppy's quick-resume similarly ties into real session state -- a
-    "ping" through either would touch the same session a real delegated turn
-    uses rather than just checking status. So these two report availability
+    code-puppy auto-saves a session per directory that its own resume lookups
+    read -- a "ping" through either would touch real session state rather than
+    just checking status. So these two report availability
     and version only; auth_ok stays None ("unknown") rather than guessed.
     """
 

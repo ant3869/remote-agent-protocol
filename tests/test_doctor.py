@@ -78,6 +78,12 @@ class CheckOllamaTests(unittest.TestCase):
         self.assertEqual(statuses["ollama-server"], "fail")
         self.assertEqual(statuses["ollama-chat-model"], "fail")
 
+    def test_model_registration_only_defaults_untagged_names_to_latest(self):
+        self.assertTrue(doctor.model_registered("qwen", ["qwen:latest"]))
+        self.assertTrue(doctor.model_registered("qwen:latest", ["qwen:latest"]))
+        self.assertTrue(doctor.model_registered("qwen:custom", ["qwen:custom"]))
+        self.assertFalse(doctor.model_registered("qwen:custom", ["qwen:latest"]))
+
     def test_reachable_but_configured_model_missing(self):
         with (
             mock.patch.object(cfg, "LLM_MODEL", "does-not-exist"),

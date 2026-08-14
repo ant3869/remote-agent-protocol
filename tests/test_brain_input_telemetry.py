@@ -47,6 +47,7 @@ def test_brain_mode_publishes_initial_input_mode(brain_app):
         "model_path": str(mode_file.parent / "alice.onnx"),
         "threshold": 0.61,
         "active_window_secs": 4.5,
+        "follow_up_window_secs": cfg.WAKE_WORD_FOLLOW_UP_SECS,
     }
 
 
@@ -82,6 +83,16 @@ def test_switching_from_free_talk_refreshes_enabled_wake_model(monkeypatch, tmp_
     assert published["model"] == "alice"
     assert published["model_path"] == str(tmp_path / "Alice.onnx")
     assert published["threshold"] == 0.63
+
+
+def test_the_frontend_is_told_how_long_a_follow_up_stays_answerable(brain_app):
+    app, mode_file = brain_app
+
+    app._action("voice_mode", {"mode": "wake_word"})
+    published = json.loads(mode_file.read_text(encoding="utf-8"))
+
+    assert published["follow_up_window_secs"] == cfg.WAKE_WORD_FOLLOW_UP_SECS
+    assert published["follow_up_window_secs"] > published["active_window_secs"]
 
 
 def test_brain_mode_switches_to_wake_word_atomically_and_persists(brain_app):

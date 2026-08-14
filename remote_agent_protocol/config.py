@@ -116,7 +116,8 @@ SPEAKER_DEVICE_INDEX = _env_int_or_none("SPEAKER_DEVICE_INDEX")
 # Wake word -- when enabled AND openwakeword is installed, the session inserts
 # a WakeWordGate ahead of STT: mic audio is dropped until you say the wake
 # phrase, then the mic stays open for WAKE_WORD_ACTIVE_WINDOW_SECS (each bot
-# reply refreshes the window so follow-ups don't need re-waking). If the engine
+# reply refreshes it with WAKE_WORD_FOLLOW_UP_SECS so follow-ups don't need
+# re-waking). If the engine
 # or its model can't load, the session falls back to always-listening and says
 # so in the transcript. Models auto-download to the openwakeword cache on first
 # use (a few MB, one time).
@@ -125,7 +126,16 @@ WAKE_WORD_ENABLED = _env_bool("WAKE_WORD_ENABLED", False)
 WAKE_WORD_ENGINE = _env("WAKE_WORD_ENGINE", "openwakeword")
 WAKE_WORD_MODEL = _env("WAKE_WORD_MODEL", "hey_jarvis")
 WAKE_WORD_THRESHOLD = float(_env("WAKE_WORD_THRESHOLD", "0.5"))
-WAKE_WORD_ACTIVE_WINDOW_SECS = float(_env("WAKE_WORD_ACTIVE_WINDOW_SECS", "3"))
+# How long the wake phrase buys you to actually start talking. This has to cover
+# the pause while you think, plus the detector's own lag and the round trip to
+# the recognizer's voice-activity detection -- at 3s the gate routinely shut
+# again before any of that landed, so the phrase was heard and the sentence after
+# it was not.
+WAKE_WORD_ACTIVE_WINDOW_SECS = float(_env("WAKE_WORD_ACTIVE_WINDOW_SECS", "8"))
+# Grace period after the assistant finishes speaking, when a reply that ends in a
+# question would otherwise need the wake phrase again to answer. Counts from
+# audible completion, not from the end of generation. 0 disables it.
+WAKE_WORD_FOLLOW_UP_SECS = float(_env("WAKE_WORD_FOLLOW_UP_SECS", "15"))
 # Optional model -> persona overrides. When empty, locally installed wake
 # models are matched to persona names (for example hey_jarvis -> Jarvis).
 WAKE_WORD_PERSONAS = _parse_string_map(
@@ -367,18 +377,15 @@ AGENT_BACKENDS = {
     # Powerful and DANGEROUS -- pick it knowingly, don't make it the default.
     "hermes-yolo": ["hermes", "chat", "--yolo", "-q", "{task}"],
     # Code Puppy -- best for CODING tasks in a repo (pair with a working dir).
-    # Quick-resume scopes memory to the cwd's git root + branch and starts fresh
-    # when no session exists; -p still returns control to the bridge after each turn.
-    "code-puppy": [
-        "code-puppy",
-        # Code Puppy's user-global default may name a model unavailable to its
-        # ChatGPT/Codex login. Pin the model verified for headless dispatch.
-        "--model",
-        "chatgpt-gpt-5.5",
-        "--quick-resume",
-        "-p",
-        "{task}",
-    ],
+    # Deliberately stateless. --quick-resume looks up the newest session for the
+    # cwd's git root + branch, which is the same pool the human's own interactive
+    # runs write to: a delegated task then lands mid-conversation in whatever was
+    # last discussed there. Observed 2026-08-12 -- the agent read a stale RAP
+    # transcript as an injection attempt, answered about the old context, and ran
+    # unrelated tool calls. Set AGENT_BACKENDS_JSON to opt back in.
+    # Let Code Puppy use its current configured model: provider model keys change
+    # independently of RAP, and an obsolete pin can exit silently with no answer.
+    "code-puppy": ["code-puppy", "-p", "{task}"],
     "codex": ["codex", "exec", "--sandbox", "danger-full-access", "{task}"],
     "claude-code": [
         "claude",
@@ -440,7 +447,18 @@ S2S_BRIDGE_PORT = int(_env("S2S_BRIDGE_PORT", "8788"))
 S2S_BRIDGE_API_KEY = _env("S2S_BRIDGE_API_KEY", "local")
 S2S_BRIDGE_MODEL = _env("S2S_BRIDGE_MODEL", "remote-agent-protocol")
 S2S_BRIDGE_STREAMING = _env_bool("S2S_BRIDGE_STREAMING", True)
-S2S_MIC_MUTE_FILE = _env("S2S_MIC_MUTE_FILE", str(DATA_DIR / "s2s_mic_muted.flag"))
+S2S_MIC_MUTE_FILE = _env("S2S_MIC_MUTE_FILE", str(DATA_DIR / "s2s_mic_mute.json"))
+S2S_MIC_MUTE_STATUS_FILE = _env(
+    "S2S_MIC_MUTE_STATUS_FILE", str(DATA_DIR / "s2s_mic_mute_status.json")
+)
+S2S_MIC_MUTE_ACK_TIMEOUT = float(_env("S2S_MIC_MUTE_ACK_TIMEOUT", "2.0"))
+# Microphone and speakers the realtime client opens. PortAudio indices renumber
+# whenever Windows gains or loses a device -- a virtual Steam or headset mic
+# appearing is enough -- so these are matched by name at launch instead. Give a
+# substring of the device name, or a literal index to pin one. Empty means the
+# system default microphone, and the frontend's own choice of speakers.
+S2S_INPUT_DEVICE = _env("S2S_INPUT_DEVICE", "")
+S2S_OUTPUT_DEVICE = _env("S2S_OUTPUT_DEVICE", "")
 # Brain mode has no local TTS, so the GUI voice dropdown reaches the external
 # frontend through this file: RAP writes the Kokoro voice id, the realtime
 # client polls it and pushes a session.update. Same one-way file handshake as

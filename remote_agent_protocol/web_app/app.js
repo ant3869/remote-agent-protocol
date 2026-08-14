@@ -246,7 +246,6 @@ function handleEvent(event) {
     $("chatState").textContent = event.state || "session";
   } else if (event.type === "speaking") {
     $("chatState").textContent = event.value ? "speaking" : "listening";
-    updateWakePhase(event.value ? "agent_responding" : "follow_up_window");
   } else if (event.type === "turn") {
     if (event.event === "user_started") updateWakePhase("listening_for_command");
     if (event.event === "user_stopped") updateWakePhase("transcribing");
@@ -264,9 +263,6 @@ function handleEvent(event) {
 function updateWakePhase(phase) {
   if (state.status?.voiceMode !== "wake_word" || !state.wake) return;
   state.wake.phase = phase;
-  if (phase === "follow_up_window") {
-    state.wake.expires_at = Date.now() + 1000 * (state.wake.window_secs || 3);
-  }
   renderWakeStatus();
 }
 
@@ -456,10 +452,24 @@ function renderStatus() {
   $("agentsPill").textContent = activeAgents ? `${activeAgents} active` : "idle";
   $("agentsPill").closest(".status-pill").classList.toggle("busy", activeAgents > 0);
   renderCompactHealth();
-  $("muteBtn").textContent = s.muted ? "Mic muted" : "Mic live";
-  $("muteBtn").classList.toggle("status-error", s.muted);
-  $("muteBtn").classList.toggle("status-success", !s.muted);
+  const runtimeConnected = !state.connectionLost;
+  $("topologyState").textContent = runtimeConnected ? "Live service topology" : "Runtime disconnected";
+  $("topologyStateDetail").textContent = runtimeConnected
+    ? "Dependencies, resources and active routing."
+    : "Live service data is unavailable until RAP reconnects.";
+  $("runtimeExecutionState").textContent = runtimeConnected ? "Local runtime" : "Unknown";
+  $("runtimeInputState").textContent = runtimeConnected ? "Voice and text" : "Unavailable";
+  $("runtimeInspectionState").textContent = runtimeConnected ? "Real-time" : "Waiting";
+  $("runtimeFooterState").innerHTML = runtimeConnected
+    ? '<i class="presence-dot"></i> Runtime connected'
+    : '<i class="presence-dot"></i> Runtime disconnected';
+  $("runtimeFooterState").classList.toggle("disconnected", !runtimeConnected);
+  document.querySelector(".assistant-transceiver")?.classList.toggle("disconnected", !runtimeConnected);
+  $("muteBtn").textContent = runtimeConnected ? (s.muted ? "Mic muted" : "Mic live") : "Mic unavailable";
+  $("muteBtn").classList.toggle("status-error", !runtimeConnected || s.muted);
+  $("muteBtn").classList.toggle("status-success", runtimeConnected && !s.muted);
   applyBrainMode(s);
+  if (!runtimeConnected) $("muteBtn").textContent = "Mic unavailable";
   $("modeBtn").textContent = labelMode(s.voiceMode);
   $("modeCard").textContent = labelMode(s.voiceMode);
   $("modelCard").textContent = s.model || "--";
@@ -614,7 +624,9 @@ function renderPersonaList(s) {
       list.appendChild(button);
     });
   if (!list.children.length) {
-    list.innerHTML = '<div class="empty-state"><strong>No matching personas.</strong><span>Clear search to show the full list.</span></div>';
+    list.innerHTML = query
+      ? '<div class="empty-state"><strong>No matching personas.</strong><span>Clear or change the search to show the full list.</span></div>'
+      : '<div class="empty-state"><strong>No personas yet.</strong><span>Create your first persona to begin editing.</span></div>';
   }
 }
 
@@ -994,6 +1006,13 @@ function renderStatusDashboard(s) {
   if (s.vram?.available) {
     resources.push(["VRAM", s.vram.label, vramTone(s.vram.percent).replace("status-", "")]);
   }
+  const runtimeConnected = !state.connectionLost;
+  if (!runtimeConnected) {
+    coreServices.forEach((service) => {
+      service[1] = "Unconfirmed";
+      service[2] = service[0] === "Session" ? "error" : "warning";
+    });
+  }
   const incidents = coreServices.filter(([, , tone]) => tone === "error" || tone === "warning");
   const serviceNodes = coreServices.map(([label, value, tone, role]) => (
     `<article class="status-service-node"><span class="status-icon">${label.slice(0, 2).toUpperCase()}</span><div><small>${escapeHtml(role)}</small><strong>${escapeHtml(label)}</strong><p>${escapeHtml(value)}</p></div><b class="status-${tone}">${tone}</b></article>`
@@ -1013,7 +1032,7 @@ function renderStatusDashboard(s) {
     <aside class="status-inspection" aria-label="Runtime incidents and resources">
       <section class="status-incidents"><header><span>Incidents</span><b>${incidents.length}</b></header>${incidentBody}</section>
       <section class="status-resource-stack"><header>Resources and routing</header>${resourceCards}</section>
-      <section class="status-timeline"><span>Latest snapshot</span><strong>Live state received</strong><small>Refresh or wait for the next runtime event.</small></section>
+      <section class="status-timeline"><span>Latest snapshot</span><strong>${runtimeConnected ? "Live state received" : "Waiting for connection"}</strong><small>${runtimeConnected ? "Refresh or wait for the next runtime event." : "Displayed values are unconfirmed until RAP reconnects."}</small></section>
     </aside>`;
 }
 
@@ -1456,10 +1475,15 @@ function bind() {
         item.classList.remove("active");
         item.removeAttribute("aria-current");
       });
-      document.querySelectorAll(".view").forEach((item) => item.classList.remove("active"));
+      document.querySelectorAll(".view").forEach((item) => {
+        item.classList.remove("active");
+        item.hidden = true;
+      });
       button.classList.add("active");
       button.setAttribute("aria-current", "page");
-      $(`${button.dataset.view}View`).classList.add("active");
+      const activeView = $(`${button.dataset.view}View`);
+      activeView.hidden = false;
+      activeView.classList.add("active");
       $("appTitle").textContent = uiShell.viewTitle(button.dataset.view);
       if (button.dataset.view === "memory") post("refresh_memory", { query: $("memorySearch").value });
       if (button.dataset.view === "agents") loadAgentsPage().catch((error) => showAgentPromptNotice(`Agents refresh failed: ${error.message}`, false));
@@ -1531,6 +1555,11 @@ function bind() {
   $("startOllamaBtn").addEventListener("click", () => post("start_ollama"));
   $("diagnosticsBtn").addEventListener("click", () => post("export_diagnostics"));
   $("rebootBtn").addEventListener("click", () => post("reboot_session"));
+  $("operationsDisclosure").addEventListener("toggle", (event) => {
+    event.currentTarget.querySelector("summary")?.setAttribute(
+      "aria-expanded", String(event.currentTarget.open)
+    );
+  });
   $("settingsMuteBtn").addEventListener("click", () => inputControls.run("mute", { muted: !state.status?.muted }));
   $("settingsRestartBtn").addEventListener("click", () => { state.messages = []; renderChat(); post("restart_chat"); });
   $("settingsMemoryBtn").addEventListener("click", () => post("refresh_memory", { query: $("memorySearch").value }));
@@ -1655,6 +1684,12 @@ function bind() {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       isCommandPaletteOpen() ? closeCommandPalette() : openCommandPalette();
+      return;
+    }
+    if ($("operationsDisclosure")?.open && event.key === "Escape") {
+      event.preventDefault();
+      $("operationsDisclosure").open = false;
+      $("operationsDisclosure").querySelector("summary")?.focus();
       return;
     }
     if (isCommandPaletteOpen()) {
