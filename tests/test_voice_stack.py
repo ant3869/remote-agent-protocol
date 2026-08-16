@@ -752,12 +752,39 @@ def test_a_free_machine_reports_no_occupied_ports(monkeypatch):
     assert voice_stack.occupied_ports() == []
 
 
+def test_a_leftover_run_is_closed_instead_of_blocking_the_launch(monkeypatch, tmp_path):
+    # The common case behind a held lock is a crashed run whose process is still
+    # sitting there. The app has always reaped that on its own next launch, so
+    # refusing here would turn a self-healing situation into a dead end.
+    home = _kokoro_frontend(tmp_path, launcher_text="--tts pocket")
+    monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: home)
+    monkeypatch.setattr(voice_stack, "ensure_llm_backend", lambda: None)
+    monkeypatch.setattr(voice_stack.process_guard, "instance_is_running", lambda: True)
+    reclaimed = []
+    monkeypatch.setattr(
+        voice_stack.process_guard,
+        "reclaim_instance_slot",
+        lambda: reclaimed.append(True) or True,
+    )
+    spawned = []
+    monkeypatch.setattr(
+        voice_stack, "_spawn", lambda stage, env: spawned.append(stage.name) or _FakeProcess(1)
+    )
+
+    voice_stack.run_stack()
+
+    assert reclaimed == [True]
+    assert spawned == ["RAP brain + GUI"], "the launch proceeds once the slot is free"
+
+
 def test_a_second_launch_refuses_instead_of_duplicating(monkeypatch, tmp_path):
     # Each launch picks ephemeral ports, so a port probe can only ever report
     # "free"; the app's own single-instance lock is what knows it is up.
     home = _kokoro_frontend(tmp_path, launcher_text="--tts pocket")
     monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: home)
     monkeypatch.setattr(voice_stack.process_guard, "instance_is_running", lambda: True)
+    # A slot that cannot be reclaimed means a genuinely running app.
+    monkeypatch.setattr(voice_stack.process_guard, "reclaim_instance_slot", lambda: False)
     spawned = []
     monkeypatch.setattr(voice_stack, "_spawn", lambda *a: spawned.append(a))
 

@@ -31,6 +31,7 @@ import ctypes
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -199,6 +200,88 @@ def close_previous_instance(lock_file: Path = _LOCK_FILE) -> None:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as e:
         logger.warning(f"Could not close leftover process {pid}: {e}")
+
+
+def app_instance_pids() -> list[int]:
+    """PIDs of live processes running the app entry point.
+
+    Deliberately the *app* (``-m remote_agent_protocol``), not everything
+    carrying the identity marker: the voice-stack launcher itself matches that
+    marker, and a launcher that reaps its own process solves nothing.
+    """
+    if sys.platform != "win32":
+        return []
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { $_.CommandLine -like '*-m remote_agent_protocol*' -and "
+                "$_.CommandLine -notlike '*voice_stack*' } | "
+                "ForEach-Object { $_.ProcessId }",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids = []
+    for line in result.stdout.split():
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            pids.append(pid)
+    return pids
+
+
+def reclaim_instance_slot(lock_file: Path = _LOCK_FILE, timeout: float = 20.0) -> bool:
+    """Free this machine's app slot by closing whatever leftover still holds it.
+
+    A crashed or force-closed run leaves its process alive holding the lock, and
+    the app itself has always healed that on its next launch. The voice stack
+    checks the lock *before* starting the app, so without this it would report
+    "already running" for a window nobody is looking at any more.
+
+    Returns True when the slot is free to claim. False means something is still
+    holding it that this cannot identify as ours -- a genuinely running app, or
+    a second login's -- which is exactly when refusing to start is right.
+    """
+    if not instance_is_running():
+        return True
+    close_previous_instance(lock_file)
+    # A quarter of the budget for the recorded PID to die; the rest is for the
+    # fallback below, which has more work to do.
+    if _slot_clears(timeout=timeout / 4):
+        return True
+    # The leftover may have died before recording its PID, or the file may have
+    # been cleared under it; fall back to identifying the app by what it runs.
+    for pid in app_instance_pids():
+        logger.warning(f"Closing a leftover Remote Agent Protocol process: PID {pid}")
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning(f"Could not close PID {pid}: {exc}")
+    return _slot_clears(timeout=timeout)
+
+
+def _slot_clears(timeout: float) -> bool:
+    """Wait for the single-instance lock to be released, up to ``timeout``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not instance_is_running():
+            return True
+        time.sleep(0.25)
+    return not instance_is_running()
 
 
 def write_lock(lock_file: Path = _LOCK_FILE) -> None:

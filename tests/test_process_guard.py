@@ -221,3 +221,61 @@ class LockFileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReclaimInstanceSlotTests(unittest.TestCase):
+    """A crashed run's leftover must not stop the next launch."""
+
+    def test_a_free_slot_needs_no_reclaiming(self) -> None:
+        with patch.object(process_guard, "instance_is_running", return_value=False):
+            self.assertTrue(process_guard.reclaim_instance_slot())
+
+    def test_closing_the_recorded_leftover_is_enough(self) -> None:
+        held = iter([True, False])
+        closed: list = []
+        with (
+            patch.object(process_guard, "instance_is_running", lambda: next(held, False)),
+            patch.object(process_guard, "close_previous_instance", closed.append),
+            patch.object(process_guard, "app_instance_pids", return_value=[123]),
+            patch.object(process_guard.subprocess, "run") as killer,
+        ):
+            self.assertTrue(process_guard.reclaim_instance_slot())
+        self.assertEqual(len(closed), 1)
+        killer.assert_not_called()  # no need to hunt processes when the PID file worked
+
+    def test_a_leftover_that_never_recorded_a_pid_is_still_closed(self) -> None:
+        # Crash before write_lock: the lock file names nobody, so the process
+        # has to be identified by what it is running.
+        killed: list = []
+
+        def fake_run(args, **kwargs):
+            killed.append(args)
+            return _completed()
+
+        with (
+            patch.object(process_guard, "instance_is_running", lambda: not killed),
+            patch.object(process_guard, "close_previous_instance", lambda *_a: None),
+            patch.object(process_guard, "app_instance_pids", return_value=[4242]),
+            patch.object(process_guard.subprocess, "run", fake_run),
+        ):
+            self.assertTrue(process_guard.reclaim_instance_slot(timeout=1.0))
+
+        self.assertIn("4242", killed[0])
+
+    def test_a_slot_held_by_something_unknown_is_reported_not_forced(self) -> None:
+        with (
+            patch.object(process_guard, "instance_is_running", return_value=True),
+            patch.object(process_guard, "close_previous_instance", lambda *_a: None),
+            patch.object(process_guard, "app_instance_pids", return_value=[]),
+        ):
+            self.assertFalse(process_guard.reclaim_instance_slot(timeout=0.3))
+
+    def test_the_running_launcher_is_never_a_kill_candidate(self) -> None:
+        # voice_stack's own command line carries the identity marker too; a
+        # launcher that reaps itself solves nothing.
+        completed = _completed(f"{os.getpid()}\n9999\n")
+        with (
+            _win32(),
+            patch.object(process_guard.subprocess, "run", return_value=completed),
+        ):
+            self.assertEqual(process_guard.app_instance_pids(), [9999])

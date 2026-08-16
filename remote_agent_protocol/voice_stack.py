@@ -714,14 +714,20 @@ def run_stack() -> int:
     # Ports cannot answer "is it already running?" now that each launch picks
     # ephemeral ones -- a fresh port is free by construction. The app's own
     # single-instance lock can, and it also catches a GUI started on its own.
+    # A held lock is usually a crashed run's process still sitting there, which
+    # the app has always cleaned up on its own next launch; do that here rather
+    # than refusing a launch nobody else is using.
     if process_guard.instance_is_running():
-        logger.error(
-            "Remote Agent Protocol is already running.\n"
-            "Close its windows and try again. Starting a second copy would spend a minute "
-            "loading models before the app refused the duplicate, leaving the audio client "
-            "talking to the first one."
-        )
-        return 2
+        logger.warning("The single-instance lock is held; closing whatever still holds it")
+        if not process_guard.reclaim_instance_slot():
+            logger.error(
+                "Remote Agent Protocol is already running and could not be closed from here.\n"
+                "Close its windows and try again. Starting a second copy would spend a minute "
+                "loading models before the app refused the duplicate, leaving the audio client "
+                "talking to the first one."
+            )
+            return 2
+        logger.info("Reclaimed the slot from a leftover run; continuing")
 
     bridge_port, ws_port = select_stack_ports()
     logger.info(f"Selected dynamic ports: brain/GUI {bridge_port}, Realtime {ws_port}")

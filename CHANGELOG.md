@@ -55,6 +55,13 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
+- The voice stack closes a leftover run instead of refusing to start. A crashed
+  or force-closed session leaves its process holding the single-instance lock,
+  which the app has always cleaned up on its own next launch; the launcher's
+  own check ran first and turned that into "already running -- close its
+  windows", for a window nobody had. It now reclaims the slot (recorded PID
+  first, then any live app process) and only refuses when something it cannot
+  identify still holds the lock.
 - The intent classifier can no longer starve itself. A request that hits the
   timeout closes its connection, and Ollama abandons the model load it was
   waiting for; the next turn started another load that the next timeout
