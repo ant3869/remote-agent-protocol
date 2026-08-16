@@ -55,6 +55,12 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
+- "How long will it take me to get to work" is treated as the live lookup it is.
+  It names none of the live-data words, so it reached the classifier, whose
+  rewrite ("travel time to the user's workplace") was then discarded as
+  unrelated to the transcript -- leaving the model to answer a routing question
+  from memory. Journey questions now route deterministically, and a rewrite that
+  merely inflects a spoken word ("work" -> "workplace") counts as grounded.
 - A request to diagnose or repair an agent no longer goes to that same agent.
   Asked four times in one session why code-puppy was not responding, RAP asked
   code-puppy, which returned nothing every time. An explicit "have <agent> fix

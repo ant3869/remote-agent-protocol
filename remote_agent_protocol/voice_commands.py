@@ -120,6 +120,19 @@ _LIVE_REQUEST_WORDS = (
 )
 _PAST_QUESTION_STARTS = ("did", "was", "were", "has", "had", "have", "does", "do", "am")
 
+# Travel duration is live data that names none of the live-data nouns: "how long
+# will it take me to get to work" has no "traffic" or "weather" in it, so it
+# reached the classifier, which invented "calculate travel time to the user's
+# workplace" -- discarded as ungrounded, leaving the model to answer a routing
+# question from memory. Recognised deterministically instead.
+_TRAVEL_DURATION_RE = re.compile(
+    # A named travel duration, a journey verb, or a destination. Not "how long
+    # is this going to take you", which asks about the work in hand.
+    r"\b(?:travel|drive|driving|commute) time\b|\beta\b"
+    r"|\bhow (?:long|far)\b[^.?]*\b(?:drive|driving|walk|commute|traffic)\b"
+    r"|\bhow long\b[^.?]*\bto get (?:to|there)\b"
+)
+
 # The persona has no access to anything -- no internet, no files, no accounts
 # -- so any question about access ("do you have access to my email?") can
 # only be answered by the tool agent checking real state, never by the
@@ -601,6 +614,9 @@ def parse_implicit_task(text: str) -> str | None:
         and words & set(_LIVE_DATA_KEYWORDS)
         and words & set(_LIVE_REQUEST_WORDS)
     ):
+        return lowered
+
+    if first not in _PAST_QUESTION_STARTS and _TRAVEL_DURATION_RE.search(lowered):
         return lowered
 
     if first in _QUESTION_STARTS:

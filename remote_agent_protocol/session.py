@@ -352,7 +352,7 @@ class VoiceSession:
         self._context.add_message({"role": "user", "content": kickoff})
         await self._worker.queue_frames([LLMRunFrame()])
 
-        self._runner = WorkerRunner(handle_sigint=False if sys.platform == "win32" else True)
+        self._runner = WorkerRunner(handle_sigint=sys.platform != "win32")
         await self._runner.add_workers(self._worker)
         try:
             await self._runner.run()

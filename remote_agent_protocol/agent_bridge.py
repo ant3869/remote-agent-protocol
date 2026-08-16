@@ -347,17 +347,17 @@ def executable_status(command: list[str]) -> tuple[str, str]:
     """
     if not command:
         return "fail", "empty command"
-    token = command[0]
-    if token == "{python}":
+    executable = command[0]
+    if executable == "{python}":
         return "ok", "uses the current Python interpreter"
-    if os.path.isabs(token):
-        if os.path.exists(token):
-            return "ok", f"found at {token}"
-        return "fail", f"not found: {token}"
-    found = shutil.which(token)
+    if os.path.isabs(executable):
+        if os.path.exists(executable):
+            return "ok", f"found at {executable}"
+        return "fail", f"not found: {executable}"
+    found = shutil.which(executable)
     if found:
         return "ok", f"found at {found}"
-    return "fail", f"'{token}' not found on PATH"
+    return "fail", f"'{executable}' not found on PATH"
 
 
 def parse_status_line(line: str) -> dict | None:

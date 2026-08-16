@@ -324,7 +324,17 @@ def _grounding_gap(task: str, reason: str, text: str) -> str | None:
     verdict_words = _content_words(task) | _content_words(reason)
     if not verdict_words:
         return None
-    if verdict_words & _content_words(text):
+    spoken = _content_words(text)
+    if verdict_words & spoken:
+        return None
+    # A rewrite that only inflects or compounds a spoken word is still grounded
+    # in it: "get to work" -> "workplace" was discarded as unrelated, so a
+    # routing question fell back to the model's own guess at travel time.
+    if any(
+        word.startswith(other) or other.startswith(word)
+        for word in verdict_words
+        for other in spoken
+    ):
         return None
     return "classifier task/reason shares no word with the transcript"
 

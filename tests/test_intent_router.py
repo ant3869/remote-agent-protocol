@@ -766,3 +766,25 @@ class RepairSubjectTests(unittest.IsolatedAsyncioTestCase):
             decision = await router.route("have code puppy fix the tests", "hermes")
 
         self.assertEqual(decision.agent, "code-puppy")
+
+
+class GroundingStemTests(unittest.TestCase):
+    """An inflected rewrite of a spoken word is still grounded in it."""
+
+    def test_a_compound_of_a_spoken_word_counts_as_grounded(self):
+        gap = intent_router._grounding_gap(
+            "Calculate travel time to the user's workplace",
+            "the user asked for a commute estimate",
+            "how long will it take me to get to work",
+        )
+
+        self.assertIsNone(gap)
+
+    def test_a_genuinely_unrelated_task_is_still_caught(self):
+        gap = intent_router._grounding_gap(
+            "Delete the temporary download folders",
+            "housekeeping",
+            "what did you think of that movie",
+        )
+
+        self.assertIsNotNone(gap)

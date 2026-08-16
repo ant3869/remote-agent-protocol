@@ -707,3 +707,25 @@ class AgentCancelVerbTests(unittest.TestCase):
         self.assertIsNone(
             voice_commands.parse_agent_cancel("kill the lights", cfg.AGENT_SPOKEN_ALIASES)
         )
+
+
+class TravelDurationTests(unittest.TestCase):
+    """Travel time is live data even when no live-data noun is spoken."""
+
+    def test_a_journey_question_is_a_real_world_lookup(self):
+        for text in (
+            "how long will it take me to get to work",
+            "how long is the drive to bentonville",
+            "what's the travel time to the airport",
+            "how long to get there from here",
+        ):
+            self.assertIsNotNone(voice_commands.parse_implicit_task(text), text)
+
+    def test_asking_about_work_in_hand_stays_conversation(self):
+        for text in (
+            "how long is this going to take you",
+            "how long until you finish that",
+            "how long have you been running",
+            "how long should i wait for the tests",
+        ):
+            self.assertIsNone(voice_commands.parse_implicit_task(text), text)
