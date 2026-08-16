@@ -55,6 +55,16 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
+- The intent classifier can no longer starve itself. A request that hits the
+  timeout closes its connection, and Ollama abandons the model load it was
+  waiting for; the next turn started another load that the next timeout
+  abandoned again, so the model never became resident and every turn fell back
+  to chat. The router now backs off after a timeout and re-warms the model once
+  in the background, while the deterministic tiers keep routing. Measured on
+  the project's own corpus: 60 of 131 turns timed out before, none after.
+- A question about work the assistant already did ("did you check the weather
+  earlier") is no longer dispatched as a new job by the semantic tier. The
+  keyword tier always applied that rule; the classifier tier ignored it.
 - "How long will it take me to get to work" is treated as the live lookup it is.
   It names none of the live-data words, so it reached the classifier, whose
   rewrite ("travel time to the user's workplace") was then discarded as

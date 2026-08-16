@@ -788,3 +788,70 @@ class GroundingStemTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(gap)
+
+
+class ClassifierRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """A timed-out classifier must be given room to finish loading."""
+
+    async def test_a_timeout_stops_further_calls_until_the_model_loads(self):
+        # A timed-out request closes its connection and Ollama abandons the
+        # model load with it; calling again immediately starts a load the next
+        # timeout abandons too, so the model never becomes resident (voice_probe
+        # live run 2026-08-16: 60 of 131 turns timed out in a row).
+        calls = []
+
+        async def slow_classify(text):
+            calls.append(text)
+            await asyncio.sleep(5)
+            return {}
+
+        router = intent_router.IntentRouter(
+            classify=slow_classify, enabled=True, timeout_secs=0.05
+        )
+        warmups = []
+        router.warmup = lambda: warmups.append(1) or asyncio.sleep(0)
+
+        # Both utterances fall past the deterministic tiers, so both would
+        # normally reach the classifier.
+        first = await router.route("I wonder about the state of things", "hermes")
+        second = await router.route("what do you make of all that", "hermes")
+
+        self.assertEqual(len(calls), 1, "the second turn must not re-trigger the load")
+        self.assertEqual(len(warmups), 1, "one background warmup, not one per turn")
+        self.assertGreater(router._cold_until, 0)
+        # Both turns still answer, from the deterministic tiers.
+        self.assertIn("timeout", first.reason)
+        self.assertIn("loading", second.reason)
+
+    async def test_a_successful_warmup_resumes_classification(self):
+        router = intent_router.IntentRouter(classify=AsyncMock(return_value={}), enabled=True)
+        router._cold_until = 9e9
+
+        await router.warmup()
+
+        self.assertEqual(router._cold_until, 0.0)
+
+
+class PastReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
+    """Asking what the assistant already did is not a new job."""
+
+    async def test_a_question_about_prior_work_never_dispatches(self):
+        classify = FakeClassify(
+            result=verdict(category="live_information", task="Check the current weather", conf=0.95)
+        )
+        router = make_router(classify)
+
+        decision = await router.route("did you check the weather earlier", "hermes")
+
+        self.assertEqual(decision.action, intent_router.ACTION_NONE)
+
+    async def test_a_live_check_phrased_the_same_way_still_dispatches(self):
+        # "does the printer work" opens like a memory but asks for a real check.
+        classify = FakeClassify(
+            result=verdict(category="system_control", task="Check the printer status", conf=0.95)
+        )
+        router = make_router(classify)
+
+        decision = await router.route("does the printer work", "hermes")
+
+        self.assertNotEqual(decision.action, intent_router.ACTION_NONE)

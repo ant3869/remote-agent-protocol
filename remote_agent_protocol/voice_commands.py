@@ -119,6 +119,7 @@ _LIVE_REQUEST_WORDS = (
     "where",
 )
 _PAST_QUESTION_STARTS = ("did", "was", "were", "has", "had", "have", "does", "do", "am")
+_PAST_TIME_WORDS = frozenset({"earlier", "yesterday", "before", "already", "last", "ago"})
 
 # Travel duration is live data that names none of the live-data nouns: "how long
 # will it take me to get to work" has no "traffic" or "weather" in it, so it
@@ -667,6 +668,37 @@ _NAME_UNCERTAINTY_PHRASES = (
     "might be called",
     "called something like",
 )
+
+
+def is_past_reference(text: str) -> bool:
+    """Whether this asks about work already done, rather than for new work.
+
+    "Did you check the weather earlier", "did you ask hermes about the logs",
+    "do you remember what I told you yesterday" -- all of these describe a real
+    task, so a classifier reading the words alone answers agent_task and spawns
+    a job for something the user was only asking about. The keyword tier has
+    always applied this rule (_PAST_QUESTION_STARTS); this exposes it so the
+    semantic tier can respect it too.
+
+    Two deliberate exceptions, both cases where the same opener is a live check
+    rather than a memory: asking about access ("do you have access to my
+    email") and about installed capabilities ("do we have the yt-dlp package").
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    if not lowered:
+        return False
+    if lowered.split(" ", 1)[0] not in _PAST_QUESTION_STARTS:
+        return False
+    padded = f" {lowered.replace(',', ' ').replace('.', ' ')} "
+    words = set(padded.split())
+    if words & set(_ACCESS_WORDS):
+        return False
+    if words & set(_CAPABILITY_NOUNS) and words & set(_CAPABILITY_STATE_KEYWORDS):
+        return False
+    # The opener alone is not enough: "does the printer work" is a real check
+    # somebody has to go and perform. What makes this a memory is that it asks
+    # the assistant about its own past turn, or names a past moment.
+    return bool(words & {"you", "your", "we"} or words & _PAST_TIME_WORDS)
 
 
 def parse_capability_request(text: str) -> str | None:

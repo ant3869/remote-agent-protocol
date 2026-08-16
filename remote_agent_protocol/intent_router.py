@@ -141,6 +141,11 @@ _RESPONSE_SCHEMA = {
 }
 
 _WARMUP_TIMEOUT_SECS = 30.0
+# How long to stop asking a classifier that just timed out. A timed-out
+# request closes its connection, and Ollama abandons the model load it was
+# waiting on; asking again immediately starts a load the next timeout will
+# abandon too. One load takes ~15s on a cold 3B model, so wait longer.
+_RECOVERY_BACKOFF_SECS = 30.0
 _CODING_TASK_RE = re.compile(
     # Deliberately excludes the bare word "code": "validation code", "promo
     # code", "zip/area code" are not coding tasks and must not steal a job from
@@ -578,6 +583,9 @@ class IntentRouter:
         self._auto_delegate = cfg.AGENT_AUTO_DELEGATE if auto_delegate is None else auto_delegate
         self._uses_default_classifier = classify is None
         self._classify = classify or self._default_classify
+        # Set while the model is (re)loading after a timeout; see _recover.
+        self._cold_until = 0.0
+        self._recovery: asyncio.Task | None = None
 
     @staticmethod
     async def _default_classify(text: str) -> dict:
@@ -606,9 +614,25 @@ class IntentRouter:
                 )
             else:
                 await self._classify("hello")
+            self._cold_until = 0.0
             logger.info("Intent classifier warmed up")
         except Exception as exc:
             logger.warning(f"Intent classifier warmup failed: {exc}")
+
+    def _recover(self) -> None:
+        """Give a timed-out classifier room to finish loading, once.
+
+        Without this the router starves itself: each timeout aborts the
+        load it was waiting for, and the next turn starts another one, so
+        the model never becomes resident and every turn falls back to chat
+        (voice_probe live run 2026-08-16: 60 of 131 turns timed out in a
+        row). Backing off lets one load finish.
+        """
+        self._cold_until = time.monotonic() + _RECOVERY_BACKOFF_SECS
+        if self._recovery is not None and not self._recovery.done():
+            return
+        # Held: a collected task would leave the model unloaded forever.
+        self._recovery = asyncio.ensure_future(self.warmup())
 
     async def route(self, text: str, default_backend: str) -> RoutingDecision:
         """Decide what to do with one user utterance, with full provenance."""
@@ -758,6 +782,9 @@ class IntentRouter:
         """
         if not self._enabled:
             return None, "disabled"
+        if time.monotonic() < self._cold_until:
+            # Deterministic tiers still route; this only skips the model.
+            return None, "loading"
         # Parsing stays inside the try: a classifier can return anything at all,
         # and a malformed verdict must degrade to chat like any other failure
         # rather than raise through the voice turn.
@@ -767,6 +794,7 @@ class IntentRouter:
             leaked = None if verdict is None else _example_echo(verdict, text)
         except TimeoutError:
             logger.warning(f"Intent classifier timed out after {self._timeout:.1f}s")
+            self._recover()
             return None, "timeout"
         except Exception as exc:
             logger.warning(f"Intent classifier failed ({exc}); treating as chat")
@@ -791,6 +819,15 @@ class IntentRouter:
         # Tier 6: semantic classification -- only for utterances the free
         # tiers above could not place.
         verdict, fallback = await self._classify_verdict(text)
+
+        # A question about what the assistant already did describes a real task,
+        # so a classifier reading the words alone answers agent_task and spawns
+        # a job for something the user only asked about ("did you check the
+        # weather earlier" -> "Check the current weather"). The keyword tier has
+        # always applied this rule; the semantic tier honors it too now.
+        if verdict is not None and voice_commands.is_past_reference(text):
+            verdict = None
+            fallback = fallback or "asks about work already done"
 
         if (
             verdict is not None
