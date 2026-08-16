@@ -257,6 +257,47 @@ class WakeWordGateTests(unittest.IsolatedAsyncioTestCase):
             expected_down_frames=[BotStoppedSpeakingFrame, InputAudioRawFrame],
         )
 
+    async def test_a_reply_buys_the_longer_follow_up_window(self):
+        # Answering a question the assistant just asked is slower than reaching
+        # the mic after a wake phrase, so the reply's window is the longer one.
+        settings = wake_word.WakeWordSettings(
+            enabled=True,
+            model="hey_jarvis",
+            threshold=0.5,
+            active_window_secs=0.3,
+            follow_up_window_secs=2.0,
+        )
+        events: list[dict] = []
+        gate = wake_word.WakeWordGate(
+            settings,
+            detector_factory=lambda _s: FakeDetector(),
+            on_event=events.append,
+        )
+
+        await run_test(
+            gate,
+            frames_to_send=[
+                BotStoppedSpeakingFrame(),
+                SleepFrame(0.5),  # past the wake window, inside the follow-up one
+                audio_frame(),
+            ],
+            expected_down_frames=[BotStoppedSpeakingFrame, InputAudioRawFrame],
+        )
+
+        awake = [event for event in events if event["state"] == "awake"]
+        self.assertEqual(awake[0]["window_secs"], 2.0)
+
+    async def test_an_unset_follow_up_window_keeps_the_wake_window(self):
+        settings = wake_word.WakeWordSettings(
+            enabled=True,
+            model="hey_jarvis",
+            threshold=0.5,
+            active_window_secs=5.0,
+            follow_up_window_secs=0.0,
+        )
+
+        self.assertEqual(settings.follow_up_secs, 5.0)
+
     async def test_detector_failure_falls_back_to_always_listening(self):
         events: list[dict] = []
 

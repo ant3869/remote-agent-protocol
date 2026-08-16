@@ -105,6 +105,39 @@ class SingleInstanceLockTests(unittest.TestCase):
             self.assertTrue(process_guard.acquire_single_instance_lock("test-mutex"))
 
 
+class InstanceProbeTests(unittest.TestCase):
+    """The launcher must be able to ask without claiming the slot."""
+
+    def test_reports_a_running_instance_and_releases_the_probe_handle(self) -> None:
+        closed: list[int] = []
+        kernel32 = SimpleNamespace(OpenMutexW=lambda *_a: 7, CloseHandle=closed.append)
+        with (
+            _win32(),
+            patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)),
+        ):
+            self.assertTrue(process_guard.instance_is_running("test-mutex"))
+        # A leaked handle would keep the slot looking taken after the app exits.
+        self.assertEqual(closed, [7])
+
+    def test_reports_a_free_machine_without_creating_the_lock(self) -> None:
+        created: list = []
+        kernel32 = SimpleNamespace(
+            OpenMutexW=lambda *_a: 0,
+            CreateMutexW=lambda *_a: created.append(_a) or 1,
+            CloseHandle=lambda _h: None,
+        )
+        with (
+            _win32(),
+            patch.object(process_guard.ctypes, "windll", SimpleNamespace(kernel32=kernel32)),
+        ):
+            self.assertFalse(process_guard.instance_is_running("test-mutex"))
+        self.assertEqual(created, [])
+
+    def test_no_op_on_non_windows_platforms(self) -> None:
+        with patch.object(process_guard.sys, "platform", "linux"):
+            self.assertFalse(process_guard.instance_is_running("test-mutex"))
+
+
 class CloseHandlerTests(unittest.TestCase):
     def _install(self, on_close):
         """Install the handler against a fake kernel32 and return the raw callback."""

@@ -740,3 +740,29 @@ class ClassifyPayloadTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepairSubjectTests(unittest.IsolatedAsyncioTestCase):
+    """An agent that is the subject of a complaint must not investigate itself."""
+
+    BACKENDS = {"hermes": ["hermes"], "code-puppy": ["code-puppy"]}
+
+    async def test_a_broken_agent_is_not_asked_to_diagnose_itself(self):
+        # Asked four times in one live session, code-puppy returned nothing
+        # every time (jess_agent_history 2026-08-12 01:47-01:56).
+        with patch.object(intent_router.cfg, "AGENT_BACKENDS", self.BACKENDS):
+            router = intent_router.IntentRouter(enabled=False)
+            decision = await router.route(
+                "find out why code puppy is not responding and fix it", "hermes"
+            )
+
+        self.assertNotEqual(decision.agent, "code-puppy")
+
+    async def test_an_explicit_order_to_an_agent_still_wins(self):
+        # "Have code puppy fix the tests" names the executor; the guard must not
+        # second-guess a direct instruction.
+        with patch.object(intent_router.cfg, "AGENT_BACKENDS", self.BACKENDS):
+            router = intent_router.IntentRouter(enabled=False)
+            decision = await router.route("have code puppy fix the tests", "hermes")
+
+        self.assertEqual(decision.agent, "code-puppy")

@@ -114,14 +114,17 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
   `session.created` handshake whose temporary pool claim has returned idle,
   then a PID-tagged client signal written only after audio streams open and its
   own Realtime session exists. RAP forces the S2S listener to loopback, removes
-  stale readiness before spawn, and refuses occupied ports. Shutdown first asks
-  RAP to clean up gracefully, then uses process-tree escalation for wrapper
-  descendants that cannot stop cleanly.
-- The frontend control plane is explicit and loopback-only. Mute and output
-  voice cross through `S2S_MIC_MUTE_FILE` and `S2S_VOICE_FILE`. Free Talk and
-  Wake Word use generation-tagged request/acknowledgement documents at
-  `S2S_VOICE_MODE_FILE` and `S2S_VOICE_MODE_STATUS_FILE`; an acknowledgement
-  timeout rolls the GUI back to its last confirmed mode. Push To Talk remains
+  stale readiness before spawn, allocates an ephemeral port per process, and
+  refuses to start while the app's single-instance lock is already held.
+  Shutdown first asks RAP to clean up gracefully, then uses process-tree
+  escalation for wrapper descendants that cannot stop cleanly.
+- The frontend control plane is explicit and loopback-only. Output voice crosses
+  through `S2S_VOICE_FILE`. Mute, Free Talk, and Wake Word use generation-tagged
+  request/acknowledgement documents -- `S2S_MIC_MUTE_FILE` with
+  `S2S_MIC_MUTE_STATUS_FILE`, `S2S_VOICE_MODE_FILE` with
+  `S2S_VOICE_MODE_STATUS_FILE` -- so a restart cannot read a previous run's
+  acknowledgement as its own; an acknowledgement timeout leaves mute unconfirmed
+  and rolls the GUI back to its last confirmed mode. Push To Talk remains
   unavailable because the external process owns microphone capture.
 - The client POSTs input phases to `/api/input-state`, measured STT/response/audio
   latency to `/api/turn-timing`, and speaker playback loudness to
@@ -165,9 +168,10 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
 
 ## Current boundaries and risks
 
-- Agent backends are subprocess commands. A remote backend therefore requires a
-  trusted launcher available on the main PC; the project does not yet define a
-  network protocol or authenticate remote machines.
+- Agent backends are subprocess commands on this machine, or agents offered by
+  another machine over the authenticated remote-agent protocol (below). What the
+  protocol does not do yet: schedule across hosts, move a job between them, or
+  survive a host restart mid-job -- a job belongs to the host that accepted it.
 - The `hermes-yolo` backend remains available for explicit selection, but normal
   spoken Hermes routing and implicit delegation use the safer Hermes backend.
 - The web control center is loopback-only (bound to `127.0.0.1`, CSRF-gated)
@@ -175,7 +179,7 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
   worker path is the natural future boundary if remote control becomes a
   requirement.
 - The lifecycle WebSocket is read-only, future-events-only, and loopback-only.
-  It is not the authenticated remote-agent command protocol described above.
+  It is a dashboard feed, not the remote-agent protocol.
 - Brain mode depends on a RAP-aware speech-to-speech frontend checkout that
   lives outside this repository and is not versioned with it. `voice_stack.py`
   checks for the launchers and virtualenv it needs and reports what is missing,
@@ -183,8 +187,8 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
   control files live under ignored `data/`; launcher subprocess logs live under
   ignored `logs/`.
 - The brain endpoint is loopback-only and gated by a shared `S2S_BRIDGE_API_KEY`.
-  It is a local convenience boundary, not the authenticated remote-agent
-  protocol described above.
+  It is a local convenience boundary for the audio frontend, unrelated to the
+  remote-agent protocol.
 - The repository vendors the complete Pipecat framework. Upstream updates should
   be merged from the `upstream` Git remote without mixing custom code into
   `src/pipecat` unless the framework itself must change.
@@ -199,6 +203,29 @@ rejected. `AGENT_MACHINES_JSON` supplies the machine labels shown in the UI.
 AGENT_BACKENDS_JSON={"openclaw":["trusted-launcher","openclaw","{task}"]}
 AGENT_MACHINES_JSON={"openclaw":"Laptop"}
 ```
+
+### Remote agent hosts
+
+Another machine offers its own agents over one authenticated protocol
+(`remote_protocol.py`), served by `remote_host.py` there and consumed by
+`remote_client.py` here. Three routes, all bearer-token gated: capability
+discovery, heartbeat, and a job whose output streams back as newline-delimited
+JSON. Configure with `AGENT_REMOTE_HOSTS_JSON` and `AGENT_REMOTE_TOKEN`.
+
+Discovered agents join delegation as `<host>:<agent>`, which keeps a remote
+Hermes distinct from a local one and labels the job with the machine that ran
+it. `RemoteRegistry` heartbeats each host on `AGENT_REMOTE_HEARTBEAT_SECS` and
+withdraws its agents the moment one stops answering, so a sleeping laptop stops
+being a delegation target instead of accepting a job it cannot run.
+
+The integration point is deliberately narrow: `RemoteProcess` presents a running
+remote job through the same members the bridge uses on a local subprocess
+(`stdout.readline()`, `wait()`, `returncode`, `terminate()`), so status-marker
+parsing, progress heartbeats, silence timeouts, and cancellation are the same
+code for both. The host applies the scope preamble and resolves the working
+directory itself, because only it knows the real paths on that machine, and it
+will only run backend *names* it is already configured with -- never a command
+supplied by the peer.
 
 Agent tasks share one normalized lifecycle: started, in progress, tool running,
 step completed, waiting, blocked, completed, or failed. The bridge asks capable
@@ -235,12 +262,15 @@ an unquoted voice transcript directly into an SSH shell command.
 
 ## Product roadmap
 
-Shipped from earlier roadmaps: the confirmation gate for destructive/elevated
-jobs, the diagnostics bundle (EXPORT button), the VAD-aware wake-word mic
-gate, last-persona persistence, and clean shutdown of live agent subprocesses
-(no more unclosed-transport crashes at exit).
+Shipped from earlier roadmaps: the authenticated remote-agent protocol with
+heartbeat and capability discovery, the confirmation gate for destructive/
+elevated jobs, the diagnostics bundle (EXPORT button), the VAD-aware wake-word
+mic gate, last-persona persistence, and clean shutdown of live agent
+subprocesses (no more unclosed-transport crashes at exit).
 
-1. Define one authenticated remote-agent protocol after confirming the laptop
-   agents' real interfaces; add heartbeat and capability discovery with it.
+1. Cross-host scheduling on top of the remote-agent protocol: pick a machine by
+   load or capability rather than by name, and reattach to a job whose host
+   restarted. Both need the protocol to carry job identity across a reconnect,
+   which today's one-job-per-connection stream does not.
 2. Move to an RTVI web client only when access from other devices is required;
    the loopback web control center already covers the local operator workflow.

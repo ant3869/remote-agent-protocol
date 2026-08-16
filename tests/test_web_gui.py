@@ -1426,3 +1426,111 @@ def test_avatar_review_gaps_are_covered():
     assert "morphTargetInfluences" in scene
     assert "cameraTarget" in scene
     assert "rap:avatar-recovered" in scene
+
+
+class FakeTtsSession:
+    """Records the ordered TTS control calls a preview makes."""
+
+    def __init__(self):
+        self.calls = []
+
+    def set_tts(self, *, voice, voice_backend, model=None, tts_options=None):
+        self.calls.append(("set_tts", voice, voice_backend))
+
+    def speak_text(self, text):
+        self.calls.append(("speak", text))
+
+    def default_agent_backend(self):
+        return "mock"
+
+    def agent_backends(self):
+        return ["mock"]
+
+    def agent_machine(self, backend):
+        return "local"
+
+
+def test_voice_preview_speaks_the_candidate_then_restores_the_live_voice(monkeypatch):
+    # Auditioning a voice from a picker must not change what the assistant
+    # speaks with; only saving the selection does that.
+    monkeypatch.setattr(cfg, "RAP_MODE", "full")
+    app = WebVoiceApp()
+    app._session = FakeTtsSession()
+    app._tts_provider = "kokoro"
+    app._voice = "bm_george"
+
+    result = app._action("tts_test", {"voice": "af_sky"})
+
+    assert result["ok"] is True
+    assert "af_sky" in result["message"]
+    assert app._session.calls == [
+        ("set_tts", "af_sky", "kokoro"),
+        ("speak", "This is the selected text to speech voice."),
+        ("set_tts", "bm_george", "kokoro"),
+    ]
+    assert app._voice == "bm_george"
+
+
+def test_voice_preview_without_a_candidate_uses_the_live_voice(monkeypatch):
+    monkeypatch.setattr(cfg, "RAP_MODE", "full")
+    app = WebVoiceApp()
+    app._session = FakeTtsSession()
+    app._tts_provider = "kokoro"
+    app._voice = "bm_george"
+
+    result = app._action("tts_test", {"voice": "bm_george"})
+
+    assert result["ok"] is True
+    assert app._session.calls == [
+        ("set_tts", "bm_george", "kokoro"),
+        ("speak", "This is the selected text to speech voice."),
+    ]
+
+
+def test_every_voice_picker_carries_its_own_preview_button():
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+
+    for select_id, button_id in [
+        ("voiceSelect", "voiceTestBtn"),
+        ("personaEditVoice", "personaTestVoiceBtn"),
+        ("settingsVoiceSelect", "settingsTestVoiceBtn"),
+    ]:
+        picker = f'<span class="voice-picker"><select id="{select_id}"></select><button id="{button_id}"'
+        assert picker in html
+
+    # The persona editor stages its edits, so its preview has to send the form's
+    # own values rather than whatever is currently live.
+    assert 'post("tts_test", { voice: $("voiceSelect").value })' in script
+    assert "provider: persona.voiceBackend" in script
+
+
+def test_finished_jobs_stop_accumulating_but_active_ones_survive():
+    # Every job rides along in each Agents poll, output lines and all, so a long
+    # session cannot keep them all -- but a running job must never be dropped.
+    app = WebVoiceApp()
+    app._publish({"type": "agent_job", "job_id": "long-runner", "status": "running"})
+    for index in range(web_gui._MAX_TRACKED_AGENT_JOBS + 10):
+        app._publish({"type": "agent_job", "job_id": f"job-{index}", "status": "done"})
+
+    assert len(app._agent_jobs) == web_gui._MAX_TRACKED_AGENT_JOBS
+    assert "long-runner" in app._agent_jobs
+    # The survivors are the newest finished jobs, not an arbitrary slice.
+    assert f"job-{web_gui._MAX_TRACKED_AGENT_JOBS + 9}" in app._agent_jobs
+    assert "job-0" not in app._agent_jobs
+
+
+def test_every_session_event_type_has_a_folder():
+    # A published event type nobody folds silently stops updating the UI.
+    app = WebVoiceApp()
+    published = {"session", "health", "tts_health", "vram", "metric", "turn", "wake"}
+
+    assert published <= set(app._folders)
+
+
+def test_an_unknown_event_type_is_logged_without_folding():
+    app = WebVoiceApp()
+
+    app._publish({"type": "nothing_folds_this", "text": "hello"})
+
+    assert app._event_log[-1]["type"] == "nothing_folds_this"

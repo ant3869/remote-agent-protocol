@@ -12,6 +12,14 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Agents can live on another machine. `python -m remote_agent_protocol.remote_host`
+  offers that machine's configured agents over one authenticated protocol --
+  capability discovery, heartbeat, and job streaming, every request carrying a
+  shared bearer token -- and this side discovers them as `<host>:<agent>`,
+  delegates to them like local agents, and withdraws them from delegation while
+  a host is unreachable. Configure with `AGENT_REMOTE_HOSTS_JSON`,
+  `AGENT_REMOTE_TOKEN`, and `AGENT_REMOTE_HEARTBEAT_SECS`; `doctor` reports every
+  configured host.
 - The voice stack starts Ollama when it is not already serving, and reports the
   tail of a failed stage's log instead of only its exit code.
 - The realtime client's microphone and speakers are resolved by name at launch
@@ -20,6 +28,20 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - A reply that ends in a question can be answered without saying the wake phrase
   again, including one the assistant starts by itself when an agent job
   finishes. `WAKE_WORD_FOLLOW_UP_SECS` sets the grace period; 0 disables it.
+- Asking whether agents are there -- as a group ("ping all the agents") or one
+  by name ("ping code-puppy", "is hermes up", "check Hermes availability") -- is
+  answered by Remote Agent Protocol itself: which backends are
+  configured, whether each can be launched here, whether its machine is
+  answering, and what is running. It used to be routed to a single agent, which
+  cannot see its peers and answered by guessing.
+- `doctor` reports whether the intent router is enabled. With it off, only
+  explicit commands and requests naming an agent are delegated, which otherwise
+  looks like requests being ignored at random.
+- The Agents page lists remote machines beside the agent roster: what each one
+  offers, how many jobs it is running, and why it is unreachable when it is.
+- Every voice picker -- session snapshot, persona editor, and settings -- has a
+  Test button beside it that speaks a sample in the voice currently picked, so a
+  voice can be heard before it is saved.
 
 ### Changed
 
@@ -30,6 +52,65 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   session for the working directory's Git root and branch -- the same pool the
   human's own interactive runs write to -- so a delegated task arrived
   mid-conversation in unrelated context. Set `AGENT_BACKENDS_JSON` to opt back in.
+
+### Fixed
+
+- A request to diagnose or repair an agent no longer goes to that same agent.
+  Asked four times in one session why code-puppy was not responding, RAP asked
+  code-puppy, which returned nothing every time. An explicit "have <agent> fix
+  ..." still names its own executor.
+- "Terminate", "kill", "shut down", and "halt" now cancel an agent, like
+  "cancel" and "stop" already did. They used to fall through to delegation, so
+  "terminate claude-code process" became a *task for claude-code* that sat until
+  its inactivity timeout.
+- "Run/send/dispatch <agent> ..." is recognised as naming the agent to use.
+  Without it, "run hermes only and have it look into code puppy" was routed to
+  the agent it was about rather than the one the operator named.
+- A wake phrase no longer rides into the delegated task text; any "hey <name>"
+  opener is stripped, not just this project's original persona name.
+- Agent names survive transcription and typing better: "code papi" and "code
+  claude" are recognised, and hyphenated backend ids match their spoken aliases.
+- The mock agent no longer dies on a task containing a curly quote or emoji;
+  Windows' console codec could not encode what speech routinely produces.
+- A routing decision that reaches no tier now says why -- including that the
+  classifier is disabled, timed out, or returned nothing. All three used to log
+  the same "no routing tier matched".
+- A spoken delegation can no longer be dropped before it reaches the agent
+  bridge. The dispatch ran as an untracked asyncio task, which the garbage
+  collector may collect mid-flight -- the assistant would say it had asked an
+  agent while nothing ran. Background work in the brain, the lifecycle
+  WebSocket's slow-client disconnect, and remote job cancellation now all keep
+  strong references.
+- A remote agent's output waits for its reader instead of accumulating in
+  memory, and a finished remote job always reaches that reader even when the
+  buffer is full.
+- The voice stack refuses a second launch again. It checks the app's own
+  single-instance lock, which also catches a GUI started on its own; the port
+  check it used before could not see a running stack once each launch started
+  picking ephemeral ports.
+- `WAKE_WORD_FOLLOW_UP_SECS` now also governs the local wake gate, not just the
+  external realtime client, and waking mid-window never shortens a window that
+  is already open.
+- Announcements left queued by an earlier run are discarded at startup instead
+  of being narrated as if that agent had just finished.
+- The Agents panel keeps the most recent jobs rather than every job of the
+  session; active jobs are never dropped, and finished ones remain in history.
+- Brain mode reports itself ready once the brain can accept requests. It also
+  waited on the external microphone's acknowledgement, which that client cannot
+  give until it starts -- after the brain -- so the launcher timed out on a
+  healthy stack. Mic and input-mode readiness stay visible in `/health` and
+  `/api/status`.
+- Mic mute and input mode are published as generation-stamped commands with
+  matching status files, so a restart cannot read a previous run's
+  acknowledgement as its own.
+- Settings saved from several browser actions at once no longer lose one of
+  them: each save stages under its own name instead of sharing one temporary
+  file, which Windows refused mid-replace.
+- An unreachable Ollama is answered with a spoken explanation instead of a
+  server error, which a realtime frontend renders as silence.
+- Freeing VRAM waits longer for a busy Ollama to answer, rather than reporting a
+  timeout and leaving the models resident.
+- Closing a browser tab no longer logs a traceback for the request it aborted.
 
 ## [1.13.0] - 2026-08-10
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import mimetypes
 import queue
@@ -46,12 +47,26 @@ from remote_agent_protocol.avatar_audio import (
     AvatarAudioEnvelopeHub,
     sse_data,
 )
+from remote_agent_protocol.brain import LLMUnavailable
 from remote_agent_protocol.brain_adapter import BrainSessionAdapter
 from remote_agent_protocol.session import VoiceSession
 
 logging_setup.setup_logging(cfg.DEBUG_MODE)
 
 _STATIC_DIR = Path(__file__).with_name("web_app")
+# Finished jobs stay visible in the Agents panel for a while, then only in the
+# persisted history. Enough for a working session, small enough that the whole
+# map can ride along in every status poll.
+_MAX_TRACKED_AGENT_JOBS = 60
+# A job in any of these is still doing something on the user's behalf.
+_ACTIVE_JOB_STATUSES = frozenset({"running", "waiting", "blocked"})
+_TTS_SAMPLE_TEXT = "This is the selected text to speech voice."
+# Spoken back when the model host is down. A realtime frontend turns a failed
+# turn into silence, which reads as the assistant ignoring the user, so answer
+# with the one thing that actually fixes it.
+_LLM_UNREACHABLE_REPLY = (
+    "I cannot reach the language model right now. Please check that Ollama is running."
+)
 _AGENT_PROMPT_DEFAULTS = {
     "scopePreamble": cfg.AGENT_SCOPE_PREAMBLE,
     "statusProtocol": agent_bridge.status_protocol(),
@@ -165,6 +180,10 @@ class WebVoiceApp:
         # held or what the user decided. Bounded so the Agents panel can show
         # recent history without growing unbounded over a long session.
         self._confirm_history: deque[dict] = deque(maxlen=30)
+        # Every job of the session, each carrying up to 250 output lines, and
+        # the whole map ships to the browser on every Agents poll. Old finished
+        # jobs live on in the persisted history, so only the recent ones need to
+        # stay here; active jobs are never evicted, whatever their age.
         self._agent_jobs: dict[str, dict] = {}
         self._avatar_audio = AvatarAudioEnvelopeHub()
         self._avatar_speaking = False
@@ -185,6 +204,22 @@ class WebVoiceApp:
         self._thread: threading.Thread | None = None
         self._event_thread: threading.Thread | None = None
         self._health_thread: threading.Thread | None = None
+        # Session events fold into the state the browser polls. One handler per
+        # event type, so an event nobody folds is simply logged and shown.
+        self._folders: dict[str, Callable[[dict], None]] = {
+            "session": self._fold_session,
+            "health": self._fold_health,
+            "tts_health": self._fold_tts_health,
+            "vram": self._fold_vram,
+            "metric": self._fold_metric,
+            "turn_timing": self._fold_turn_timing,
+            "turn": self._fold_turn,
+            "agent_confirm": self._fold_agent_confirm,
+            "agent_confirm_resolved": self._fold_agent_confirm_resolved,
+            "agent_job": self._fold_agent_job,
+            "default_agent_changed": self._fold_default_agent_changed,
+            "wake": self._fold_wake,
+        }
         self._actions: dict[str, Callable[[dict], dict | None]] = {
             "mute": self._action_mute,
             "voice_mode": self._action_voice_mode,
@@ -359,66 +394,90 @@ class WebVoiceApp:
             self._event_log.append(row)
 
     def _fold_event(self, evt: dict) -> None:
-        kind = evt.get("type")
-        if kind == "session":
-            self._session_state = str(evt.get("state", "unknown"))
-        elif kind == "health":
-            self._health = {"ok": bool(evt.get("ok")), "label": evt.get("label", "Ollama ?")}
-        elif kind == "tts_health":
-            self._tts_health = {"ok": bool(evt.get("ok")), "label": evt.get("label", "TTS ?")}
-        elif kind == "vram":
-            self._vram = {
-                "available": bool(evt.get("available")),
-                "label": evt.get("label", "VRAM ?"),
-                "percent": evt.get("percent", 0),
-                "usedMb": evt.get("used_mb", 0),
-                "totalMb": evt.get("total_mb", 0),
-                "gpuUtilPercent": evt.get("gpu_util_percent", 0),
+        fold = self._folders.get(str(evt.get("type", "")))
+        if fold is not None:
+            fold(evt)
+
+    def _fold_session(self, evt: dict) -> None:
+        self._session_state = str(evt.get("state", "unknown"))
+
+    def _fold_health(self, evt: dict) -> None:
+        self._health = {"ok": bool(evt.get("ok")), "label": evt.get("label", "Ollama ?")}
+
+    def _fold_tts_health(self, evt: dict) -> None:
+        self._tts_health = {"ok": bool(evt.get("ok")), "label": evt.get("label", "TTS ?")}
+
+    def _fold_vram(self, evt: dict) -> None:
+        self._vram = {
+            "available": bool(evt.get("available")),
+            "label": evt.get("label", "VRAM ?"),
+            "percent": evt.get("percent", 0),
+            "usedMb": evt.get("used_mb", 0),
+            "totalMb": evt.get("total_mb", 0),
+            "gpuUtilPercent": evt.get("gpu_util_percent", 0),
+        }
+
+    def _fold_metric(self, evt: dict) -> None:
+        self._latency.update(evt.get("bucket", ""), evt.get("kind", ""), evt.get("value", 0.0))
+
+    def _fold_turn_timing(self, evt: dict) -> None:
+        for bucket in ("stt", "llm", "tts", "total"):
+            if bucket in evt:
+                self._latency.update(bucket, "processing", evt[bucket])
+
+    def _fold_turn(self, evt: dict) -> None:
+        if evt.get("event") == "user_stopped":
+            self._latency.mark_user_turn_complete()
+        elif evt.get("event") == "bot_started":
+            self._latency.mark_bot_started()
+
+    def _fold_agent_confirm(self, evt: dict) -> None:
+        self._pending_confirms.append(evt)
+
+    def _fold_agent_confirm_resolved(self, evt: dict) -> None:
+        token = evt.get("token")
+        self._pending_confirms = [
+            row for row in self._pending_confirms if row.get("token") != token
+        ]
+        self._confirm_history.append(
+            {
+                "agent": evt.get("agent", ""),
+                "task": evt.get("task", ""),
+                "reason": evt.get("reason", ""),
+                "decision": evt.get("decision", ""),
+                "resolvedAt": datetime.now().isoformat(),
             }
-        elif kind == "metric":
-            self._latency.update(evt.get("bucket", ""), evt.get("kind", ""), evt.get("value", 0.0))
-        elif kind == "turn_timing":
-            for bucket in ("stt", "llm", "tts", "total"):
-                if bucket in evt:
-                    self._latency.update(bucket, "processing", evt[bucket])
-        elif kind == "turn":
-            if evt.get("event") == "user_stopped":
-                self._latency.mark_user_turn_complete()
-            elif evt.get("event") == "bot_started":
-                self._latency.mark_bot_started()
-        elif kind == "agent_confirm":
-            self._pending_confirms.append(evt)
-        elif kind == "agent_confirm_resolved":
-            token = evt.get("token")
-            self._pending_confirms = [
-                row for row in self._pending_confirms if row.get("token") != token
-            ]
-            self._confirm_history.append(
-                {
-                    "agent": evt.get("agent", ""),
-                    "task": evt.get("task", ""),
-                    "reason": evt.get("reason", ""),
-                    "decision": evt.get("decision", ""),
-                    "resolvedAt": datetime.now().isoformat(),
-                }
-            )
-        elif kind == "agent_job":
-            job_id = str(evt.get("job_id", ""))
-            if job_id:
-                old = self._agent_jobs.get(job_id, {})
-                lines = list(old.get("lines") or [])
-                if evt.get("event") == "output" and evt.get("line"):
-                    lines.append(str(evt["line"]))
-                    del lines[:-250]
-                elif isinstance(evt.get("lines"), list):
-                    lines = list(evt["lines"])[-250:]
-                self._agent_jobs[job_id] = {**old, **evt, "lines": lines}
-        elif kind == "default_agent_changed":
-            agent = str(evt.get("agent", ""))
-            if agent in cfg.AGENT_BACKENDS:
-                self._save_state()
-        elif kind == "wake":
-            self._wake_status = {**self._wake_status, **evt}
+        )
+
+    def _fold_agent_job(self, evt: dict) -> None:
+        job_id = str(evt.get("job_id", ""))
+        if not job_id:
+            return
+        old = self._agent_jobs.get(job_id, {})
+        lines = list(old.get("lines") or [])
+        if evt.get("event") == "output" and evt.get("line"):
+            lines.append(str(evt["line"]))
+            del lines[:-250]
+        elif isinstance(evt.get("lines"), list):
+            lines = list(evt["lines"])[-250:]
+        self._agent_jobs.pop(job_id, None)  # re-inserted last: newest is newest
+        self._agent_jobs[job_id] = {**old, **evt, "lines": lines}
+        self._evict_old_agent_jobs()
+
+    def _evict_old_agent_jobs(self) -> None:
+        """Drop the oldest finished jobs once the map outgrows its cap."""
+        for job_id in list(self._agent_jobs):
+            if len(self._agent_jobs) <= _MAX_TRACKED_AGENT_JOBS:
+                return
+            if self._agent_jobs[job_id].get("status") not in _ACTIVE_JOB_STATUSES:
+                del self._agent_jobs[job_id]
+
+    def _fold_default_agent_changed(self, evt: dict) -> None:
+        if str(evt.get("agent", "")) in cfg.AGENT_BACKENDS:
+            self._save_state()
+
+    def _fold_wake(self, evt: dict) -> None:
+        self._wake_status = {**self._wake_status, **evt}
 
     def _health_poller(self) -> None:
         while not self._stop.is_set():
@@ -632,6 +691,7 @@ class WebVoiceApp:
             "prompts": self._agent_prompt_payload(),
             "status": self._status_payload(),
             "confirmHistory": list(reversed(self._confirm_history)),
+            "remoteHosts": self._session.remote_hosts(),
         }
 
     def _cli_diagnostics_payload(self) -> dict:
@@ -704,9 +764,8 @@ class WebVoiceApp:
     def _status_payload(self) -> dict:
         if cfg.RAP_MODE == "brain" and not self._s2s_mute_ready:
             self._refresh_s2s_mute_ready()
-        active_statuses = {"running", "waiting", "blocked"}
         active_jobs = [
-            job for job in self._agent_jobs.values() if job.get("status") in active_statuses
+            job for job in self._agent_jobs.values() if job.get("status") in _ACTIVE_JOB_STATUSES
         ]
         agent_states: dict[str, dict] = {}
         for job in self._agent_jobs.values():
@@ -1156,9 +1215,52 @@ class WebVoiceApp:
                 "message": "Brain mode: the realtime frontend speaks. Say something to hear the voice.",
                 "status": self._status_payload(),
             }
+        candidate = self._candidate_tts(payload)
+        if candidate is None:
+            self._apply_current_tts()
+            self._session.speak_text(_TTS_SAMPLE_TEXT)
+            return {"ok": True, "message": "Test voice queued.", "status": self._status_payload()}
+        voice, settings = candidate
+        # Auditioning must not commit the choice: the frames are queued in order,
+        # so the sample is spoken in the candidate voice and the live one is back
+        # in place before the next reply.
+        self._session.set_tts(**settings)
+        self._session.speak_text(_TTS_SAMPLE_TEXT)
         self._apply_current_tts()
-        self._session.speak_text("This is the selected text to speech voice.")
-        return {"ok": True, "message": "Test voice queued.", "status": self._status_payload()}
+        return {
+            "ok": True,
+            "message": f"Previewing {voice}.",
+            "status": self._status_payload(),
+        }
+
+    def _candidate_tts(self, payload: dict) -> tuple[str, dict] | None:
+        """Resolve the voice a preview asked for, or None to use the live one."""
+        provider = str(payload.get("provider") or self._tts_provider).strip()
+        if provider == "coqui":
+            speaker = str(payload.get("speaker") or payload.get("voice") or "").strip()
+            voice = speaker or self._coqui_speaker
+            options = {
+                "speaker": voice,
+                "language": str(payload.get("language") or self._coqui_language).strip(),
+                "device": str(payload.get("device") or self._coqui_device).strip(),
+            }
+            model = str(payload.get("model") or self._coqui_model).strip()
+        else:
+            voice = str(payload.get("voice") or "").strip()
+            options = self._persona.tts_options or {}
+            model = str(payload.get("model") or self._persona.voice_model or "").strip()
+        if not voice or (
+            voice == self._voice
+            and provider == self._tts_provider
+            and model == (self._current_tts_model() or "")
+        ):
+            return None
+        return voice, {
+            "voice": voice,
+            "voice_backend": provider,
+            "model": model or None,
+            "tts_options": options,
+        }
 
     def _action_tool_user(self, payload: dict) -> None:
         self._session.set_default_agent_backend(str(payload.get("backend", "")))
@@ -1441,6 +1543,11 @@ class WebVoiceApp:
                 # Same contract as do_POST: never leave a request unanswered.
                 try:
                     self._dispatch_get()
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+                    # Reloading the page or leaving it aborts whatever it was
+                    # reading. There is no longer a client to answer, and a
+                    # traceback per closed tab buries the failures that matter.
+                    logger.info(f"GET {self.path} client disconnected: {exc}")
                 except Exception as exc:
                     logger.exception(f"GET {self.path} failed: {exc}")
                     try:
@@ -1509,6 +1616,17 @@ class WebVoiceApp:
                     # HTTP request. The brain turn may already have completed;
                     # dumping a full traceback only buries actual failures.
                     logger.info(f"POST {self.path} client disconnected: {exc}")
+                except LLMUnavailable as exc:
+                    # The request was fine; the model host is down. Report it as
+                    # an ordinary reply so the frontend speaks the reason rather
+                    # than treating the turn as a server fault.
+                    logger.warning(f"POST {self.path}: {exc}")
+                    with contextlib.suppress(Exception):
+                        self._send_json(
+                            openai_bridge._chat_completion(
+                                _LLM_UNREACHABLE_REPLY, cfg.S2S_BRIDGE_MODEL
+                            )
+                        )
                 except Exception as exc:
                     logger.exception(f"POST {self.path} failed: {exc}")
                     try:
@@ -1665,12 +1783,26 @@ class WebVoiceApp:
                     self.wfile.flush()
 
                 first = True
-                for piece in pieces:
-                    delta = {"content": piece}
+                try:
+                    for piece in pieces:
+                        delta = {"content": piece}
+                        if first:
+                            delta = {"role": "assistant", "content": piece}
+                            first = False
+                        write(openai_bridge._stream_chunk(chunk_id, model, created, delta))
+                except LLMUnavailable as exc:
+                    # The headers are already out, so this cannot become an HTTP
+                    # error; finish the stream with something speakable instead.
+                    logger.warning(f"POST {self.path}: {exc}")
                     if first:
-                        delta = {"role": "assistant", "content": piece}
-                        first = False
-                    write(openai_bridge._stream_chunk(chunk_id, model, created, delta))
+                        write(
+                            openai_bridge._stream_chunk(
+                                chunk_id,
+                                model,
+                                created,
+                                {"role": "assistant", "content": _LLM_UNREACHABLE_REPLY},
+                            )
+                        )
                 write(openai_bridge._stream_chunk(chunk_id, model, created, {}, finish_reason="stop"))
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()

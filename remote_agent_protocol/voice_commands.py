@@ -16,6 +16,7 @@ import re
 _FILLERS = (
     "hey jess",
     "jess",
+    "listen to me",
     "okay",
     "ok",
     "so",
@@ -29,7 +30,11 @@ _FILLERS = (
 # Imperative verbs that start a delegation. Question forms ("did you ask...",
 # "is hermes...") never survive filler-stripping into one of these, which is
 # exactly how we avoid false positives on chatter ABOUT agents.
-_VERBS = ("ask", "tell", "have", "get", "use")
+# "run"/"send"/"dispatch" earned their place from live sessions: "run hermes
+# only and have it look into code puppy" was parsed as no delegation at all,
+# so the request went to the agent it was ABOUT rather than the one named
+# (jess_agent_history 2026-08-12 01:53).
+_VERBS = ("ask", "tell", "have", "get", "use", "run", "send", "dispatch")
 
 _TRAILING_PUNCTUATION = ".!?,;: "
 
@@ -221,6 +226,13 @@ def _strip_fillers(lowered: str) -> str:
             if lowered.startswith(filler + " ") or lowered.startswith(filler + ","):
                 lowered = lowered[len(filler) :].lstrip(", ")
                 changed = True
+        # Any wake phrase, not just this project's original persona name:
+        # the transcript keeps it ('hey jarvis. run hermes...'), and it used
+        # to ride along into the task text handed to the agent.
+        stripped = re.sub(r"^hey\s+\w+[.,!]*\s+", "", lowered)
+        if stripped != lowered:
+            lowered = stripped.lstrip(", ")
+            changed = True
     return lowered
 
 
@@ -369,8 +381,15 @@ def parse_agent_cancel(text: str, aliases: dict[str, str]) -> tuple[str | None, 
         "",
         lowered,
     )
-    if not re.match(r"^(?:cancel|stop|abort|end)\b", lowered):
+    # "Terminate" and "kill" are how an operator talks about a process, and
+    # they used to fall through to delegation: "terminate claude-code process"
+    # became a *task for claude-code*, which sat there until its inactivity
+    # timeout (jess_agent_history 2026-08-08 19:20, 19:32).
+    if not re.match(r"^(?:cancel|stop|abort|end|terminate|kill|halt|shut ?down|quit)\b", lowered):
         return None
+    # Aliases are spoken forms ("code puppy"); the same name is often typed as
+    # the backend id ("code-puppy"). Match either.
+    lowered = re.sub(r"[-_]+", " ", lowered)
     agent = next(
         (
             aliases[alias]
@@ -386,7 +405,9 @@ def parse_agent_cancel(text: str, aliases: dict[str, str]) -> tuple[str | None, 
         # "cancel it", "stop them", or even "no, cancel. cancel that". Accept
         # only pronoun/filler residue; a meaningful object such as "the meeting"
         # remains ordinary chat rather than becoming an accidental agent kill.
-        residue = re.sub(r"\b(?:cancel|stop|abort|end)\b", " ", lowered)
+        residue = re.sub(
+            r"\b(?:cancel|stop|abort|end|terminate|kill|halt|shut ?down|quit)\b", " ", lowered
+        )
         residue = re.sub(r"[^a-z0-9]+", " ", residue)
         residue = re.sub(
             r"\b(?:it|that|this|them|those|these|all|every|everything|of|the|now|please|just)\b",
@@ -396,6 +417,65 @@ def parse_agent_cancel(text: str, aliases: dict[str, str]) -> tuple[str | None, 
         if residue.strip():
             return None
     return agent, all_jobs
+
+
+# "Are they there?" asked about the agents as a group. Deliberately separate
+# from a progress question: this is about which backends can take work at all,
+# not about what any of them is currently doing.
+_ROLLCALL_VERBS = re.compile(
+    r"\b(?:ping|roll ?call|check(?: on| in with)?|test|reach|contact|poll"
+    r"|online|offline|available|responding|respond|reachable|alive|up|working|ready|status)\b"
+)
+_ROLLCALL_SCOPE = re.compile(r"\b(?:all|every|each|which|what|who|any of)\b")
+_AGENT_NOUNS = re.compile(r"\b(?:agents?|backends?|bots?|helpers?|machines?)\b")
+
+
+# Liveness asked about one named agent: the agent is the *object* of the check,
+# not the one doing it. "Ping code-puppy" is this; "have code-puppy ping the
+# server" is not, and the difference is whether anything follows the name.
+_LIVENESS_NOUNS = r"(?:availability|status|response|responsiveness|activity|health|state)"
+_LIVENESS_STATES = (
+    r"(?:online|offline|up|alive|awake|available|responding|responsive|working|ready|there|active)"
+)
+
+
+def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None] | None:
+    """Parse "are the agents there?", for all of them or one by name.
+
+    Returns a one-tuple holding the named agent (or None for every agent), or
+    None when this is not a liveness question at all.
+
+    Every one of these used to be delegated. An agent cannot see its peers and
+    cannot meaningfully report on itself, so the job either returned nothing or
+    hung until its inactivity timeout -- the largest single group of failed jobs
+    in this project's history. RAP can answer it directly, so it does.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    # Spoken aliases are written as words ("code puppy") but the same name is
+    # typed as the backend id ("code-puppy"); match either.
+    lowered = re.sub(r"[-_]+", " ", lowered)
+    if not lowered:
+        return None
+    if _AGENT_NOUNS.search(lowered) and _ROLLCALL_SCOPE.search(lowered):
+        if _ROLLCALL_VERBS.search(lowered):
+            return (None,)
+        return None
+    for alias in sorted(aliases, key=len, reverse=True):
+        name = re.escape(alias)
+        patterns = (
+            # A trailing "and confirm response" is still just the ping asked
+            # politely; anything else after the name is real work for it.
+            rf"^(?:ping|check(?: on| in with)?|test|poll|reach|contact)\s+(?:the\s+)?{name}"
+            rf"(?:'s)?(?:\s+{_LIVENESS_NOUNS})*"
+            rf"(?:\s+and\s+(?:confirm|report|tell me|let me know|see)\b.*)?$",
+            rf"^(?:is|are)\s+(?:the\s+)?{name}\s+(?:still\s+)?{_LIVENESS_STATES}$",
+            rf"^{name}(?:'s)?\s+{_LIVENESS_NOUNS}$",
+            rf"^check\s+(?:the\s+)?{_LIVENESS_NOUNS}(?:\s+{_LIVENESS_NOUNS})*\s+(?:of|for|on)\s+"
+            rf"(?:the\s+)?{name}$",
+        )
+        if any(re.fullmatch(pattern, lowered) for pattern in patterns):
+            return (aliases[alias],)
+    return None
 
 
 _STATUS_PHRASES = re.compile(

@@ -11,6 +11,16 @@ from remote_agent_protocol import config as cfg
 from remote_agent_protocol import voice_stack
 
 
+@pytest.fixture(autouse=True)
+def _no_running_instance(monkeypatch):
+    """Answer the launcher's single-instance guard for every test in this file.
+
+    Whether this machine happens to be running the app is never what these
+    tests are about, but it would otherwise decide their outcome.
+    """
+    monkeypatch.setattr(voice_stack.process_guard, "instance_is_running", lambda: False)
+
+
 def test_frontend_is_found_next_to_this_repo(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "S2S_HOME", "")
     monkeypatch.setattr(voice_stack, "REPO_ROOT", tmp_path / "remote-agent-protocol")
@@ -743,15 +753,11 @@ def test_a_free_machine_reports_no_occupied_ports(monkeypatch):
 
 
 def test_a_second_launch_refuses_instead_of_duplicating(monkeypatch, tmp_path):
-    # A stale server satisfies the readiness probe, so without this guard the
-    # launch "succeeds" while its own server dies on bind.
+    # Each launch picks ephemeral ports, so a port probe can only ever report
+    # "free"; the app's own single-instance lock is what knows it is up.
     home = _kokoro_frontend(tmp_path, launcher_text="--tts pocket")
     monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: home)
-    monkeypatch.setattr(
-        voice_stack,
-        "occupied_ports",
-        lambda *_args: [("speech-to-speech server", 8767)],
-    )
+    monkeypatch.setattr(voice_stack.process_guard, "instance_is_running", lambda: True)
     spawned = []
     monkeypatch.setattr(voice_stack, "_spawn", lambda *a: spawned.append(a))
 
@@ -759,10 +765,9 @@ def test_a_second_launch_refuses_instead_of_duplicating(monkeypatch, tmp_path):
     assert spawned == []
 
 
-def test_a_clear_machine_proceeds_past_the_port_guard(monkeypatch, tmp_path):
+def test_a_clear_machine_proceeds_past_the_instance_guard(monkeypatch, tmp_path):
     home = _kokoro_frontend(tmp_path, launcher_text="--tts pocket")
     monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: home)
-    monkeypatch.setattr(voice_stack, "occupied_ports", lambda *_args: [])
     monkeypatch.setattr(voice_stack, "ensure_llm_backend", lambda: None)
     spawned = []
 

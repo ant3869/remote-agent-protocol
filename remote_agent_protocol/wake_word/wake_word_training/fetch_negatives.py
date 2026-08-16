@@ -16,8 +16,8 @@ import soundfile as sf
 from tqdm import tqdm
 
 try:
-    from datasets import load_dataset
     import librosa
+    from datasets import load_dataset
 except ImportError:
     print("[!] datasets/librosa missing — run: pip install -r requirements.txt")
     raise
@@ -28,6 +28,7 @@ OUT_DIR = Path(__file__).parent / "data" / "negative"
 
 
 def main():
+    """Download and resample the negative-clip corpus."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--phrase", default="hey nexus",
                     help="Phrase to *exclude* from negatives (so we don't accidentally train against ourselves)")

@@ -10,6 +10,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
+from remote_agent_protocol import brain as brain_module
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import web_gui
 from remote_agent_protocol.avatar_audio import AvatarAudioEnvelopeHub
@@ -177,6 +178,8 @@ async def test_brain_adapter_announces_ready_only_after_start_completes(monkeypa
     events = []
     brain_started = asyncio.Event()
     monkeypatch.setattr(cfg, "S2S_VOICE_FILE", str(tmp_path / "voice.txt"))
+    # run() sweeps the announcement queue; keep that off the developer's own.
+    monkeypatch.setattr(cfg, "S2S_ANNOUNCE_FILE", str(tmp_path / "announce.json"))
     adapter = BrainSessionAdapter(PERSONAS[0], on_event=events.append)
 
     async def start():
@@ -580,6 +583,61 @@ def test_brain_failure_answers_with_an_error_instead_of_hanging(envelope_server,
     assert "11434" in body["error"]["message"]
 
 
+class _OfflineModelSession:
+    """Stands in for a brain whose Ollama host is not accepting connections."""
+
+    def complete_text(self, text, timeout=180.0):
+        raise brain_module.LLMUnavailable("http://localhost:11434/v1 is not reachable")
+
+    def stream_text(self, text, timeout=180.0):
+        raise brain_module.LLMUnavailable("http://localhost:11434/v1 is not reachable")
+        yield ""  # pragma: no cover - generator marker
+
+
+def test_offline_model_answers_with_a_speakable_reason(envelope_server, monkeypatch):
+    # A 500 is silence in a voice frontend. The user should hear what to fix.
+    app, port = envelope_server
+    monkeypatch.setattr(app, "_session", _OfflineModelSession())
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer test-secret"},
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = json.loads(response.read())
+
+    assert response.status == 200
+    assert "Ollama" in body["choices"][0]["message"]["content"]
+
+
+def test_offline_model_closes_a_started_stream_with_the_same_reason(
+    envelope_server, monkeypatch
+):
+    # Headers are already out by then, so the reason has to arrive as content
+    # and the stream still has to terminate, or the frontend waits forever.
+    app, port = envelope_server
+    monkeypatch.setattr(cfg, "S2S_BRIDGE_STREAMING", True)
+    monkeypatch.setattr(app, "_session", _OfflineModelSession())
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        data=json.dumps(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True}
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer test-secret"},
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = response.read().decode("utf-8")
+
+    assert "Ollama" in body
+    assert body.rstrip().endswith("data: [DONE]")
+
+
 def test_malformed_envelope_body_does_not_kill_the_connection(envelope_server):
     _, port = envelope_server
 
@@ -648,3 +706,32 @@ def test_empty_bundle_sends_nothing(monkeypatch, tmp_path):
     adapter.send_multimodal_prompt(MultimodalPromptBundle(user_id="u"))
 
     assert submitted == []
+
+
+def test_announcements_from_a_previous_run_are_not_spoken_at_startup(monkeypatch, tmp_path):
+    # The frontend deletes each entry as it speaks it, so anything still queued
+    # belongs to a session that ended -- narrating it now reports finished work
+    # as if it had just landed.
+    announce = tmp_path / "announce.json"
+    queue_dir = announce.with_suffix(f"{announce.suffix}.queue")
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "1-job-9_done.json").write_text(
+        json.dumps({"id": "job-9:done", "text": "stale"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(cfg, "S2S_ANNOUNCE_FILE", str(announce))
+    adapter = BrainSessionAdapter(PERSONAS[0])
+
+    adapter._discard_stale_announcements()
+
+    assert list(queue_dir.glob("*.json")) == []
+
+
+def test_announcements_published_by_this_run_survive(monkeypatch, tmp_path):
+    announce = tmp_path / "announce.json"
+    monkeypatch.setattr(cfg, "S2S_ANNOUNCE_FILE", str(announce))
+    adapter = BrainSessionAdapter(PERSONAS[0])
+    adapter._discard_stale_announcements()
+
+    adapter._publish_announcement({"job_id": "job-1", "status": "done", "result": "all set"})
+
+    assert len(_queued_announcements(announce)) == 1

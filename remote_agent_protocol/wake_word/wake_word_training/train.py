@@ -21,10 +21,12 @@ OUT_DIR = ROOT / "models"
 
 
 def slugify(s: str) -> str:
+    """Turn a wake phrase into a filesystem-safe model name."""
     return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
 
 
 def main():
+    """Train an openwakeword model from the generated sample sets."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--phrase", required=True)
     ap.add_argument("--epochs", type=int, default=50)

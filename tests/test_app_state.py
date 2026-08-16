@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -48,6 +49,29 @@ class AppStateFileTests(unittest.TestCase):
     def test_save_leaves_no_temp_file(self):
         app_state.save_state(self.path, app_state.AppState(persona="Jess"))
 
+        self.assertEqual(list(self.path.parent.glob("*.tmp")), [])
+
+    def test_concurrent_saves_all_land_and_leave_a_readable_file(self):
+        # Each browser action is answered on its own thread, so several saves
+        # can overlap. Sharing one staging file made Windows fail a save
+        # outright, losing whichever setting lost the race.
+        personas = [f"persona-{index}" for index in range(24)]
+        errors: list[Exception] = []
+
+        def save(persona: str) -> None:
+            try:
+                app_state.save_state(self.path, app_state.AppState(persona=persona))
+            except Exception as exc:  # pragma: no cover - the bug being guarded
+                errors.append(exc)
+
+        threads = [threading.Thread(target=save, args=(name,)) for name in personas]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertIn(app_state.load_state(self.path).persona, personas)
         self.assertEqual(list(self.path.parent.glob("*.tmp")), [])
 
     def test_missing_file_gives_defaults(self):

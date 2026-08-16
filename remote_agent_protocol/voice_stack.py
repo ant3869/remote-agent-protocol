@@ -33,6 +33,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as websocket_connect
 
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol import process_guard
 from remote_agent_protocol.doctor import model_registered, ollama_tags
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -192,10 +193,11 @@ def occupied_ports(
 ) -> list[tuple[str, int]]:
     """Return selected stack ports that something is already listening on.
 
-    Readiness is probed by connecting, which any process holding the port
-    satisfies -- including a leftover one. Without this check a second launch
-    looks healthy while its own server spends a minute loading models and then
-    dies on bind, and the client quietly attaches to the stale server instead.
+    Called with no arguments this reports the *configured* ports, which is what
+    the doctor wants to know: something already answering on `S2S_BRIDGE_PORT`
+    is a standalone brain bridge, and it will collide with the GUI's own
+    endpoint. The launcher itself no longer asks -- it picks ephemeral ports, so
+    a port check there can only ever say "free".
     """
     wanted = (
         ("RAP brain/GUI", cfg.S2S_BRIDGE_PORT if bridge_port is None else bridge_port),
@@ -709,17 +711,20 @@ def run_stack() -> int:
         logger.error(backend_problem)
         return 2
 
-    bridge_port, ws_port = select_stack_ports()
-    logger.info(f"Selected dynamic ports: brain/GUI {bridge_port}, Realtime {ws_port}")
-    if busy := occupied_ports(bridge_port, ws_port):
-        listed = ", ".join(f"{name} (port {port})" for name, port in busy)
+    # Ports cannot answer "is it already running?" now that each launch picks
+    # ephemeral ones -- a fresh port is free by construction. The app's own
+    # single-instance lock can, and it also catches a GUI started on its own.
+    if process_guard.instance_is_running():
         logger.error(
-            f"Already listening: {listed}.\n"
-            "The voice stack looks like it is already up -- close those windows and try again.\n"
-            "Starting a second copy would load models for a minute, fail to bind, and leave the\n"
-            "client talking to the old server."
+            "Remote Agent Protocol is already running.\n"
+            "Close its windows and try again. Starting a second copy would spend a minute "
+            "loading models before the app refused the duplicate, leaving the audio client "
+            "talking to the first one."
         )
         return 2
+
+    bridge_port, ws_port = select_stack_ports()
+    logger.info(f"Selected dynamic ports: brain/GUI {bridge_port}, Realtime {ws_port}")
 
     input_device, output_device = select_audio_devices(s2s_home)
     bridge_api_key = secrets.token_urlsafe(32)

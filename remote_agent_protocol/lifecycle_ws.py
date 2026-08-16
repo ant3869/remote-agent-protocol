@@ -98,6 +98,7 @@ class LifecycleEventServer:
         self._server = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._clients: dict[ServerConnection, asyncio.Queue[str]] = {}
+        self._closing: set[asyncio.Task] = set()
         self._sequence = 0
 
     async def start(self) -> bool:
@@ -139,7 +140,13 @@ class LifecycleEventServer:
         for connection, queue in list(self._clients.items()):
             if queue.full():
                 self._clients.pop(connection, None)
-                asyncio.create_task(connection.close(code=1013, reason="lifecycle client too slow"))
+                # Held: a bare task can be collected before the close is
+                # sent, leaving the slow client connected after all.
+                closing = asyncio.create_task(
+                    connection.close(code=1013, reason="lifecycle client too slow")
+                )
+                self._closing.add(closing)
+                closing.add_done_callback(self._closing.discard)
             else:
                 queue.put_nowait(message)
 

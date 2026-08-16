@@ -241,7 +241,7 @@ class CheckAgentBackendsTests(unittest.TestCase):
     def test_missing_executable_on_path_fails(self):
         with (
             mock.patch.object(cfg, "AGENT_BACKENDS", {"hermes": ["hermes", "chat", "{task}"]}),
-            mock.patch("remote_agent_protocol.doctor.shutil.which", return_value=None),
+            mock.patch("remote_agent_protocol.agent_bridge.shutil.which", return_value=None),
         ):
             results = doctor.check_agent_backends()
         self.assertEqual(results[0].status, "fail")
@@ -250,7 +250,7 @@ class CheckAgentBackendsTests(unittest.TestCase):
         with (
             mock.patch.object(cfg, "AGENT_BACKENDS", {"hermes": ["hermes", "chat", "{task}"]}),
             mock.patch(
-                "remote_agent_protocol.doctor.shutil.which", return_value=r"C:\tools\hermes.exe"
+                "remote_agent_protocol.agent_bridge.shutil.which", return_value=r"C:\tools\hermes.exe"
             ),
         ):
             results = doctor.check_agent_backends()
@@ -260,7 +260,7 @@ class CheckAgentBackendsTests(unittest.TestCase):
         with (
             mock.patch.object(cfg, "AGENT_BACKENDS", {"hermes": ["hermes", "chat", "{task}"]}),
             mock.patch(
-                "remote_agent_protocol.doctor.shutil.which", return_value=r"C:\tools\hermes.exe"
+                "remote_agent_protocol.agent_bridge.shutil.which", return_value=r"C:\tools\hermes.exe"
             ),
             mock.patch("subprocess.run") as run,
             mock.patch("subprocess.Popen") as popen,

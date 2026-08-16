@@ -22,7 +22,6 @@ import importlib.util
 import json
 import os
 import platform
-import shutil
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -244,19 +243,10 @@ def check_audio_devices() -> list[CheckResult]:
 
 
 def _agent_executable_status(cmd: list[str]) -> tuple[str, str]:
-    if not cmd:
-        return "fail", "empty command"
-    token = cmd[0]
-    if token == "{python}":
-        return "ok", "uses the current Python interpreter"
-    if os.path.isabs(token):
-        if os.path.exists(token):
-            return "ok", f"found at {token}"
-        return "fail", f"not found: {token}"
-    found = shutil.which(token)
-    if found:
-        return "ok", f"found at {found}"
-    return "fail", f"'{token}' not found on PATH"
+    """Whether a backend command is launchable (shared with the agent bridge)."""
+    from remote_agent_protocol.agent_bridge import executable_status
+
+    return executable_status(cmd)
 
 
 def check_agent_backends() -> list[CheckResult]:
@@ -265,6 +255,66 @@ def check_agent_backends() -> list[CheckResult]:
     for name, cmd in cfg.AGENT_BACKENDS.items():
         status, message = _agent_executable_status(cmd)
         results.append(CheckResult(f"agent-backend:{name}", status, message))
+    return results
+
+
+def check_intent_router() -> CheckResult:
+    """Whether the semantic router is on, since off changes what gets delegated.
+
+    With it off, only explicit commands and requests that name an agent reach
+    one; everything else depends on the assistant model volunteering a
+    delegation marker, which it does inconsistently. That looks like the app
+    ignoring requests at random, so it is worth stating plainly.
+    """
+    if cfg.INTENT_ROUTER_ENABLED:
+        return CheckResult("intent-router", "ok", f"enabled with '{cfg.INTENT_MODEL}'")
+    return CheckResult(
+        "intent-router",
+        "warn",
+        "INTENT_ROUTER_ENABLED=false: only explicit or agent-named requests are delegated",
+    )
+
+
+def check_remote_agent_hosts() -> list[CheckResult]:
+    """Each configured remote host answers discovery with a compatible protocol.
+
+    Reaching out is the whole point of the check: a host that is configured but
+    unreachable is exactly the failure an operator wants named here rather than
+    discovered when a delegated job has nowhere to go.
+    """
+    if not cfg.AGENT_REMOTE_HOSTS:
+        return []
+    if not cfg.AGENT_REMOTE_TOKEN and not all(
+        entry.get("token") for entry in cfg.AGENT_REMOTE_HOSTS.values()
+    ):
+        return [
+            CheckResult(
+                "remote-agents",
+                "fail",
+                "AGENT_REMOTE_HOSTS_JSON is set but no token is: hosts refuse unauthenticated peers",
+            )
+        ]
+    import asyncio
+
+    from remote_agent_protocol.remote_client import RemoteRegistry
+
+    registry = RemoteRegistry()
+    asyncio.run(registry.discover())
+    results = []
+    for state in registry.states():
+        if state.online:
+            offered = ", ".join(state.agents) or "no agents"
+            results.append(
+                CheckResult(f"remote-host:{state.name}", "ok", f"{state.machine} offers {offered}")
+            )
+        else:
+            results.append(
+                CheckResult(
+                    f"remote-host:{state.name}",
+                    "warn",
+                    f"{state.url} is not answering ({state.error or 'unreachable'})",
+                )
+            )
     return results
 
 
@@ -329,6 +379,8 @@ _CHECKS = (
     check_wake_word_module,
     check_audio_devices,
     check_agent_backends,
+    check_intent_router,
+    check_remote_agent_hosts,
     check_brain_mode,
 )
 

@@ -46,6 +46,9 @@ _IDENTITY_MARKER = "remote_agent_protocol"
 # Machine-wide (not per-session) so two logins can't both run the app either.
 _MUTEX_NAME = "Global\\RemoteAgentProtocolSingleInstance"
 _ERROR_ALREADY_EXISTS = 183
+# Least privilege that still opens an existing mutex, for probing without
+# claiming it (winnt.h SYNCHRONIZE).
+_SYNCHRONIZE = 0x00100000
 # The mutex handle must outlive this function or Windows releases it
 # immediately; kept here so exactly one module-global owns it per process.
 _mutex_handle: int | None = None
@@ -74,6 +77,28 @@ def acquire_single_instance_lock(name: str = _MUTEX_NAME) -> bool:
     return True
 
 
+def instance_is_running(name: str = _MUTEX_NAME) -> bool:
+    """Whether some other process already holds this machine's app slot.
+
+    Asks the OS without claiming the slot, which is what a launcher needs: it
+    has to answer "is the app already up?" *before* starting the child that
+    will claim it. Ports cannot answer that question -- the stack binds
+    ephemeral ones -- and a PID file only knows about launches that got far
+    enough to write it. Always False off Windows, matching the lock itself.
+
+    A running instance under a *different* Windows account reads as False here,
+    since its mutex is not ours to open; the app's own lock still refuses that
+    duplicate at startup, one step later.
+    """
+    if sys.platform != "win32":
+        return False
+    handle = ctypes.windll.kernel32.OpenMutexW(_SYNCHRONIZE, False, name)
+    if not handle:
+        return False
+    ctypes.windll.kernel32.CloseHandle(handle)
+    return True
+
+
 # Console control events (wincon.h). CTRL_C_EVENT/CTRL_BREAK_EVENT are
 # already delivered to Python as KeyboardInterrupt by CPython's own handler
 # (registered ahead of ours), so this app's normal Ctrl+C path is untouched;
@@ -91,7 +116,7 @@ _console_handler_ref = None
 def install_close_handler(on_close: Callable[[], None]) -> None:
     """Run ``on_close`` on window close, logoff, or shutdown -- not just Ctrl+C.
 
-    Why this exists: scripts\start_gui.bat's own instructions say "Close the window
+    Why this exists: ``scripts/start_gui.bat``'s own instructions say "Close the window
     to quit", but clicking that X sends CTRL_CLOSE_EVENT, which CPython does
     not turn into KeyboardInterrupt the way it does Ctrl+C. Left unhandled,
     Windows gives the process a few seconds and then force-terminates it --

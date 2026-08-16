@@ -143,7 +143,7 @@ server, and frontend client as hidden logged subprocesses. It advances only
 after the brain initializes, a temporary Realtime WebSocket handshake completes
 and releases its pool slot, and the audio client opens its streams and receives
 its own `session.created` event. Output is written to `logs/` for diagnosis.
-It refuses to start when a stale process still holds a selected port. The
+It refuses to start while Remote Agent Protocol is already running. The
 frontend checkout is found beside this repo automatically; set `S2S_HOME` if it
 lives elsewhere.
 
@@ -156,7 +156,7 @@ control plane instead of lying about controls it cannot reach:
 
 | Capability | Cross-process contract |
 | --- | --- |
-| Mute | RAP writes `S2S_MIC_MUTE_FILE`; configured read failures fail closed. |
+| Mute | RAP writes a generation-tagged command to `S2S_MIC_MUTE_FILE`; the client echoes it in `S2S_MIC_MUTE_STATUS_FILE` within `S2S_MIC_MUTE_ACK_TIMEOUT` or the control reports unconfirmed. |
 | Output voice | RAP writes `S2S_VOICE_FILE`; the client sends a voice-only `session.update`. |
 | Free Talk / Wake Word | Generation-tagged requests and acknowledgements use `S2S_VOICE_MODE_FILE` and `S2S_VOICE_MODE_STATUS_FILE`; failures roll back visibly. |
 | Push To Talk | Reported unavailable because the external client owns microphone capture. |
@@ -169,6 +169,38 @@ the Remember control reports that boundary. See the
 [integration guide](docs/notes/speech-to-speech-integration.md) and `env.example`
 for the full contract and every knob.
 
+## Agents on another machine
+
+Agent backends are normally commands on this PC. A second machine can offer its
+own instead: run the host there, and its agents show up here as
+`<host>:<agent>`.
+
+On the machine with the agents (the laptop):
+
+```bat
+set AGENT_REMOTE_TOKEN=<shared secret>
+python -m remote_agent_protocol.remote_host --host 0.0.0.0 --port 8790
+```
+
+On this machine, in `.env`:
+
+```ini
+AGENT_REMOTE_TOKEN=<the same secret>
+AGENT_REMOTE_HOSTS_JSON={"laptop":{"url":"http://192.168.1.50:8790"}}
+```
+
+RAP then discovers what that machine offers, re-checks it every
+`AGENT_REMOTE_HEARTBEAT_SECS`, and lets you delegate to `laptop:hermes` exactly
+as you would to a local `hermes` -- same status protocol, same progress
+heartbeats, same cancellation, with the Agents panel showing which machine ran
+the job. A host that stops answering drops out of delegation until it is back,
+and `python -m remote_agent_protocol.doctor` reports every configured host.
+
+Three deliberate limits: every request carries the shared bearer token and a
+host without one refuses to start; the host offers only the agent *names* it is
+already configured with, never an arbitrary command; and it binds loopback
+unless launched with an explicit `--host`.
+
 ## Repository layout
 
 | Path | Purpose |
@@ -179,7 +211,7 @@ for the full contract and every knob.
 | `remote_agent_protocol/config_examples/` | `persona_overrides.example.json` -- template for `data/persona_overrides.json` |
 | `src/pipecat/` | Vendored Pipecat framework (merge from the `upstream` remote; do not mix app code in) |
 | `tests/test_*.py` | App unit tests live alongside the framework's tests |
-| `tests/js/` | Avatar and web-UI tests, run with `node --test` (no npm dependencies) |
+| `tests/js/` | Avatar and web-UI tests, run with `node --test "tests\js\*.test.mjs"` (no npm dependencies; a bare directory argument makes Node try to *import* the folder) |
 | `scripts/` | `start_gui.bat`, `start_terminal.bat`, `start_voice.bat`, `start_brain_bridge.bat`, `mock_agent.py`, `smoke_agent_bridge.py`, `list_audio_devices.py`, plus upstream tooling |
 | `voice_probe/` | Text-driven harness for exercising the routing/delegation/confirmation mediator |
 | `data/` | Runtime state (conversation memory, vector store, job history, frontend control files) -- gitignored |

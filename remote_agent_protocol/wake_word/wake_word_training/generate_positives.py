@@ -18,9 +18,7 @@ import soundfile as sf
 from tqdm import tqdm
 
 try:
-    from audiomentations import (
-        Compose, PitchShift, TimeStretch, AddGaussianSNR, RoomSimulator
-    )
+    from audiomentations import AddGaussianSNR, Compose, PitchShift, RoomSimulator, TimeStretch
 except ImportError:
     print("[!] audiomentations missing — run: pip install -r requirements.txt")
     sys.exit(1)
@@ -61,6 +59,7 @@ def list_voices():
 
 
 def build_augmenter():
+    """Build the pitch/tempo/noise/room chain applied to each clip."""
     return Compose([
         PitchShift(min_semitones=-2, max_semitones=2, p=0.7),
         TimeStretch(min_rate=0.9, max_rate=1.1, p=0.5),
@@ -83,6 +82,7 @@ def synthesize_one(voice_id: str, phrase: str) -> np.ndarray:
 
 
 def main():
+    """Synthesize and augment positive samples for one wake phrase."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--phrase", required=True, help="Wake phrase to synthesize")
     ap.add_argument("--count", type=int, default=2000,

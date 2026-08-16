@@ -287,8 +287,12 @@ def start_ollama_app() -> None:
     subprocess.Popen([app], close_fds=True)
 
 
-def stop_loaded_models(host: str, timeout: float = 1.0) -> int:
+def stop_loaded_models(host: str, timeout: float = 5.0) -> int:
     """Unload every currently loaded Ollama model. Returns count requested.
+
+    The timeout is generous because this is asked at shutdown or when freeing
+    VRAM: a busy Ollama answers ``/api/ps`` late, and giving up early leaves the
+    models resident -- exactly the state the caller wanted cleared.
 
     Raises:
         RuntimeError: If the ollama CLI can't be located.

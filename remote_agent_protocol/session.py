@@ -42,6 +42,7 @@ from remote_agent_protocol import (
     memory,
     memory_manager,
     multimodal_prompt,
+    remote_client,
     stt_factory,
     tts_factory,
     voice_commands,
@@ -94,6 +95,9 @@ class VoiceSession:
         self._mem0_service = None
         self._worker: PipelineWorker | None = None
         self._runner: WorkerRunner | None = None
+        # Agents offered by other machines; empty unless AGENT_REMOTE_HOSTS_JSON
+        # names a host. Discovered agents join delegation as "<host>:<agent>".
+        self._remotes = remote_client.RemoteRegistry()
         self._bridge = agent_bridge.AgentBridge(
             cfg.AGENT_BACKENDS,
             self._on_agent_event,
@@ -108,6 +112,7 @@ class VoiceSession:
             workspace_dir=cfg.AGENT_WORKSPACE_DIR,
             scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
             host_repo=cfg.AGENT_HOST_REPO,
+            remotes=self._remotes,
         )
         self._lifecycle_ws = (
             lifecycle_ws.LifecycleEventServer(
@@ -323,6 +328,7 @@ class VoiceSession:
         self._loop = asyncio.get_running_loop()
         if self._lifecycle_ws is not None:
             await self._lifecycle_ws.start()
+        self._remotes.start()
         self._start_voicebox_warmups()
         self._spawn(self._router.warmup(), name="intent-router-warmup")
         if (
@@ -353,6 +359,7 @@ class VoiceSession:
         finally:
             if self._lifecycle_ws is not None:
                 await self._lifecycle_ws.stop()
+            await self._remotes.stop()
             # Reap agent subprocesses while the loop is still open; otherwise
             # their transports die in __del__ after loop close (noisy crash on
             # the Windows proactor loop) and the children leak.
@@ -575,6 +582,10 @@ class VoiceSession:
     def agent_machine(self, backend: str) -> str:
         """Human-readable machine label for an agent backend."""
         return self._bridge.machine_for(backend)
+
+    def remote_hosts(self) -> list[dict]:
+        """Configured remote agent machines and what they currently offer."""
+        return self._bridge.remote_hosts()
 
     def default_agent_backend(self) -> str:
         """Current implicit/force-delegate backend."""

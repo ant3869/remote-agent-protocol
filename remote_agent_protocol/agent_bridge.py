@@ -21,6 +21,7 @@ Event shape (routed through VoiceSession._emit, same bus as transcripts):
 import asyncio
 import itertools
 import json
+import os
 import re
 import shutil
 import sys
@@ -29,8 +30,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loguru import logger
+
+from remote_agent_protocol import remote_protocol
+
+if TYPE_CHECKING:  # imported for typing only; keeps this module injection-only
+    from remote_agent_protocol.remote_client import RemoteRegistry
 
 STATUS_RUNNING = "running"
 STATUS_WAITING = "waiting"
@@ -329,6 +336,28 @@ def resolve_cwd(cwd: str | None, workspace_dir: str | None) -> str | None:
         return None
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     return workspace_dir
+
+
+def executable_status(command: list[str]) -> tuple[str, str]:
+    """Whether a backend's command can be launched, without launching it.
+
+    Returns ``("ok"|"fail", explanation)``. This is as much as can be known
+    without spending a real turn on the agent, and it is what separates "not
+    installed on this machine" from "installed but slow to answer".
+    """
+    if not command:
+        return "fail", "empty command"
+    token = command[0]
+    if token == "{python}":
+        return "ok", "uses the current Python interpreter"
+    if os.path.isabs(token):
+        if os.path.exists(token):
+            return "ok", f"found at {token}"
+        return "fail", f"not found: {token}"
+    found = shutil.which(token)
+    if found:
+        return "ok", f"found at {found}"
+    return "fail", f"'{token}' not found on PATH"
 
 
 def parse_status_line(line: str) -> dict | None:
@@ -686,6 +715,7 @@ class AgentBridge:
         workspace_dir: str | None = None,
         scope_preamble: str = "",
         host_repo: str | None = None,
+        remotes: "RemoteRegistry | None" = None,
     ):
         """Initialize the bridge.
 
@@ -706,12 +736,15 @@ class AgentBridge:
                 empty disables it.
             host_repo: Git repository checked for modification by each job;
                 None or empty disables the check.
+            remotes: Optional registry of authenticated remote hosts, whose
+                discovered agents join ``backend_names()`` as "<host>:<agent>".
         """
         self._backends = backends
         self._on_event = on_event
         self._on_finished = on_finished  # async callable, awaited on completion
         self._on_persist = on_persist  # async callable, awaited on completion
         self._machines = machines or {}
+        self._remotes = remotes
         self._timeout_secs = timeout_secs
         self._kill_grace_secs = kill_grace_secs
         self._progress_interval_secs = progress_interval_secs
@@ -739,12 +772,25 @@ class AgentBridge:
     # -- queries ------------------------------------------------------------
 
     def backend_names(self) -> list[str]:
-        """Return configured backend names."""
-        return sorted(self._backends)
+        """Return configured backend names, plus agents offered by online hosts."""
+        remote = self._remotes.backend_names() if self._remotes is not None else []
+        return sorted({*self._backends, *remote})
 
     def machine_for(self, backend: str) -> str:
-        """Return the display machine for a backend."""
+        """Return the display machine for a backend.
+
+        A remote agent is labelled with the machine the host calls itself, so
+        the transcript and the Agents panel say where the work actually ran.
+        """
+        if self._remotes is not None and (machine := self._remotes.machine_for(backend)):
+            return machine
         return self._machines.get(backend, "local")
+
+    def remote_hosts(self) -> list[dict]:
+        """Return the current state of every configured remote host."""
+        if self._remotes is None:
+            return []
+        return [state.to_payload() for state in self._remotes.states()]
 
     def get(self, job_id: str) -> AgentJob | None:
         """Return a known job by id."""
@@ -793,8 +839,13 @@ class AgentBridge:
         self._jobs[job.job_id] = job
         self._idle_notified = False
 
-        if agent not in self._backends:
-            result = await self._fail_fast(job, f"unknown agent backend '{agent}'")
+        if agent not in self._backends and not self._is_remote(agent):
+            # A configured host that is simply asleep deserves to be named as
+            # that, not reported as a backend the operator never set up.
+            reason = (
+                self._remotes.offline_reason(agent) if self._remotes is not None else None
+            ) or f"unknown agent backend '{agent}'"
+            result = await self._fail_fast(job, reason)
             job._launch_done.set()
             return result
 
@@ -835,9 +886,48 @@ class AgentBridge:
         async with lock:
             await self._launch(job, task, cwd)
 
+    def _is_remote(self, agent: str) -> bool:
+        """Whether this backend name belongs to a discovered remote host."""
+        return self._remotes is not None and self._remotes.client_for(agent) is not None
+
+    async def _launch_remote(self, job: AgentJob, task: str, cwd: str | None) -> None:
+        """Run this job on the machine that offers it, streaming its output back.
+
+        The remote host resolves the working directory and applies the scope
+        preamble, because only it knows the real paths on that machine. What
+        comes back is the agent's own stdout, so everything after this point --
+        status markers, progress heartbeats, timeouts, cancellation -- is the
+        same code path a local job takes.
+        """
+        resolved = self._remotes.client_for(job.agent)
+        if resolved is None:  # went offline between dispatch and launch
+            await self._fail_fast(job, f"remote host for '{job.agent}' is offline")
+            job._launch_done.set()
+            return
+        client, agent = resolved
+        job.cwd = cwd or ""
+        job._host_before = await self._host_snapshot()
+        request = remote_protocol.JobRequest(
+            agent=agent,
+            task=task,
+            cwd=cwd or "",
+            extra_args=tuple(self._model_overrides.get(job.agent, ())),
+        )
+        proc = await client.start_job(request)
+        self._procs[job.job_id] = proc
+        job.status = STATUS_RUNNING
+        job.state = STATE_STARTED
+        job._launch_done.set()
+        self._emit_job(job, "started")
+        logger.info(f"Agent job {job.job_id} [{job.agent}] started on {job.machine}: {job.task}")
+        await self._stream(job, proc)
+
     async def _launch(self, job: AgentJob, task: str, cwd: str | None) -> None:
         """Resolve cwd, build the command, spawn the subprocess, and stream it to completion."""
         agent = job.agent
+        if self._is_remote(agent):
+            await self._launch_remote(job, task, cwd)
+            return
         cwd = resolve_cwd(cwd, self._workspace_dir)
         job.cwd = cwd
         job._host_before = await self._host_snapshot()

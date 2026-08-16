@@ -478,6 +478,41 @@ def _clean_task(task: str, utterance: str) -> str:
     return task
 
 
+# The agent as the *subject of the fault* -- "fix code puppy", "why isn't code
+# puppy responding". Deliberately not "maybe code puppy can fix the tests",
+# where the same words appear but the agent is the proposed fixer.
+_BROKEN_STATE = r"(?:working|responding|answering|running|failing|crashing|hanging|broken|up|alive)"
+_REPAIR_VERB = r"(?:fix|repair|debug|troubleshoot|diagnose|restart|reset|look into|check on)"
+
+
+def _is_about_repairing(text: str, agent: str, aliases: dict[str, str] | None = None) -> bool:
+    """Whether ``text`` asks for ``agent`` itself to be diagnosed or repaired."""
+    if agent not in cfg.AGENT_BACKENDS:
+        return False
+    aliases = cfg.AGENT_SPOKEN_ALIASES if aliases is None else aliases
+    lowered = re.sub(r"[-_]+", " ", text.lower())
+    spoken = [alias for alias, backend in aliases.items() if backend == agent]
+    spoken.append(re.sub(r"[-_]+", " ", agent))
+    for alias in spoken:
+        name = re.escape(alias)
+        patterns = (
+            rf"\b{_REPAIR_VERB}\s+(?:the\s+)?{name}\b(?!\s+(?:can|could|should|will|to)\b)",
+            rf"\bwhy\b[^.]{{0,40}}\b{name}\b[^.]{{0,40}}\b(?:not|isn't|is not|won't|{_BROKEN_STATE})\b",
+            rf"\b{name}\s+(?:is|isn't|is not|keeps|kept|won't)\s+(?:not\s+)?{_BROKEN_STATE}\b",
+            rf"\bfind out why\b[^.]{{0,40}}\b{name}\b",
+        )
+        if any(re.search(pattern, lowered) for pattern in patterns):
+            return True
+    return False
+
+
+def _healthy_alternative(exclude: str, default_backend: str) -> str | None:
+    """Pick another configured backend to investigate ``exclude``."""
+    if default_backend and default_backend != exclude and default_backend in cfg.AGENT_BACKENDS:
+        return default_backend
+    return next((name for name in cfg.AGENT_BACKENDS if name != exclude), None)
+
+
 def _select_backend(task: str, default_backend: str, category: str) -> str:
     """Prefer the configured coding agent for concrete codebase work."""
     if category in READ_ONLY_CATEGORIES and default_backend == "code-puppy":
@@ -574,7 +609,18 @@ class IntentRouter:
         # ("maybe code puppy could fix it") that reach the keyword or classifier
         # tiers, which otherwise dispatch to whatever the default happens to be.
         named = voice_commands.named_backend(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)
-        if named and decision.action != ACTION_NONE and decision.agent != named:
+        if named and decision.source != "explicit" and _is_about_repairing(text, named):
+            # The agent is the patient here, not the doctor. A backend that is
+            # not answering cannot investigate why it is not answering: asked
+            # to four times running, code-puppy returned nothing every time
+            # (jess_agent_history 2026-08-12 01:47-01:56). Send it elsewhere.
+            # An explicitly commanded "have X fix itself" never reaches this
+            # tier -- parse_delegation already dispatched it.
+            substitute = _healthy_alternative(named, default_backend)
+            if substitute and decision.action != ACTION_NONE:
+                decision.agent = substitute
+                decision.reason += f" -- {named} is the subject, so {substitute} investigates"
+        elif named and decision.action != ACTION_NONE and decision.agent != named:
             decision.agent = named
             decision.reason += " -- routed to the agent named in the request"
         decision.elapsed_ms = int((time.perf_counter() - t0) * 1000)
@@ -817,7 +863,15 @@ class IntentRouter:
             confidence = verdict["confidence"]
             source = "classifier"
         else:
-            reason = "no routing tier matched"
+            # Say *why* there was no verdict. "No tier matched" reads the same
+            # whether the classifier judged this to be chat, timed out, or was
+            # never switched on -- and only the last of those explains why a
+            # whole session's requests never reach an agent.
+            reason = (
+                f"no routing tier matched (classifier {fallback})"
+                if fallback
+                else "no routing tier matched"
+            )
             confidence = 0.0
             source = "none"
         return RoutingDecision(

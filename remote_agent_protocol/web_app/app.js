@@ -15,6 +15,7 @@ const state = {
   agentHistory: [],
   agentPrompts: null,
   confirmHistory: [],
+  remoteHosts: [],
   selectedAgentJobId: null,
   selectedMemory: null,
   sending: false,
@@ -797,6 +798,7 @@ async function loadAgentsPage() {
   state.agentHistory = data.history || [];
   state.agentPrompts = data.prompts || state.agentPrompts;
   state.confirmHistory = data.confirmHistory || [];
+  state.remoteHosts = data.remoteHosts || [];
   (data.jobs || []).forEach((job) => {
     if (!job.job_id) return;
     const old = state.agentJobs[job.job_id] || {};
@@ -829,6 +831,7 @@ function allAgentJobs() {
 function renderAgentsPage(options = {}) {
   if (!$("agentsView")) return;
   renderAgentRoster();
+  renderAgentMachines();
   renderAgentJobList();
   renderAgentDetail();
   renderAgentPrompts(Boolean(options.forcePrompts));
@@ -868,6 +871,24 @@ function renderAgentRoster() {
   if (!state.status.agentBackends.length) {
     roster.innerHTML = '<div class="empty-state"><strong>No agent backends.</strong><span>Configure an agent backend to delegate work.</span></div>';
   }
+}
+
+// Remote hosts are only interesting when there are any: an operator with
+// no second machine should not be shown an empty section about them.
+function renderAgentMachines() {
+  const panel = $("agentMachinesPanel");
+  const list = $("agentMachines");
+  if (!panel || !list) return;
+  const hosts = state.remoteHosts || [];
+  panel.hidden = hosts.length === 0;
+  list.innerHTML = hosts.map((host) => {
+    const tone = host.online ? "status-success" : "status-error";
+    const label = host.online ? "online" : "offline";
+    const detail = host.online
+      ? `${host.agents.length} agent${host.agents.length === 1 ? "" : "s"}${host.activeJobs ? ` · ${host.activeJobs} running` : ""}`
+      : (host.error || "not answering");
+    return `<article class="agent-machine-row"><strong>${escapeHtml(host.machine || host.name)}</strong><span>${escapeHtml(detail)}</span><b class="${tone}">${label}</b></article>`;
+  }).join("");
 }
 
 function renderAgentJobList() {
@@ -1520,7 +1541,22 @@ function bind() {
     $(id).addEventListener("change", applyTtsSettings);
   });
   $("settingsCoquiRefreshBtn").addEventListener("click", () => post("tts_refresh"));
-  $("settingsTestVoiceBtn").addEventListener("click", () => post("tts_test"));
+  // Previews carry the picked voice rather than the saved one, so a voice can
+  // be heard before it is committed anywhere.
+  $("settingsTestVoiceBtn").addEventListener("click", () => post("tts_test", ttsSettingsPayload()));
+  $("voiceTestBtn").addEventListener("click", () => post("tts_test", { voice: $("voiceSelect").value }));
+  $("personaTestVoiceBtn").addEventListener("click", async () => {
+    const persona = personaFormPayload();
+    const data = await post("tts_test", {
+      provider: persona.voiceBackend,
+      voice: persona.voice,
+      model: persona.voiceModel,
+      speaker: persona.coquiSpeaker,
+      language: persona.coquiLanguage,
+      device: persona.coquiDevice,
+    });
+    showPersonaNotice(data.message || data.error || "Test voice queued.", data.ok !== false);
+  });
   $("sendBtn").addEventListener("click", sendMessage);
   $("delegateBtn").addEventListener("click", delegateMessage);
   $("messageInput").addEventListener("keydown", (event) => {

@@ -67,6 +67,30 @@ def _parse_string_map(raw: str, name: str) -> dict[str, str]:
     return value
 
 
+def _parse_host_map(raw: str, name: str) -> dict[str, dict[str, str]]:
+    """Parse an optional JSON object of remote-host entries.
+
+    Shape: ``{"laptop": {"url": "http://10.0.0.5:8790", "token": "..."}}``. The
+    token may be omitted to fall back to the shared ``AGENT_REMOTE_TOKEN``.
+    """
+    if not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be valid JSON") from exc
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str)
+        and isinstance(entry, dict)
+        and isinstance(entry.get("url"), str)
+        and entry.get("url", "").strip()
+        and all(isinstance(item, str) for item in entry.values())
+        for key, entry in value.items()
+    ):
+        raise ValueError(f"{name} must be a JSON object of {{'url': ..., 'token': ...}} entries")
+    return value
+
+
 def _parse_command_map(raw: str, name: str) -> dict[str, list[str]]:
     """Parse an optional JSON object of non-empty subprocess argument lists."""
     if not raw.strip():
@@ -422,11 +446,34 @@ AGENT_MODEL_TARGETS = {
     },
 }
 _LOCAL_MACHINE = _env("AGENT_LOCAL_MACHINE", "Main PC")
+AGENT_LOCAL_MACHINE = _LOCAL_MACHINE
 AGENT_MACHINES = {
     **{name: _LOCAL_MACHINE for name in AGENT_BACKENDS},
     **_parse_string_map(_env("AGENT_MACHINES_JSON", ""), "AGENT_MACHINES_JSON"),
 }
 AGENT_ANNOUNCE = True
+
+# ---------------------------------------------------------------------------
+# Remote agent backends. Another machine runs `python -m
+# remote_agent_protocol.remote_host` and offers the agents installed there; this
+# machine discovers them and delegates as if they were local. Discovered agents
+# are named "<host>:<agent>" (e.g. "laptop:hermes") so a remote Hermes can never
+# be confused with the local one.
+#
+# The token is a shared bearer secret, required on both sides -- an agent runs
+# real tools on the machine offering it, so an unauthenticated host is not a
+# supported configuration. Generate one with:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+# ---------------------------------------------------------------------------
+AGENT_REMOTE_TOKEN = _env("AGENT_REMOTE_TOKEN", "")
+AGENT_REMOTE_HOSTS = _parse_host_map(_env("AGENT_REMOTE_HOSTS_JSON", ""), "AGENT_REMOTE_HOSTS_JSON")
+# How often a configured host is re-checked. A sleeping laptop should stop being
+# offered as a target quickly, but each check is a round trip on someone's LAN.
+AGENT_REMOTE_HEARTBEAT_SECS = float(_env("AGENT_REMOTE_HEARTBEAT_SECS", "15"))
+# Where `remote_host` listens when serving THIS machine's agents. Loopback by
+# default: exposing it is an explicit act (--host 0.0.0.0).
+AGENT_REMOTE_BIND_HOST = _env("AGENT_REMOTE_BIND_HOST", "127.0.0.1")
+AGENT_REMOTE_BIND_PORT = int(_env("AGENT_REMOTE_BIND_PORT", "8790"))
 
 # Read-only lifecycle stream for local dashboards. The host is intentionally
 # fixed to loopback; exposing job metadata on the LAN requires an authenticated
@@ -590,6 +637,8 @@ AGENT_SPOKEN_ALIASES = {
     "code puppy": "code-puppy",
     "the code puppy": "code-puppy",
     "puppy": "code-puppy",
+    # "code papi" is how the transcriber hears it in a noisy room.
+    "code papi": "code-puppy",
     "mock": "mock",
     "the mock agent": "mock",
     "codex": "codex",
@@ -600,6 +649,9 @@ AGENT_SPOKEN_ALIASES = {
     "clawed code": "claude-code",
     "cloud code": "claude-code",
     "claud code": "claude-code",
+    # Word order flips in transcription too ("check code claude responsiveness",
+    # jess_agent_history 2026-08-13).
+    "code claude": "claude-code",
 }
 
 # Implicit delegation: no agent named, but the request is clearly a real-world

@@ -60,6 +60,7 @@ class WakeWordSettings:
     model: str = "hey_jarvis"
     threshold: float = 0.5
     active_window_secs: float = 12.0
+    follow_up_window_secs: float = 0.0
     targets: tuple[WakeWordTarget, ...] = ()
     switch_timeout_secs: float = 0.5
 
@@ -67,6 +68,16 @@ class WakeWordSettings:
     def effective_targets(self) -> tuple[WakeWordTarget, ...]:
         """Configured multi-model targets, or the legacy single model."""
         return self.targets or (WakeWordTarget(self.model, "", self.threshold),)
+
+    @property
+    def follow_up_secs(self) -> float:
+        """How long a reply keeps the mic open, falling back to the wake window.
+
+        Answering a question the assistant just asked deserves longer than
+        reaching the mic after a wake phrase, but a 0 here means the operator
+        turned the grace period off, not that the window is zero.
+        """
+        return self.follow_up_window_secs or self.active_window_secs
 
 
 @dataclass(frozen=True)
@@ -170,6 +181,7 @@ def settings_from_config(cfg, *, enabled: bool | None = None) -> WakeWordSetting
         model=cfg.WAKE_WORD_MODEL,
         threshold=cfg.WAKE_WORD_THRESHOLD,
         active_window_secs=cfg.WAKE_WORD_ACTIVE_WINDOW_SECS,
+        follow_up_window_secs=getattr(cfg, "WAKE_WORD_FOLLOW_UP_SECS", 0.0),
         targets=targets,
         switch_timeout_secs=getattr(cfg, "WAKE_WORD_SWITCH_TIMEOUT_SECS", 0.5),
     )
@@ -235,13 +247,14 @@ class WakeWordGate(FrameProcessor):
 
     - ``armed``: audio is dropped and fed to the detector.
     - ``awake``: audio passes through; expires ``active_window_secs`` after the
-      last trigger or bot reply.
+      wake phrase, or ``follow_up_window_secs`` after a reply or finished turn.
     - ``bypass``: the detector could not be built (or audio isn't 16 kHz mono);
       all audio passes through, exactly like wake word off.
 
     A finished bot reply (``BotStoppedSpeakingFrame``) always opens/refreshes
     the window: when Jess just said something -- including a background agent
-    question -- the user must be able to answer without re-waking her.
+    question -- the user must be able to answer without re-waking her, and
+    answering a question deserves longer than reaching the mic on cue.
 
     The window is also VAD-aware: while the user is mid-utterance (between the
     broadcast ``UserStartedSpeakingFrame`` / ``UserStoppedSpeakingFrame``) it
@@ -281,6 +294,9 @@ class WakeWordGate(FrameProcessor):
         self._buffer = bytearray()
         self._warned_format = False
         self._active_target: WakeWordTarget | None = None
+        # Whichever window is currently in effect, so the UI counts down against
+        # the one that was actually granted.
+        self._window_secs = settings.active_window_secs
 
     @property
     def awake(self) -> bool:
@@ -311,7 +327,7 @@ class WakeWordGate(FrameProcessor):
                     "persona": current.persona if current else "",
                     "score": float(score) if score is not None else None,
                     "error": error,
-                    "window_secs": self._settings.active_window_secs,
+                    "window_secs": self._window_secs,
                     "remaining_secs": max(0.0, active_until - time.monotonic()),
                     "detector_loaded": self._detector is not None and not self._bypass,
                     "passive": state in {"armed", "inactive"},
@@ -355,30 +371,32 @@ class WakeWordGate(FrameProcessor):
                 self._open_window()  # each finished turn earns a fresh window
             await self.push_frame(frame, direction)
         elif isinstance(frame, InputAudioRawFrame):
-            if not self.enabled:
-                await self.push_frame(frame, direction)
-                return
-            if self._detector is None and not self._bypass:
-                await self._setup_detector()
-            if self._bypass or not self._gateable(frame):
-                await self.push_frame(frame, direction)
-            elif self._user_speaking:  # never cut off mid-utterance
-                await self.push_frame(frame, direction)
-            else:
-                if self._awake_until:  # window just lapsed -> re-arm once
-                    if not self.awake:
-                        self._awake_until = 0.0
-                        self._rearm()
-                detected = self._listen(frame.audio)
-                if detected is not None:
-                    target, score = detected
-                    if await self._activate(target, score):
-                        logger.info(
-                            f"Wake word '{target.model}' detected -> {target.persona or '-'}"
-                        )
-                elif self.awake:
-                    await self.push_frame(frame, direction)
+            await self._gate_audio(frame, direction)
         else:
+            await self.push_frame(frame, direction)
+
+    async def _gate_audio(self, frame: InputAudioRawFrame, direction: FrameDirection) -> None:
+        """Pass this audio on, or feed it to the detector and drop it."""
+        if not self.enabled:
+            await self.push_frame(frame, direction)
+            return
+        if self._detector is None and not self._bypass:
+            await self._setup_detector()
+        if self._bypass or not self._gateable(frame):
+            await self.push_frame(frame, direction)
+            return
+        if self._user_speaking:  # never cut off mid-utterance
+            await self.push_frame(frame, direction)
+            return
+        if self._awake_until and not self.awake:  # window just lapsed -> re-arm once
+            self._awake_until = 0.0
+            self._rearm()
+        detected = self._listen(frame.audio)
+        if detected is not None:
+            target, score = detected
+            if await self._activate(target, score):
+                logger.info(f"Wake word '{target.model}' detected -> {target.persona or '-'}")
+        elif self.awake:
             await self.push_frame(frame, direction)
 
     def set_enabled(self, enabled: bool) -> None:
@@ -433,7 +451,20 @@ class WakeWordGate(FrameProcessor):
         self, target: WakeWordTarget | None = None, *, score: float | None = None
     ) -> None:
         was_awake = self.awake
-        self._awake_until = time.monotonic() + self._settings.active_window_secs
+        # A wake phrase buys the shorter window: the user is about to speak. A
+        # reply or a finished turn buys the follow-up window, because answering
+        # a question the assistant just asked is a slower, more considered act.
+        granted = (
+            self._settings.active_window_secs
+            if score is not None
+            else self._settings.follow_up_secs
+        )
+        # Never take time away: waking during a longer follow-up window must not
+        # cut it short, so an open window only ever moves later.
+        deadline = time.monotonic() + granted
+        if deadline > self._awake_until:
+            self._awake_until = deadline
+            self._window_secs = granted
         if not was_awake:
             self._emit(
                 "awake",

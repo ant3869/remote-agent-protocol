@@ -635,3 +635,75 @@ class LooksLikeSttNoiseTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentRollCallTests(unittest.TestCase):
+    """Asking whether agents are there is a read, never a delegation.
+
+    Every one of these utterances is taken from jess_agent_history.json, where
+    it had been dispatched to an agent and returned nothing or timed out.
+    """
+
+    ALIASES = cfg.AGENT_SPOKEN_ALIASES
+
+    def test_a_group_ping_covers_every_agent(self):
+        for text in (
+            "Can you ping all of the agents and see which ones respond?",
+            "ping all available agents",
+            "check availability of all linked agents",
+            "which agents are online",
+            "what agents are available",
+            "what is the status of all agents",
+        ):
+            self.assertEqual(voice_commands.parse_agent_rollcall(text, self.ALIASES), (None,), text)
+
+    def test_a_named_agent_liveness_check_names_it(self):
+        cases = {
+            "ping code puppy": "code-puppy",
+            "ping code-puppy": "code-puppy",
+            "check Hermes availability": "hermes",
+            "check the activity status of code-puppy": "code-puppy",
+            "check code claude responsiveness": "claude-code",
+            "is code puppy responding": "code-puppy",
+            "is hermes still up": "hermes",
+            "hermes status": "hermes",
+            "check on claude code": "claude-code",
+        }
+        for text, expected in cases.items():
+            self.assertEqual(
+                voice_commands.parse_agent_rollcall(text, self.ALIASES), (expected,), text
+            )
+
+    def test_real_work_is_never_mistaken_for_a_roll_call(self):
+        for text in (
+            "can you have hermes check the traffic",
+            "have code puppy fix the tests",
+            "ping the server with hermes",
+            "what is the status of the hermes job",
+            "cancel all the agents",
+            "find out why code puppy is not responding and fix it",
+            "can you hear me",
+            "",
+        ):
+            self.assertIsNone(voice_commands.parse_agent_rollcall(text, self.ALIASES), text)
+
+
+class AgentCancelVerbTests(unittest.TestCase):
+    """Operators say "terminate" and "kill" about processes; so does RAP now."""
+
+    def test_process_verbs_cancel_instead_of_delegating(self):
+        cases = {
+            "terminate claude-code process": "claude-code",
+            "kill the hermes job": "hermes",
+            "shut down code puppy": "code-puppy",
+        }
+        for text, expected in cases.items():
+            parsed = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
+            self.assertIsNotNone(parsed, text)
+            self.assertEqual(parsed[0], expected, text)
+
+    def test_terminate_still_needs_an_agent_or_a_work_noun(self):
+        # "kill the lights" is not an agent command.
+        self.assertIsNone(
+            voice_commands.parse_agent_cancel("kill the lights", cfg.AGENT_SPOKEN_ALIASES)
+        )

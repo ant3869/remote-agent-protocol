@@ -26,12 +26,22 @@ from remote_agent_protocol import (
     job_store,
     lifecycle_ws,
     memory,
+    remote_client,
+    remote_protocol,
     voice_commands,
 )
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import personas as persona_catalog
 from remote_agent_protocol.personas import Persona
 from remote_agent_protocol.session_processors import _MARKER_RE, is_placeholder_task
+
+
+class LLMUnavailable(RuntimeError):
+    """The local LLM endpoint refused or dropped the connection for this turn.
+
+    Distinct from a model that answers badly: nothing is wrong with the request,
+    so callers can say so plainly instead of reporting a server fault.
+    """
 
 
 class BrainSession:
@@ -61,6 +71,10 @@ class BrainSession:
         self._default_agent_backend = cfg.AGENT_DEFAULT_BACKEND
         if persona.tool_user in cfg.AGENT_BACKENDS:
             self._default_agent_backend = persona.tool_user
+        # Agents offered by other machines. Empty unless AGENT_REMOTE_HOSTS_JSON
+        # names one; when it does, the registry heartbeats those hosts and the
+        # bridge dispatches their "<host>:<agent>" names to whichever is online.
+        self._remotes = remote_client.RemoteRegistry()
         self._bridge = agent_bridge.AgentBridge(
             cfg.AGENT_BACKENDS,
             self._on_agent_event,
@@ -75,6 +89,7 @@ class BrainSession:
             workspace_dir=cfg.AGENT_WORKSPACE_DIR,
             scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
             host_repo=cfg.AGENT_HOST_REPO,
+            remotes=self._remotes,
         )
         self._lifecycle_ws = (
             lifecycle_ws.LifecycleEventServer(
@@ -89,18 +104,34 @@ class BrainSession:
         )
         self._http: aiohttp.ClientSession | None = None
         self._turn_lock = asyncio.Lock()
+        # Strong references to background work (see _spawn).
+        self._tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         """Start background services that do not allocate audio/STT/TTS models."""
         self._http = aiohttp.ClientSession()
         if self._lifecycle_ws is not None:
             await self._lifecycle_ws.start()
-        asyncio.create_task(self._router.warmup(), name="brain-intent-router-warmup")
+        self._remotes.start()
+        self._spawn(self._router.warmup(), "brain-intent-router-warmup")
+
+    def _spawn(self, coro, name: str) -> None:
+        """Run background work while holding a strong reference to it.
+
+        asyncio keeps only a weak reference to a task, so a bare
+        ``create_task`` can be collected before it runs -- and a collected
+        delegation means the assistant said it dispatched work that never
+        started. The bridge guards its own jobs the same way.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def stop(self) -> None:
         """Stop background services and persist short-term memory."""
         if self._lifecycle_ws is not None:
             await self._lifecycle_ws.stop()
+        await self._remotes.stop()
         await self._bridge.shutdown()
         if self._http is not None:
             await self._http.close()
@@ -220,6 +251,11 @@ class BrainSession:
         cancel_request = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
         if cancel_request is not None:
             return await self._handle_agent_cancel(cancel_request)
+        # Before the per-agent progress question: "is hermes up" asks whether
+        # an agent can take work, not how an existing job is going.
+        rollcall = voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES)
+        if rollcall is not None:
+            return self._handle_agent_rollcall(rollcall[0])
         status_request = voice_commands.parse_agent_status(text, cfg.AGENT_SPOKEN_ALIASES)
         if status_request is not None:
             return self._handle_agent_status(status_request)
@@ -261,6 +297,54 @@ class BrainSession:
         return (
             "[Agent update: there were no matching active tasks to cancel. "
             "Tell the user briefly; do not start any new work.]"
+        )
+
+    def _handle_agent_rollcall(self, agent: str | None = None) -> str:
+        """Answer "which agents are there?" from what RAP itself knows.
+
+        An agent cannot report on its peers -- asked to, it guesses, and a
+        guess delivered in the butler's voice reads exactly like a fact. RAP
+        knows which backends are configured, whether each one can be launched,
+        which remote machines are answering, and what is running right now, so
+        the roll call is answered here and never delegated.
+        """
+        self._control_turn = True
+        remote_states = {state["name"]: state for state in self._bridge.remote_hosts()}
+        active = {}
+        for job in self._bridge.active_jobs():
+            active[job.agent] = active.get(job.agent, 0) + 1
+        rows = []
+        backends = [
+            name
+            for name in self._bridge.backend_names()
+            if agent is None or name == agent or name.endswith(f":{agent}")
+        ]
+        for backend in backends:
+            split = remote_protocol.split_backend_name(backend)
+            if split is not None and split[0] in remote_states:
+                state = remote_states[split[0]]
+                ready = "ready" if state["online"] else f"unreachable ({state['error']})"
+                where = state["machine"]
+            else:
+                status, detail = agent_bridge.executable_status(cfg.AGENT_BACKENDS.get(backend, []))
+                ready = "ready" if status == "ok" else f"not runnable here ({detail})"
+                where = self._bridge.machine_for(backend)
+            busy = f", {active[backend]} job(s) running" if backend in active else ""
+            rows.append(f"{backend} on {where}: {ready}{busy}")
+        if not rows:
+            missing = f"there is no agent backend named '{agent}'" if agent else (
+                "no agent backends are configured"
+            )
+            return (
+                f"[Agent roll call: {missing}. "
+                "Answer from this; do not start any new work.]"
+            )
+        listed = "; ".join(rows)
+        return (
+            f"[Agent roll call: {listed}. This is Remote Agent Protocol's own check of each "
+            "backend -- whether it can be started here and whether its machine is answering -- "
+            "not a reply from the agents themselves. Report it as such, briefly, and do not "
+            "start any new work.]"
         )
 
     def _handle_agent_status(self, status_request: tuple[str | None]) -> str:
@@ -327,7 +411,10 @@ class BrainSession:
             )
             return cfg.DELEGATION_CONFIRM_PROMPT.format(agent=agent, task=task)
         self._remember_delegation(task)
-        asyncio.create_task(self._bridge.start(agent, self._with_delegation_context(task), cwd), name=f"brain-delegate-{agent}")
+        self._spawn(
+            self._bridge.start(agent, self._with_delegation_context(task), cwd),
+            f"brain-delegate-{agent}",
+        )
         return cfg.DELEGATION_ACK_PROMPT.format(agent=agent, task=task)
 
     def resolve_confirmation(self, token: str, decision: str) -> str | None:
@@ -345,9 +432,9 @@ class BrainSession:
         self._emit_confirm_resolved(token, agent, task, reason, decision)
         if decision == "approve":
             self._remember_delegation(task)
-            asyncio.create_task(
+            self._spawn(
                 self._bridge.start(agent, self._with_delegation_context(task), cwd),
-                name=f"brain-confirmed-{agent}",
+                f"brain-confirmed-{agent}",
             )
             return cfg.AGENT_CONFIRM_APPROVED_PROMPT.format(agent=agent, task=task)
         self._recently_denied.append((agent, task.strip().lower()))
@@ -394,37 +481,45 @@ class BrainSession:
         if self._http is None:
             raise RuntimeError("BrainSession.start() was not called")
         payload = self._ollama_payload(stream=True)
-        async with self._http.post(
-            f"{cfg.OLLAMA_BASE_URL}/chat/completions", json=payload, timeout=120
-        ) as resp:
-            if resp.status >= 400:
-                body = await resp.text()
-                raise RuntimeError(f"Ollama chat failed {resp.status}: {body}")
-            async for raw in resp.content:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-                if delta:
-                    yield delta
+        try:
+            async with self._http.post(
+                f"{cfg.OLLAMA_BASE_URL}/chat/completions", json=payload, timeout=120
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(f"Ollama chat failed {resp.status}: {body}")
+                async for raw in resp.content:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                    if delta:
+                        yield delta
+        except aiohttp.ClientConnectionError as exc:
+            raise LLMUnavailable(f"{cfg.OLLAMA_BASE_URL} is not reachable: {exc}") from exc
         await self._refresh_ollama_keep_alive(payload["model"])
 
     async def _call_ollama(self) -> str:
         if self._http is None:
             raise RuntimeError("BrainSession.start() was not called")
         payload = self._ollama_payload(stream=False)
-        async with self._http.post(f"{cfg.OLLAMA_BASE_URL}/chat/completions", json=payload, timeout=120) as resp:
-            if resp.status >= 400:
-                body = await resp.text()
-                raise RuntimeError(f"Ollama chat failed {resp.status}: {body}")
-            data = await resp.json()
+        try:
+            async with self._http.post(
+                f"{cfg.OLLAMA_BASE_URL}/chat/completions", json=payload, timeout=120
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(f"Ollama chat failed {resp.status}: {body}")
+                data = await resp.json()
+        except aiohttp.ClientConnectionError as exc:
+            raise LLMUnavailable(f"{cfg.OLLAMA_BASE_URL} is not reachable: {exc}") from exc
         await self._refresh_ollama_keep_alive(payload["model"])
         return str(data.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
 

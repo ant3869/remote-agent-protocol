@@ -46,6 +46,7 @@ class BrainSessionAdapter:
         """Start brain services and wait until ``shutdown`` is called."""
         self._loop = asyncio.get_running_loop()
         self._stop = asyncio.Event()
+        self._discard_stale_announcements()
         await self._brain.start()
         self._emit({"type": "session", "state": "ready"})
         self._emit({"type": "sys", "text": "Brain mode ready; realtime audio is external."})
@@ -206,6 +207,10 @@ class BrainSessionAdapter:
         """Return the configured machine label for a backend."""
         return self._brain._bridge.machine_for(backend)  # noqa: SLF001
 
+    def remote_hosts(self) -> list[dict]:
+        """Return configured remote agent machines and what they offer."""
+        return self._brain._bridge.remote_hosts()  # noqa: SLF001
+
     def default_agent_backend(self) -> str:
         """Return the brain's current default agent backend."""
         return self._brain._default_agent_backend  # noqa: SLF001
@@ -347,6 +352,30 @@ class BrainSessionAdapter:
             staged.replace(queued)
         except OSError as exc:
             logger.warning(f"Failed to publish agent announcement {path}: {exc}")
+
+    def _discard_stale_announcements(self) -> None:
+        """Drop announcements left queued by an earlier run.
+
+        The frontend deletes each entry as it speaks it, so anything still here
+        at startup belongs to a session that ended -- usually because the
+        frontend was not running when a delegated job finished. Speaking them
+        now would report finished work as if it had just landed.
+        """
+        if not cfg.S2S_ANNOUNCE_FILE:
+            return
+        path = Path(cfg.S2S_ANNOUNCE_FILE)
+        queue_dir = path.with_suffix(f"{path.suffix}.queue")
+        stale = 0
+        # ``.tmp`` too: a publish interrupted mid-write leaves one behind, and
+        # nothing else ever cleans it up.
+        for entry in (*queue_dir.glob("*.json"), *queue_dir.glob("*.tmp")):
+            try:
+                entry.unlink()
+                stale += 1
+            except OSError as exc:
+                logger.warning(f"Could not discard stale announcement {entry}: {exc}")
+        if stale:
+            logger.info(f"Discarded {stale} announcement(s) queued before this run")
 
     def _emit(self, event: dict) -> None:
         if self._on_event is not None:

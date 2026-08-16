@@ -6,10 +6,11 @@ sentence boundaries. Delegation markers must never reach the speakers.
 
 import asyncio
 
+import aiohttp
 import pytest
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol.brain import BrainSession, _split_sentences
+from remote_agent_protocol.brain import BrainSession, LLMUnavailable, _split_sentences
 from remote_agent_protocol.personas import PERSONAS
 
 
@@ -353,3 +354,60 @@ async def test_the_multimodal_body_feeds_the_model_not_the_transcript(monkeypatc
     user_events = [e for e in events if e.get("role") == "user"]
     assert user_events[0]["text"] == "summarize this"
     assert brain._messages[0]["content"] == "## Files\nreport.pdf"
+
+
+class _RefusedConnection:
+    """Fails the way aiohttp does when nothing is listening on the model host."""
+
+    async def __aenter__(self):
+        raise aiohttp.ClientConnectionError("Cannot connect to host localhost:11434")
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _RefusingHttp:
+    def post(self, *args, **kwargs):
+        return _RefusedConnection()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_an_unreachable_model_host_is_named_as_such(monkeypatch, streaming):
+    # Callers answer an unreachable host with a spoken hint instead of a server
+    # fault, which they can only do if it arrives as its own error.
+    monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    brain = BrainSession(PERSONAS[0])
+    brain._http = _RefusingHttp()
+
+    with pytest.raises(LLMUnavailable):
+        if streaming:
+            [delta async for delta in brain._stream_ollama()]
+        else:
+            await brain._call_ollama()
+
+
+@pytest.mark.asyncio
+async def test_a_dispatched_delegation_is_held_until_it_reaches_the_bridge(monkeypatch):
+    # asyncio keeps only a weak reference to a bare task: a delegation dropped
+    # by the garbage collector would leave the assistant claiming work that
+    # never started.
+    monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    brain = BrainSession(PERSONAS[0])
+    started = asyncio.Event()
+
+    async def slow_start(agent, task, cwd=None, **kwargs):
+        await asyncio.sleep(0.05)
+        started.set()
+        return "job-1"
+
+    monkeypatch.setattr(brain._bridge, "start", slow_start)
+    brain._delegate_ack("mock", "check the printer")
+
+    assert brain._tasks, "the dispatch task must be referenced while it runs"
+    import gc
+
+    gc.collect()  # a bare create_task would not survive this
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await asyncio.sleep(0)
+    assert not brain._tasks, "finished tasks are released again"

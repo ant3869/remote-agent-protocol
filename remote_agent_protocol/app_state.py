@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import re
+import threading
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -48,6 +49,8 @@ class AppState:
     avatar_show_state: bool = True
     avatar_panel_collapsed: bool = False
 
+
+_SAVE_LOCK = threading.Lock()
 
 AVATAR_QUALITIES = frozenset({"low", "medium", "high"})
 _AVATAR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -210,11 +213,17 @@ def save_state(path: str | Path, state: AppState) -> None:
     if not str(path):
         return
     p = Path(path)
-    tmp = p.with_name(p.name + ".tmp")
+    # Saves arrive from whichever thread answered a browser action, and several
+    # settings can change in the same moment. One shared staging name let two
+    # of them write and replace the same file at once, which Windows answers
+    # with a sharing violation -- so a save was simply lost. A private staging
+    # name plus this lock keeps every write whole.
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
-        os.replace(tmp, p)
+        with _SAVE_LOCK:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
+            os.replace(tmp, p)
     except OSError as e:
         logger.warning(f"Couldn't save app state to {p}: {e}")
         with contextlib.suppress(OSError):
