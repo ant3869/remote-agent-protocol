@@ -16,6 +16,8 @@ const state = {
   agentPrompts: null,
   confirmHistory: [],
   remoteHosts: [],
+  catalogs: {},
+  catalogVersion: null,
   selectedAgentJobId: null,
   selectedMemory: null,
   sending: false,
@@ -149,7 +151,10 @@ async function post(action, payload = {}) {
   }
   if (!response.ok) throw new Error(data.error || `RAP returned HTTP ${response.status}.`);
   if (data.status) {
-    state.status = data.status;
+    // Same merge as the poll: an action response carries live state only, so
+    // assigning it raw would drop the cached catalogs the UI renders from.
+    state.status = mergeCatalogs(data.status);
+    await refreshCatalogsIfStale();
     renderStatus();
   }
   return data;
@@ -184,6 +189,31 @@ const inputControls = window.RapInputControls.createInputControlCoordinator({
   render: renderInputControlState,
 });
 
+// Personas, models, voices and TTS options are 96% of what the status payload
+// used to carry, and they change only when the operator changes them. The poll
+// carries a version instead; these keep the cached copy attached to
+// state.status so every render path stays exactly as it was.
+function mergeCatalogs(status) {
+  if (!status) return status;
+  return { ...state.catalogs, ...status };
+}
+
+async function refreshCatalogsIfStale() {
+  const version = state.status?.catalogVersion;
+  if (version === undefined || version === state.catalogVersion) return;
+  const response = await fetch("/api/catalogs");
+  if (!response.ok) return;
+  const data = await response.json();
+  state.catalogVersion = data.version;
+  state.catalogs = {
+    personas: data.personas,
+    models: data.models,
+    voices: data.voices,
+    tts: data.tts,
+  };
+  state.status = { ...state.catalogs, ...state.status };
+}
+
 async function poll() {
   try {
     const response = await fetch(`/api/events?after=${state.latest}`);
@@ -191,7 +221,8 @@ async function poll() {
     const data = await response.json();
     const restored = state.connectionLost;
     state.latest = data.latest;
-    state.status = data.status;
+    state.status = mergeCatalogs(data.status);
+    await refreshCatalogsIfStale();
     if (restored) {
       addMessage("sys", "System", "UI connection restored.");
       inputControls.connected();

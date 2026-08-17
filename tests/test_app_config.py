@@ -1,6 +1,8 @@
+import json
 import unittest
+from unittest import mock
 
-from remote_agent_protocol import config
+from remote_agent_protocol import config, ollama_models
 
 
 class AgentConfigTests(unittest.TestCase):
@@ -64,3 +66,45 @@ class AgentConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OllamaPreloadTests(unittest.TestCase):
+    """The reply model is made resident before a turn needs it."""
+
+    def test_preload_asks_ollama_to_load_and_hold_the_model(self):
+        seen = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def fake_urlopen(request, timeout=None):
+            seen["url"] = request.full_url
+            seen["body"] = json.loads(request.data)
+            seen["timeout"] = timeout
+            return Response()
+
+        with mock.patch.object(ollama_models.urllib.request, "urlopen", fake_urlopen):
+            self.assertTrue(ollama_models.preload("http://localhost:11434", "gemma-12b", "5m"))
+
+        self.assertTrue(seen["url"].endswith("/api/generate"))
+        # An empty prompt loads the weights and generates nothing.
+        self.assertEqual(seen["body"]["prompt"], "")
+        self.assertEqual(seen["body"]["keep_alive"], "5m")
+        # A cold load off disk takes far longer than any per-turn budget.
+        self.assertGreaterEqual(seen["timeout"], 60)
+
+    def test_preload_without_a_model_is_a_no_op(self):
+        self.assertFalse(ollama_models.preload("http://localhost:11434", "", "5m"))
+
+    def test_an_unreachable_ollama_is_reported_not_raised(self):
+        with mock.patch.object(
+            ollama_models.urllib.request, "urlopen", side_effect=OSError("refused")
+        ):
+            self.assertFalse(ollama_models.preload("http://localhost:11434", "gemma-12b", "5m"))

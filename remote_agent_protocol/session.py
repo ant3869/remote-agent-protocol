@@ -42,6 +42,7 @@ from remote_agent_protocol import (
     memory,
     memory_manager,
     multimodal_prompt,
+    ollama_models,
     remote_client,
     stt_factory,
     tts_factory,
@@ -331,6 +332,17 @@ class VoiceSession:
         self._remotes.start()
         self._start_voicebox_warmups()
         self._spawn(self._router.warmup(), name="intent-router-warmup")
+        # The reply model too, not just the router: a cold load lands on the
+        # first spoken turn otherwise.
+        self._spawn(
+            asyncio.to_thread(
+                ollama_models.preload,
+                cfg.OLLAMA_HOST,
+                self._startup_model or self._persona.model_name(cfg.LLM_MODEL),
+                cfg.LLM_KEEP_ALIVE,
+            ),
+            name="chat-model-warmup",
+        )
         if (
             self._startup_voice
             or self._startup_tts_backend

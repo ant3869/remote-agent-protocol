@@ -346,21 +346,41 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.source, "heuristic")
         self.assertEqual(classify.calls, [])
 
-    async def test_warmup_preloads_enabled_classifier(self):
+    async def test_warmup_exercises_a_realistic_prompt(self):
+        # The cost being warmed away is evaluating the whole system contract and
+        # its examples. A one-word prompt leaves most of that for the first live
+        # turn, which then times out on its 2.5s budget.
         classify = FakeClassify(result=verdict(intent="chat", category="none", task=""))
 
         await make_router(classify).warmup()
 
-        self.assertEqual(classify.calls, ["hello"])
+        self.assertEqual(len(classify.calls), 1)
+        self.assertGreater(len(classify.calls[0].split()), 4)
 
-    async def test_default_warmup_has_a_cold_start_budget(self):
+    async def test_default_warmup_outlasts_any_serving_budget(self):
         # enabled= is pinned so a .env with INTENT_ROUTER_ENABLED=false cannot
         # skip the warmup call and make this assertion vacuous.
         classify = AsyncMock(return_value=verdict(intent="chat", category="none", task=""))
         with patch.object(intent_router, "classify_with_ollama", classify):
             await intent_router.IntentRouter(enabled=True, timeout_secs=0.05).warmup()
 
-        self.assertEqual(classify.await_args.kwargs["timeout_secs"], 30.0)
+        # Nobody waits on a warmup; giving up on it means paying the load later.
+        self.assertGreaterEqual(classify.await_args.kwargs["timeout_secs"], 120.0)
+
+    async def test_an_injected_classifier_can_be_warmed_on_its_own_budget(self):
+        # The probe injects a classifier whose serving budget is 2.5s. Warming a
+        # cold model through that budget cannot work, so warmup takes the
+        # generous callable when one is supplied.
+        serving = FakeClassify(result=verdict(intent="chat", category="none", task=""))
+        warming = FakeClassify(result=verdict(intent="chat", category="none", task=""))
+        router = intent_router.IntentRouter(
+            enabled=True, classify=serving, warm_classify=warming
+        )
+
+        await router.warmup()
+
+        self.assertEqual(len(warming.calls), 1)
+        self.assertEqual(serving.calls, [])
 
     async def test_decision_is_fully_serializable_for_events(self):
         classify = FakeClassify(result=verdict())

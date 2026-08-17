@@ -140,7 +140,16 @@ _RESPONSE_SCHEMA = {
     "required": ["intent", "category", "task", "confidence", "reason"],
 }
 
-_WARMUP_TIMEOUT_SECS = 30.0
+# Nobody waits on a warmup -- it runs in the background at session start -- so
+# its only job is to actually finish. At 30s it did not: a cold load off this
+# project's model disk regularly ran longer, the warmup was abandoned, and the
+# session then paid the load during real turns instead (voice_probe live run
+# 2026-08-17: 28 of 131 turns dropped while the model loaded).
+_WARMUP_TIMEOUT_SECS = 180.0
+# A real sentence, not "hello": the cost being warmed away is evaluating the
+# whole system contract and its examples, and a one-word prompt leaves most of
+# that for the first live turn to pay (which then times out).
+_WARMUP_UTTERANCE = "could you organize the files sitting on my desktop"
 # How long to stop asking a classifier that just timed out. A timed-out
 # request closes its connection, and Ollama abandons the model load it was
 # waiting on; asking again immediately starts a load the next timeout will
@@ -555,6 +564,7 @@ class IntentRouter:
         *,
         enabled: bool | None = None,
         classify: Callable[[str], Awaitable[dict]] | None = None,
+        warm_classify: Callable[[str], Awaitable[dict]] | None = None,
         timeout_secs: float | None = None,
         dispatch_confidence: float | None = None,
         confirm_confidence: float | None = None,
@@ -566,6 +576,10 @@ class IntentRouter:
             enabled: Overrides ``INTENT_ROUTER_ENABLED`` (the semantic tier).
             classify: ``async (text) -> raw verdict dict``; injectable for
                 tests, defaults to :func:`classify_with_ollama`.
+            warm_classify: Same shape, used only by :meth:`warmup`, for an
+                injected classifier whose serving budget is too small to
+                load a cold model. The default classifier gets this for
+                free; an injected one has to be given it.
             timeout_secs: Classifier budget before falling back to keywords.
             dispatch_confidence: Confidence at/above which a task dispatches.
             confirm_confidence: Floor of the uncertain band; inside the band
@@ -583,6 +597,9 @@ class IntentRouter:
         self._auto_delegate = cfg.AGENT_AUTO_DELEGATE if auto_delegate is None else auto_delegate
         self._uses_default_classifier = classify is None
         self._classify = classify or self._default_classify
+        self._warm_classify = warm_classify or (
+            self._default_warm_classify if classify is None else classify
+        )
         # Set while the model is (re)loading after a timeout; see _recover.
         self._cold_until = 0.0
         self._recovery: asyncio.Task | None = None
@@ -596,24 +613,26 @@ class IntentRouter:
             timeout_secs=cfg.INTENT_TIMEOUT_SECS,
         )
 
+    @staticmethod
+    async def _default_warm_classify(text: str) -> dict:
+        return await classify_with_ollama(
+            text,
+            host=cfg.OLLAMA_HOST,
+            model=cfg.INTENT_MODEL,
+            timeout_secs=_WARMUP_TIMEOUT_SECS,
+        )
+
     async def warmup(self) -> None:
         """Preload the classifier model so the first real turn pays nothing.
 
-        Fire-and-forget at session start. Cold model loading gets a larger
-        budget than live turns so it can actually make the classifier resident.
+        Fire-and-forget at session start. Loading a cold model gets a far
+        larger budget than a live turn: nobody is waiting on this, and a
+        warmup that gives up leaves the load to be paid mid-conversation.
         """
         if not self._enabled:
             return
         try:
-            if self._uses_default_classifier:
-                await classify_with_ollama(
-                    "hello",
-                    host=cfg.OLLAMA_HOST,
-                    model=cfg.INTENT_MODEL,
-                    timeout_secs=max(_WARMUP_TIMEOUT_SECS, self._timeout),
-                )
-            else:
-                await self._classify("hello")
+            await self._warm_classify(_WARMUP_UTTERANCE)
             self._cold_until = 0.0
             logger.info("Intent classifier warmed up")
         except Exception as exc:

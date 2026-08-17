@@ -735,3 +735,38 @@ def test_announcements_published_by_this_run_survive(monkeypatch, tmp_path):
     adapter._publish_announcement({"job_id": "job-1", "status": "done", "result": "all set"})
 
     assert len(_queued_announcements(announce)) == 1
+
+
+def test_a_stream_announces_itself_before_the_model_speaks(envelope_server, monkeypatch):
+    # The frontend times its latency budget from the first chunk. Withholding it
+    # until the first sentence lands left 54 of 55 recorded turns with no
+    # measurable response start at all.
+    app, port = envelope_server
+    monkeypatch.setattr(cfg, "S2S_BRIDGE_STREAMING", True)
+
+    class SlowSession:
+        def complete_text(self, text, timeout=180.0):
+            return "late"
+
+        def stream_text(self, text, timeout=180.0):
+            yield "First sentence."
+
+    monkeypatch.setattr(app, "_session", SlowSession())
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        data=json.dumps({"messages": [{"role": "user", "content": "hi"}], "stream": True}).encode(),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer test-secret"},
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=10) as response:
+        chunks = [
+            json.loads(line[len("data: ") :])
+            for line in response.read().decode().splitlines()
+            if line.startswith("data: ") and not line.endswith("[DONE]")
+        ]
+
+    # First chunk carries the role and no text; the text follows in its own.
+    assert chunks[0]["choices"][0]["delta"] == {"role": "assistant"}
+    assert chunks[1]["choices"][0]["delta"] == {"content": "First sentence."}
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"

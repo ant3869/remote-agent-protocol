@@ -44,7 +44,9 @@ For a real end-to-end run against live agents + audio, see
 # need a wider budget (--timeout) or every case times out and degrades to chat.
 .venv\Scripts\python -m voice_probe run --classifier live --model gemma-e4b-aggressive --timeout 15
 .venv\Scripts\python -m voice_probe run --classifier live --model hermes-20b --timeout 30
+```
 
+```bash
 # Isolate what the keyword net alone can do (semantic tier disabled).
 .venv\Scripts\python -m voice_probe run --classifier off
 
@@ -58,6 +60,28 @@ For a real end-to-end run against live agents + audio, see
 Each `run` writes three files under `data/voice_probe/` (gitignored):
 `run-<mode>-<ts>.jsonl` (raw results), `.md` (report), `.html` (visual report).
 Exit code is non-zero when any case **fails**, so it drops into CI cleanly.
+
+## Guarding against regressions
+
+`baseline.json` records the score each classifier is expected to reach, so a
+routing change that lowers it fails loudly instead of quietly:
+
+```bash
+# Fails when the score drops more than 2 points below the recorded baseline.
+.venv\Scripts\python -m voice_probe run --classifier stub --baseline
+.venv\Scripts\python -m voice_probe run --classifier live --baseline
+
+# Or state the bar directly, ignoring the baseline file.
+.venv\Scripts\python -m voice_probe run --classifier live --fail-under 80
+
+# After a deliberate improvement, record the new bar (and commit it).
+.venv\Scripts\python -m voice_probe run --classifier live --update-baseline
+```
+
+Live runs are graded against a small model's judgment, so a handful of failures
+is their steady state -- that is why they get their own baseline rather than
+being held to zero failures. Without `--baseline` or `--fail-under`, any single
+failure still fails the run, which is the right bar for the offline corpus.
 
 ### Classifier modes
 

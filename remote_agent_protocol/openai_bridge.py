@@ -183,13 +183,15 @@ def _handler_class(runtime: BrainBridgeRuntime):
             self.end_headers()
             chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
             created = int(time.time())
-            first = True
+            # Open with a role-only chunk, before the model has produced a word.
+            # A client reads that as "the response has started" and can time its
+            # own budget against it; withholding it until the first sentence
+            # arrives leaves the middle of the latency budget unmeasurable.
+            opening = _stream_chunk(chunk_id, model, created, {"role": "assistant"})
+            self.wfile.write(f"data: {json.dumps(opening, ensure_ascii=False)}\n\n".encode())
+            self.wfile.flush()
             for piece in pieces:
-                delta = {"content": piece}
-                if first:
-                    delta["role"] = "assistant"
-                    first = False
-                payload = _stream_chunk(chunk_id, model, created, delta)
+                payload = _stream_chunk(chunk_id, model, created, {"content": piece})
                 self.wfile.write(f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
                 self.wfile.flush()
             payload = _stream_chunk(chunk_id, model, created, {}, finish_reason="stop")

@@ -1,0 +1,10 @@
+{
+  "live:qwen2.5:3b": {
+    "pass_rate": 83.2,
+    "recorded_at": "2026-08-17 07:43:31"
+  },
+  "stub": {
+    "pass_rate": 100.0,
+    "recorded_at": "2026-08-17 07:38:03"
+  }
+}

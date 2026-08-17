@@ -12,6 +12,13 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- The reply model is preloaded at startup, alongside the classifier that already
+  was. A cold model turned one recorded turn into 67 seconds before the
+  assistant made a sound; the load now happens in the background at launch.
+- `voice_probe` can gate on its own score: `--baseline` compares against the
+  committed `voice_probe/baseline.json` (stub 100%, live qwen2.5:3b 83%),
+  `--fail-under PCT` states a bar directly, and `--update-baseline` records a
+  deliberate improvement.
 - Agents can live on another machine. `python -m remote_agent_protocol.remote_host`
   offers that machine's configured agents over one authenticated protocol --
   capability discovery, heartbeat, and job streaming, every request carrying a
@@ -62,6 +69,17 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   windows", for a window nobody had. It now reclaims the slot (recorded PID
   first, then any live app process) and only refuses when something it cannot
   identify still holds the lock.
+- The status poll carries live state only. Personas, models, voices and TTS
+  options were 36 KB of a 38 KB payload the browser fetched twice a second while
+  you talked; they now live behind `/api/catalogs` and are refetched only when a
+  version stamp changes -- 37.8 KB down to 1.6 KB per poll.
+- A streamed reply announces itself the moment the stream opens rather than when
+  the first sentence lands, so a realtime frontend can measure the middle of its
+  latency budget (54 of 55 recorded turns had no response-start at all).
+- The classifier warmup gets a budget that can actually finish a cold load
+  (30s was routinely too short), warms with a realistic prompt rather than
+  "hello", and is no longer capped by the per-turn budget when a caller injects
+  its own classifier -- which silently left `voice_probe` runs starting cold.
 - The intent classifier can no longer starve itself. A request that hits the
   timeout closes its connection, and Ollama abandons the model load it was
   waiting for; the next turn started another load that the next timeout

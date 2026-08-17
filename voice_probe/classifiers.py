@@ -95,6 +95,10 @@ def make_live_classifier(model: str, timeout_secs: float) -> Classifier:
     return classify
 
 
+# A cold load off disk can take a minute; the warmup is background work.
+_WARM_BUDGET_SECS = 180.0
+
+
 def build_router(
     mode: str,
     *,
@@ -119,6 +123,11 @@ def build_router(
         return intent_router.IntentRouter(
             enabled=True,
             classify=make_live_classifier(model, budget),
+            # Warming a cold model cannot be held to the per-turn budget: at 2.5s
+            # the warmup itself timed out, so the run started cold and its first
+            # case paid the load -- 28 of 131 cases were then skipped while the
+            # router backed off (run-live 2026-08-17).
+            warm_classify=make_live_classifier(model, _WARM_BUDGET_SECS),
             timeout_secs=budget,
         )
     raise ValueError(f"unknown classifier mode: {mode!r} (use live|stub|off)")

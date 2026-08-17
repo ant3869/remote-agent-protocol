@@ -26,6 +26,7 @@ from remote_agent_protocol import (
     job_store,
     lifecycle_ws,
     memory,
+    ollama_models,
     remote_client,
     remote_protocol,
     voice_commands,
@@ -114,6 +115,18 @@ class BrainSession:
             await self._lifecycle_ws.start()
         self._remotes.start()
         self._spawn(self._router.warmup(), "brain-intent-router-warmup")
+        self._spawn(self._warm_chat_model(), "brain-chat-model-warmup")
+
+    async def _warm_chat_model(self) -> None:
+        """Make the reply model resident before the first turn asks for it.
+
+        The router has always been preloaded; the model that actually answers
+        was not, so the first spoken turn of a session paid its whole load.
+        """
+        model = getattr(self, "_model_override", None) or self._persona.model_name(cfg.LLM_MODEL)
+        await asyncio.to_thread(
+            ollama_models.preload, cfg.OLLAMA_HOST, model, cfg.LLM_KEEP_ALIVE
+        )
 
     def _spawn(self, coro, name: str) -> None:
         """Run background work while holding a strong reference to it.

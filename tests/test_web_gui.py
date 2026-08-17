@@ -922,11 +922,12 @@ def test_tts_action_persists_coqui_defaults(monkeypatch, tmp_path):
 
 
 def test_tts_provider_payload_includes_coqui():
+    # The catalogs the browser caches, not the twice-a-second status poll.
     app = WebVoiceApp()
-    status = app._status_payload()
+    catalogs = app._catalogs_payload()
 
-    assert "coqui" in [row["id"] for row in status["tts"]["providers"]]
-    assert "models" in status["tts"]["coqui"]
+    assert "coqui" in [row["id"] for row in catalogs["tts"]["providers"]]
+    assert "models" in catalogs["tts"]["coqui"]
 
 
 def test_test_speak_button_calls_session_tts(monkeypatch):
@@ -1024,7 +1025,7 @@ def test_persona_page_has_full_editor_and_actions():
 def test_status_payload_exposes_complete_persona_records():
     app = WebVoiceApp()
 
-    persona = app._status_payload()["personas"][0]
+    persona = app._catalogs_payload()["personas"][0]
 
     assert persona["name"]
     assert "systemPrompt" in persona
@@ -1094,7 +1095,9 @@ def test_persona_create_duplicate_and_delete_custom(monkeypatch):
 
     deleted = app._action("persona_delete", {"name": duplicate_name})
     assert deleted["ok"] is True
-    assert duplicate_name not in [row["name"] for row in deleted["status"]["personas"]]
+    assert duplicate_name not in [
+        row["name"] for row in app._catalogs_payload()["personas"]
+    ]
     assert saved[-1].custom_personas.get(duplicate_name) is None
 
 
@@ -1107,7 +1110,7 @@ def test_builtin_persona_delete_resets_instead_of_removing(monkeypatch):
     result = app._action("persona_delete", {"name": "Jess"})
 
     assert result["ok"] is True
-    assert "Jess" in [row["name"] for row in result["status"]["personas"]]
+    assert "Jess" in [row["name"] for row in app._catalogs_payload()["personas"]]
     assert "Jess" not in saved[-1].personas
 
 
@@ -1534,3 +1537,46 @@ def test_an_unknown_event_type_is_logged_without_folding():
     app._publish({"type": "nothing_folds_this", "text": "hello"})
 
     assert app._event_log[-1]["type"] == "nothing_folds_this"
+
+
+def test_the_status_poll_carries_live_state_not_catalogs():
+    # The browser polls this twice a second while you talk; personas, models,
+    # voices and TTS options were 96% of it and change only on an operator edit.
+    app = WebVoiceApp()
+
+    status = app._status_payload()
+
+    assert "catalogVersion" in status
+    for cold in ("personas", "models", "voices", "tts"):
+        assert cold not in status, f"{cold} belongs in /api/catalogs"
+    assert len(json.dumps(status, default=str)) < 4000
+
+
+def test_the_catalogs_endpoint_carries_what_the_poll_dropped():
+    app = WebVoiceApp()
+
+    catalogs = app._catalogs_payload()
+
+    assert catalogs["version"] == app._status_payload()["catalogVersion"]
+    for cold in ("personas", "models", "voices", "tts"):
+        assert catalogs[cold]
+
+
+def test_editing_a_persona_invalidates_the_cached_catalogs(monkeypatch):
+    app, _saved = _web_app_with_persona_store(monkeypatch)
+    before = app._status_payload()["catalogVersion"]
+
+    app._action("persona_create", {})
+
+    assert app._status_payload()["catalogVersion"] > before
+
+
+def test_changing_the_tts_selection_invalidates_them_too(monkeypatch):
+    monkeypatch.setattr(cfg, "RAP_MODE", "full")
+    app = WebVoiceApp()
+    app._session = FakeTtsSession()
+    before = app._status_payload()["catalogVersion"]
+
+    app._action("tts", {"provider": "kokoro", "voice": "af_sky"})
+
+    assert app._status_payload()["catalogVersion"] > before

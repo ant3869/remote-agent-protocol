@@ -185,6 +185,8 @@ class WebVoiceApp:
         # jobs live on in the persisted history, so only the recent ones need to
         # stay here; active jobs are never evicted, whatever their age.
         self._agent_jobs: dict[str, dict] = {}
+        # Bumped by any action that edits a catalog the browser caches.
+        self._catalog_version = 1
         self._avatar_audio = AvatarAudioEnvelopeHub()
         self._avatar_speaking = False
         self._session = self._new_session()
@@ -789,21 +791,20 @@ class WebVoiceApp:
             "voice": self._voice,
             "toolUser": self._session.default_agent_backend(),
             "avatar": app_state.avatar_settings_payload(self._app_state),
-            "personas": self._personas_payload(),
-            "models": self._models,
-            "voices": [
-                {"label": label, "value": value} for label, value in self._voice_map.items()
-            ],
             "agentBackends": self._session.agent_backends(),
             "agentMachines": {
                 backend: self._session.agent_machine(backend)
                 for backend in self._session.agent_backends()
             },
+            # The catalogs (personas, models, voices, TTS options) are 30 KB of
+            # the 38 KB this payload used to be, and the browser asks for it
+            # twice a second while you talk. They change only when the operator
+            # changes them, so they moved to /api/catalogs behind this version.
+            "catalogVersion": self._catalog_version,
             "activeAgentCount": len(active_jobs),
             "agentStates": agent_states,
             "health": self._health,
             "ttsHealth": self._tts_health,
-            "tts": self._tts_payload(),
             "latency": self._latency.values,
             "pendingConfirms": self._pending_confirms,
             "memoryEnabled": cfg.MEMORY_ENABLED,
@@ -811,6 +812,26 @@ class WebVoiceApp:
             "wake": self._wake_payload(),
             "vram": self._vram,
         }
+
+    def _catalogs_payload(self) -> dict:
+        """Everything the UI needs once, not twice a second.
+
+        Fetched when ``catalogVersion`` in the status payload changes, which is
+        whenever an operator action edits a persona or the TTS selection.
+        """
+        return {
+            "version": self._catalog_version,
+            "personas": self._personas_payload(),
+            "models": self._models,
+            "voices": [
+                {"label": label, "value": value} for label, value in self._voice_map.items()
+            ],
+            "tts": self._tts_payload(),
+        }
+
+    def _bump_catalogs(self) -> None:
+        """Tell the browser its cached catalogs are stale."""
+        self._catalog_version += 1
 
     def _initial_wake_status(self) -> dict:
         settings = wake_word.settings_from_config(
@@ -1198,10 +1219,12 @@ class WebVoiceApp:
             self._coqui_language = str(payload.get("language") or "").strip()
             self._coqui_device = str(payload.get("device") or self._coqui_device).strip()
             self._voice = self._coqui_speaker
+        self._bump_catalogs()
         self._apply_current_tts()
         self._save_state()
 
     def _action_tts_refresh(self, payload: dict) -> dict:
+        self._bump_catalogs()
         self._tts_payload(refresh=True)
         return {"ok": True, "status": self._status_payload()}
 
@@ -1332,6 +1355,7 @@ class WebVoiceApp:
         persona_config.save_config(self._persona_config)
         self._reload_personas()
         self._activate_persona(name)
+        self._bump_catalogs()
         return {"ok": True, "message": f"Created {name}.", "status": self._status_payload()}
 
     def _save_persona(self, payload: dict) -> dict:
@@ -1378,6 +1402,7 @@ class WebVoiceApp:
         self._reload_personas()
         if original == self._persona.name or name == self._persona.name:
             self._activate_persona(name)
+        self._bump_catalogs()
         return {"ok": True, "message": f"Saved {name}.", "status": self._status_payload()}
 
     def _duplicate_persona(self, payload: dict) -> dict:
@@ -1399,6 +1424,7 @@ class WebVoiceApp:
         persona_config.save_config(self._persona_config)
         self._reload_personas()
         self._activate_persona(name)
+        self._bump_catalogs()
         return {
             "ok": True,
             "message": f"Duplicated {source.name}.",
@@ -1425,6 +1451,7 @@ class WebVoiceApp:
             self._activate_persona(
                 app_state.resolve_persona_name("", self._persona_names(), cfg.DEFAULT_PERSONA_NAME)
             )
+        self._bump_catalogs()
         return {"ok": True, "message": message, "status": self._status_payload()}
 
     def _override_from_payload(self, payload: dict) -> persona_config.PersonaOverride:
@@ -1591,6 +1618,9 @@ class WebVoiceApp:
                     return
                 if parsed.path == "/api/status":
                     self._send_json(app._status_payload())
+                    return
+                if parsed.path == "/api/catalogs":
+                    self._send_json(app._catalogs_payload())
                     return
                 if parsed.path == "/api/agents":
                     self._send_json(app._agents_payload())
@@ -1782,14 +1812,22 @@ class WebVoiceApp:
                     self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
                     self.wfile.flush()
 
+                # Open with a role-only chunk, before the model has produced a
+                # word. A client reads that as "the response has started" and
+                # times its own budget against it; withholding it until the
+                # first sentence lands leaves the middle of the turn
+                # unmeasurable -- 54 of 55 recorded turns had no response start
+                # at all (data/s2s_turn_timings.jsonl).
+                write(openai_bridge._stream_chunk(chunk_id, model, created, {"role": "assistant"}))
                 first = True
                 try:
                     for piece in pieces:
-                        delta = {"content": piece}
-                        if first:
-                            delta = {"role": "assistant", "content": piece}
-                            first = False
-                        write(openai_bridge._stream_chunk(chunk_id, model, created, delta))
+                        first = False
+                        write(
+                            openai_bridge._stream_chunk(
+                                chunk_id, model, created, {"content": piece}
+                            )
+                        )
                 except LLMUnavailable as exc:
                     # The headers are already out, so this cannot become an HTTP
                     # error; finish the stream with something speakable instead.
@@ -1797,10 +1835,7 @@ class WebVoiceApp:
                     if first:
                         write(
                             openai_bridge._stream_chunk(
-                                chunk_id,
-                                model,
-                                created,
-                                {"role": "assistant", "content": _LLM_UNREACHABLE_REPLY},
+                                chunk_id, model, created, {"content": _LLM_UNREACHABLE_REPLY}
                             )
                         )
                 write(openai_bridge._stream_chunk(chunk_id, model, created, {}, finish_reason="stop"))

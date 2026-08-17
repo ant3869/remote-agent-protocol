@@ -19,3 +19,14 @@ test("remote machines appear beside the roster, and only when configured", () =>
   // Offline hosts say why, rather than only that they are gone.
   assert.match(source, /host\.error \|\| "not answering"/);
 });
+
+test("cached catalogs survive both the poll and an action response", () => {
+  const source = readFileSync("remote_agent_protocol/web_app/app.js", "utf8");
+
+  // Both paths must merge, or an action response would drop the cached
+  // catalogs the whole UI renders from.
+  assert.match(source, /state\.status = mergeCatalogs\(data\.status\)/);
+  const merges = source.match(/mergeCatalogs\(data\.status\)/g) || [];
+  assert.equal(merges.length, 2, "poll and post both merge");
+  assert.match(source, /version === state\.catalogVersion\) return/);
+});
