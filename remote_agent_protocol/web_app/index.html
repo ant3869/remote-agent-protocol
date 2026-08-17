@@ -86,7 +86,7 @@
     <section class="context-panel" data-context-view="agents">
       <header class="context-heading"><div><p class="section-label">Backends</p><h3>Agent roster</h3></div><button id="agentRefreshBtn" class="button quiet" type="button">Refresh</button></header>
       <section id="agentRoster" class="agent-roster"></section>
-      <section id="agentMachinesPanel" class="agent-machines" hidden><p class="section-label">Machines</p><div id="agentMachines" class="agent-machine-list"></div></section>
+      <section id="agentMachinesPanel" class="agent-machines" hidden><div class="agent-machines-head"><p class="section-label">Machines</p><button id="agentMachinesCheckBtn" class="button quiet" type="button" title="Ask every configured host whether it is there">Check now</button></div><div id="agentMachines" class="agent-machine-list"></div></section>
       <details class="agent-confirm-history-panel context-disclosure"><summary><span><span class="section-label">Confirmation gate</span><strong>Recent decisions</strong></span><span id="confirmHistoryCount" class="panel-meta">0 resolved</span></summary><section id="confirmHistoryList" class="confirm-history-list"></section></details>
     </section>
 

@@ -641,6 +641,8 @@ textarea { resize: vertical; line-height: 1.5; }
 /* Remote machines sit under the roster: same row shape, so a laptop's
    agents read as part of one list rather than a separate concept. */
 .agent-machines { display: grid; gap: 6px; padding: 0 12px 12px; }
+.agent-machines-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.agent-machines-head .button { min-height: 28px; padding: 4px 9px; font-size: 11px; }
 .agent-machine-list { display: grid; gap: 6px; }
 .agent-machine-row { grid-template-columns: minmax(0, 1fr) auto; padding: 9px 10px; }
 

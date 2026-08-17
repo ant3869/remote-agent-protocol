@@ -599,6 +599,10 @@ class VoiceSession:
         """Configured remote agent machines and what they currently offer."""
         return self._bridge.remote_hosts()
 
+    def check_remote_hosts(self) -> None:
+        """Re-run host discovery now; the result lands on the session loop."""
+        self._schedule(self._remotes.discover())
+
     def default_agent_backend(self) -> str:
         """Current implicit/force-delegate backend."""
         return self._default_agent_backend

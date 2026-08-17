@@ -12,6 +12,8 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- The Agents page has a Check now button for remote machines, so a host you have
+  just woken can be re-checked without waiting for the heartbeat interval.
 - The reply model is preloaded at startup, alongside the classifier that already
   was. A cold model turned one recorded turn into 67 seconds before the
   assistant made a sound; the load now happens in the background at launch.
@@ -69,6 +71,10 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   windows", for a window nobody had. It now reclaims the slot (recorded PID
   first, then any live app process) and only refuses when something it cannot
   identify still holds the lock.
+- The Agents payload no longer ships every job's raw output. One recorded
+  history of 100 jobs carried 377 KB of agent chatter for jobs nobody had
+  selected; the list now carries a line count and the selected job's log is
+  fetched on its own (388 KB down to 83 KB).
 - The status poll carries live state only. Personas, models, voices and TTS
   options were 36 KB of a 38 KB payload the browser fetched twice a second while
   you talked; they now live behind `/api/catalogs` and are refetched only when a

@@ -211,6 +211,10 @@ class BrainSessionAdapter:
         """Return configured remote agent machines and what they offer."""
         return self._brain._bridge.remote_hosts()  # noqa: SLF001
 
+    def check_remote_hosts(self) -> None:
+        """Re-run host discovery on the brain loop."""
+        self._submit(self._brain._remotes.discover())  # noqa: SLF001
+
     def default_agent_backend(self) -> str:
         """Return the brain's current default agent backend."""
         return self._brain._default_agent_backend  # noqa: SLF001

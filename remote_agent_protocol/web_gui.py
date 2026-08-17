@@ -252,6 +252,7 @@ class WebVoiceApp:
             "deny": self._action_deny,
             "start_ollama": self._action_start_ollama,
             "free_vram": self._action_free_vram,
+            "check_machines": self._action_check_machines,
             "export_diagnostics": self._action_export_diagnostics,
             "reboot_session": self._action_reboot_session,
         }
@@ -687,13 +688,38 @@ class WebVoiceApp:
         }
 
     def _agents_payload(self) -> dict:
+        # Output lines are the bulk of this -- one recorded history of 100 jobs
+        # weighed 377 KB, single jobs up to 31 KB of raw agent chatter. The panel
+        # only ever shows the lines of the job you selected, so they are fetched
+        # per job instead of shipped for all of them.
         return {
-            "jobs": list(self._agent_jobs.values()),
-            "history": self._session.agent_history(),
+            "jobs": [_without_lines(job) for job in self._agent_jobs.values()],
+            "history": [_without_lines(job) for job in self._session.agent_history()],
             "prompts": self._agent_prompt_payload(),
             "status": self._status_payload(),
             "confirmHistory": list(reversed(self._confirm_history)),
             "remoteHosts": self._session.remote_hosts(),
+        }
+
+    def _job_lines_payload(self, job_id: str) -> dict:
+        """Raw output for one job, live or from persisted history."""
+        job = self._agent_jobs.get(job_id)
+        if job is None:
+            job = next(
+                (
+                    row
+                    for row in self._session.agent_history()
+                    if str(row.get("job_id", "")) == job_id
+                ),
+                None,
+            )
+        if job is None:
+            return {"job_id": job_id, "lines": [], "found": False}
+        lines = job.get("lines")
+        return {
+            "job_id": job_id,
+            "lines": list(lines) if isinstance(lines, list) else [],
+            "found": True,
         }
 
     def _cli_diagnostics_payload(self) -> dict:
@@ -1330,6 +1356,23 @@ class WebVoiceApp:
     def _action_free_vram(self, payload: dict) -> None:
         threading.Thread(target=self._free_vram, daemon=True).start()
 
+    def _action_check_machines(self, payload: dict) -> dict:
+        """Re-check the remote hosts now instead of waiting for the heartbeat.
+
+        The heartbeat interval is deliberately unhurried, which is the wrong
+        pace when you have just woken the other machine and want to know
+        whether it is back. The answer lands in the next Agents refresh.
+        """
+        hosts = self._session.remote_hosts()
+        if not hosts:
+            return {"ok": False, "error": "No remote agent hosts are configured."}
+        self._session.check_remote_hosts()
+        return {
+            "ok": True,
+            "message": f"Checking {len(hosts)} machine(s)...",
+            "status": self._status_payload(),
+        }
+
     def _action_export_diagnostics(self, payload: dict) -> None:
         threading.Thread(target=self._export_diagnostics, daemon=True).start()
 
@@ -1625,6 +1668,10 @@ class WebVoiceApp:
                 if parsed.path == "/api/agents":
                     self._send_json(app._agents_payload())
                     return
+                if parsed.path == "/api/agent-lines":
+                    job_id = parse_qs(parsed.query).get("job", [""])[0]
+                    self._send_json(app._job_lines_payload(job_id))
+                    return
                 if parsed.path == "/api/events":
                     after = int(parse_qs(parsed.query).get("after", ["0"])[0] or 0)
                     self._send_json(app._events_after(after))
@@ -1881,6 +1928,14 @@ def _bundle_from_payload(
         draft_active=bool(voice or notes or prompt or bundle.attachments),
     )
     return bundle
+
+
+def _without_lines(job: dict) -> dict:
+    """A job record minus its raw output, keeping the count the panel shows."""
+    lines = job.get("lines")
+    trimmed = {key: value for key, value in job.items() if key != "lines"}
+    trimmed["lineCount"] = len(lines) if isinstance(lines, list) else 0
+    return trimmed
 
 
 def _json_safe(value):

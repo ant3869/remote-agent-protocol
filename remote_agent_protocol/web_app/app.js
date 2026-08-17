@@ -16,6 +16,7 @@ const state = {
   agentPrompts: null,
   confirmHistory: [],
   remoteHosts: [],
+  jobLines: {},
   catalogs: {},
   catalogVersion: null,
   selectedAgentJobId: null,
@@ -825,7 +826,8 @@ async function loadAgentsPage() {
   const response = await fetch("/api/agents");
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const data = await response.json();
-  state.status = data.status || state.status;
+  state.status = data.status ? mergeCatalogs(data.status) : state.status;
+  await refreshCatalogsIfStale();
   state.agentHistory = data.history || [];
   state.agentPrompts = data.prompts || state.agentPrompts;
   state.confirmHistory = data.confirmHistory || [];
@@ -842,6 +844,24 @@ async function loadAgentsPage() {
   });
   renderStatus();
   renderAgentsPage({ forcePrompts: true });
+}
+
+// Jobs and history arrive without their output lines -- 377 KB of one recorded
+// history was raw agent chatter nobody was looking at. The selected job's lines
+// are fetched once and cached here.
+async function ensureJobLines(jobId) {
+  if (!jobId || state.jobLines[jobId]) return;
+  const job = allAgentJobs().find((row) => row.job_id === jobId);
+  if (!job || Array.isArray(job.lines) || !job.lineCount) return;
+  try {
+    const response = await fetch(`/api/agent-lines?job=${encodeURIComponent(jobId)}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    state.jobLines[jobId] = data.lines || [];
+    renderAgentDetail();
+  } catch {
+    // A failed fetch just leaves the log empty; the rest of the panel stands.
+  }
 }
 
 function allAgentJobs() {
@@ -934,6 +954,9 @@ function renderAgentJobList() {
   }
   if (!state.selectedAgentJobId || !jobs.some((job) => job.job_id === state.selectedAgentJobId)) {
     state.selectedAgentJobId = jobs[0].job_id;
+    // Opening the page selects the newest job; fetch its log too, not just the
+    // logs of jobs the operator clicks.
+    ensureJobLines(state.selectedAgentJobId);
   }
   jobs.forEach((job) => {
     const button = document.createElement("button");
@@ -948,6 +971,7 @@ function renderAgentJobList() {
       state.selectedAgentJobId = job.job_id;
       renderAgentJobList();
       renderAgentDetail();
+      ensureJobLines(job.job_id);
     });
     list.appendChild(button);
   });
@@ -977,7 +1001,7 @@ function renderAgentDetail() {
     $("agentDetail").textContent = "Select a job to inspect its output.";
     return;
   }
-  const lines = Array.isArray(job.lines) ? job.lines : [];
+  const lines = Array.isArray(job.lines) ? job.lines : state.jobLines[job.job_id] || [];
   const moves = Array.isArray(job.moves) && job.moves.length ? job.moves : fallbackAgentMoves(job);
   const currentMove = moves.at(-1);
   $("agentDetailTitle").textContent = job.task || job.action || "Agent task";
@@ -1635,6 +1659,24 @@ function bind() {
   $("settingsVramBtn").addEventListener("click", () => post("free_vram"));
   $("settingsRebootBtn").addEventListener("click", () => post("reboot_session"));
   $("agentRefreshBtn").addEventListener("click", () => loadAgentsPage().catch((error) => showAgentPromptNotice(`Agents refresh failed: ${error.message}`, false)));
+  $("agentMachinesCheckBtn")?.addEventListener("click", async () => {
+    const button = $("agentMachinesCheckBtn");
+    button.disabled = true;
+    button.textContent = "Checking...";
+    try {
+      const data = await post("check_machines");
+      // Discovery runs on the session loop; give a sleeping host a moment to
+      // answer before showing what changed.
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await loadAgentsPage();
+      if (data.error) showAgentPromptNotice(data.error, false);
+    } catch (error) {
+      showAgentPromptNotice(`Machine check failed: ${error.message}`, false);
+    } finally {
+      button.disabled = false;
+      button.textContent = "Check now";
+    }
+  });
   $("agentPromptSaveBtn").addEventListener("click", saveAgentPrompts);
   $("refreshCliBtn").addEventListener("click", fetchCliDiagnostics);
   $("statusRefreshBtn").addEventListener("click", () => { renderStatus(); fetchCliDiagnostics(); });

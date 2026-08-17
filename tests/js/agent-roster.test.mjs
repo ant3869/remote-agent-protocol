@@ -27,6 +27,20 @@ test("cached catalogs survive both the poll and an action response", () => {
   // catalogs the whole UI renders from.
   assert.match(source, /state\.status = mergeCatalogs\(data\.status\)/);
   const merges = source.match(/mergeCatalogs\(data\.status\)/g) || [];
-  assert.equal(merges.length, 2, "poll and post both merge");
+  // Poll, action response, and the Agents page each assign status.
+  assert.equal(merges.length, 3, "every path that assigns status merges first");
   assert.match(source, /version === state\.catalogVersion\) return/);
+});
+
+test("a job's log is fetched only for the job being inspected", () => {
+  const source = readFileSync("remote_agent_protocol/web_app/app.js", "utf8");
+  const html = readFileSync("remote_agent_protocol/web_app/index.html", "utf8");
+
+  assert.match(source, /\/api\/agent-lines\?job=/);
+  // Selecting a job and opening the page both need to ask for its log.
+  const asks = source.match(/ensureJobLines\(/g) || [];
+  assert.ok(asks.length >= 3, "defined plus both call sites");
+  // The agents page must merge catalogs like the poll does.
+  assert.match(source, /state\.status = data\.status \? mergeCatalogs\(data\.status\) : state\.status/);
+  assert.match(html, /id="agentMachinesCheckBtn"/);
 });

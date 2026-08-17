@@ -655,7 +655,9 @@ def test_agents_payload_preserves_live_output_lines_and_prompts(monkeypatch, tmp
 
     payload = app._agents_payload()
 
-    assert payload["jobs"][0]["lines"] == ["Calling Search"]
+    # The list carries the count; the lines themselves are one request away.
+    assert payload["jobs"][0]["lineCount"] == 1
+    assert app._job_lines_payload("job-1")["lines"] == ["Calling Search"]
     assert payload["jobs"][0]["result"] == "Found the log entries."
     assert "statusProtocol" in payload["prompts"]
     assert payload["prompts"]["scopePreamble"]["required"] == ["{cwd}"]
@@ -670,7 +672,9 @@ def test_brain_mode_agents_payload_keeps_persisted_history(monkeypatch, tmp_path
 
     app = WebVoiceApp()
 
-    assert app._agents_payload()["history"] == [{"job_id": "old-job", "status": "done"}]
+    assert app._agents_payload()["history"] == [
+        {"job_id": "old-job", "status": "done", "lineCount": 0}
+    ]
 
 
 def test_agents_payload_keeps_resolved_confirmation_history(monkeypatch, tmp_path):
@@ -1580,3 +1584,60 @@ def test_changing_the_tts_selection_invalidates_them_too(monkeypatch):
     app._action("tts", {"provider": "kokoro", "voice": "af_sky"})
 
     assert app._status_payload()["catalogVersion"] > before
+
+
+def test_the_agents_payload_leaves_raw_output_behind():
+    # 377 KB of one recorded history was agent chatter for jobs nobody had
+    # selected; the panel shows the log of one job at a time.
+    app = WebVoiceApp()
+    app._publish(
+        {
+            "type": "agent_job",
+            "job_id": "job-1",
+            "status": "done",
+            "lines": ["first line", "second line"],
+        }
+    )
+
+    payload = app._agents_payload()
+
+    [job] = payload["jobs"]
+    assert "lines" not in job
+    assert job["lineCount"] == 2
+
+
+def test_one_job_can_still_be_asked_for_its_output():
+    app = WebVoiceApp()
+    app._publish(
+        {"type": "agent_job", "job_id": "job-1", "status": "done", "lines": ["only line"]}
+    )
+
+    assert app._job_lines_payload("job-1") == {
+        "job_id": "job-1",
+        "lines": ["only line"],
+        "found": True,
+    }
+    assert app._job_lines_payload("nope")["found"] is False
+
+
+def test_checking_machines_without_any_configured_says_so():
+    app = WebVoiceApp()
+
+    result = app._action("check_machines", {})
+
+    assert result["ok"] is False
+    assert "configured" in result["error"]
+
+
+def test_checking_machines_asks_the_session_to_rediscover(monkeypatch):
+    app = WebVoiceApp()
+    checked = []
+    monkeypatch.setattr(
+        app._session, "remote_hosts", lambda: [{"name": "laptop", "online": False, "error": "x"}]
+    )
+    monkeypatch.setattr(app._session, "check_remote_hosts", lambda: checked.append(True))
+
+    result = app._action("check_machines", {})
+
+    assert result["ok"] is True
+    assert checked == [True]
