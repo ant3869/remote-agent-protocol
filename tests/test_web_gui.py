@@ -945,12 +945,12 @@ def test_test_speak_button_calls_session_tts(monkeypatch):
     assert spoken == ["This is the selected text to speech voice."]
 
 
-def test_saved_model_and_voice_defaults_are_loaded_at_boot(monkeypatch, tmp_path):
+def test_saved_model_is_loaded_at_boot(monkeypatch, tmp_path):
     state_path = tmp_path / "state.json"
     app_state.save_state(
         state_path,
         app_state.AppState(
-            persona="Jess",
+            persona="Coach",
             tool_user="mock",
             voice_mode="wake_word",
             model="gemma-test",
@@ -963,16 +963,41 @@ def test_saved_model_and_voice_defaults_are_loaded_at_boot(monkeypatch, tmp_path
         ),
     )
     monkeypatch.setattr(cfg, "APP_STATE_FILE", str(state_path))
+    monkeypatch.setattr(persona_config, "load_config", lambda: persona_config.PersonaConfig())
 
     app = WebVoiceApp()
 
+    # Model and the coqui detail fields still restore independently of persona.
     assert app._model == "gemma-test"
-    assert app._voice == "speaker-a"
     assert app._voice_mode == "wake_word"
+    assert app._coqui_model == "tts_models/en/ljspeech/vits"
     assert app._session._startup_model == "gemma-test"
-    assert app._session._startup_voice == "speaker-a"
-    assert app._session._startup_tts_backend == "coqui"
-    assert app._session._startup_tts_model == "tts_models/en/ljspeech/vits"
+
+
+def test_voice_and_tts_provider_always_follow_the_boot_persona(monkeypatch, tmp_path):
+    # Live failure: Butler booted speaking Gremlin's af_sky, saved from an
+    # earlier direct voice pick that never touched the persona field --
+    # voice/provider must come from the active persona, not a stale
+    # independent value, exactly like picking a persona live already does.
+    state_path = tmp_path / "state.json"
+    app_state.save_state(
+        state_path,
+        app_state.AppState(
+            persona="Coach",
+            voice="af_sky",
+            tts_provider="coqui",
+            coqui_speaker="speaker-a",
+        ),
+    )
+    monkeypatch.setattr(cfg, "APP_STATE_FILE", str(state_path))
+    monkeypatch.setattr(persona_config, "load_config", lambda: persona_config.PersonaConfig())
+
+    app = WebVoiceApp()
+
+    assert app._voice == "am_fenrir"  # Coach's own built-in voice
+    assert app._tts_provider == "kokoro"  # Coach's own built-in backend
+    assert app._session._startup_voice == "am_fenrir"
+    assert app._session._startup_tts_backend == "kokoro"
 
 
 def test_tool_user_action_survives_session_rebuild(monkeypatch, tmp_path):

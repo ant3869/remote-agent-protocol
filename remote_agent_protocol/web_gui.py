@@ -149,14 +149,19 @@ class WebVoiceApp:
         )
         self._persona = self._persona_by_name(boot_name)
         self._model = self._app_state.model or self._persona.model_name(cfg.LLM_MODEL)
-        self._voice = self._app_state.voice or self._persona.voice
-        self._tts_provider = self._app_state.tts_provider or self._persona.voice_backend
         self._coqui_model = self._app_state.coqui_model or cfg.COQUI_TTS_MODEL
         self._coqui_speaker = self._app_state.coqui_speaker or cfg.COQUI_TTS_SPEAKER
         self._coqui_language = self._app_state.coqui_language or cfg.COQUI_TTS_LANGUAGE
         self._coqui_device = self._app_state.coqui_device or cfg.COQUI_TTS_DEVICE
-        if self._tts_provider == "coqui" and self._coqui_speaker:
-            self._voice = self._coqui_speaker
+        # Voice/TTS provider always follow the boot persona, exactly like
+        # picking a persona live already does (_action_persona ->
+        # _use_persona_tts_defaults). Restoring a saved *independent* voice
+        # here instead meant a voice hand-picked once in an earlier session
+        # kept overriding every later persona, forever, with no way to tell
+        # why -- confirmed live: Butler booted speaking Gremlin's af_sky,
+        # left over from an earlier direct voice pick that never touched
+        # the persona field it silently kept outliving.
+        self._use_persona_tts_defaults(self._persona)
         self._voice_mode = multimodal_prompt.normalize_voice_mode(self._app_state.voice_mode)
         self._muted = True
         self._s2s_mute_ready = True

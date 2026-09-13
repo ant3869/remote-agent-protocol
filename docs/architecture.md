@@ -192,6 +192,16 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
 - The repository vendors the complete Pipecat framework. Upstream updates should
   be merged from the `upstream` Git remote without mixing custom code into
   `src/pipecat` unless the framework itself must change.
+- Voice and TTS provider always follow the active persona at boot, the same
+  way selecting a persona live does (`WebVoiceApp._use_persona_tts_defaults`).
+  A voice picked directly in Settings -> Voice, independent of the persona
+  picker, applies only for the rest of that run; it never survives a restart
+  once a different (or the same) persona is loaded, so it cannot silently
+  drift away from what the active persona is configured to sound like. Want a
+  persona's own voice changed permanently? Edit that persona (built-in
+  override in `data/persona_overrides.json`, or a custom persona), not the
+  Voice dropdown alone. `model` and the Coqui detail fields (model/speaker/
+  language/device) still restore independently of persona across restarts.
 - Agent consultation's answer-file rendezvous has a narrow window: a consult
   slot is empty between being accepted and the answer landing, so another
   process that both knew the random mailbox token and won that timing could
