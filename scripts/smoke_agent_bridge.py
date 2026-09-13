@@ -1,6 +1,10 @@
 """Smoke test: run a real backend through AgentBridge end-to-end.
 
 Usage: python scripts/smoke_agent_bridge.py [agent] [task]
+
+To smoke-test the "mock" backend specifically, set AGENT_MOCK_BACKEND_ENABLED=1
+first -- it's excluded from cfg.AGENT_BACKENDS by default so a live session can
+never dispatch real work to it by mistake.
 """
 
 import asyncio

@@ -260,6 +260,13 @@ class BrainSession:
 
         consumed = self._maybe_consume_confirmation(text)
         if consumed is not None:
+            # A real dispatch (or denial) already happened deterministically;
+            # the model is only being asked to narrate it. Left False, the
+            # narration reply is free to invent its OWN [[delegate:]] marker
+            # for the same task it is merely acknowledging, redispatching it
+            # a second time (live failure: approving "ping each agent" ran it
+            # twice, the second time from the acknowledgment reply itself).
+            self._control_turn = True
             return consumed
         cancel_request = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
         if cancel_request is not None:
@@ -276,6 +283,10 @@ class BrainSession:
         if parsed is not None:
             agent, task = parsed
             logger.info(f"Brain delegation -> [{agent}] {task}")
+            # Same reasoning as the confirmation branch above: this already
+            # dispatched for real, so the reply generated from _delegate_ack's
+            # framing must not be free to dispatch it again via its own marker.
+            self._control_turn = True
             return self._delegate_ack(agent, task)
         return llm_content or text
 

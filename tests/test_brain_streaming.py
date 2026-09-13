@@ -144,6 +144,60 @@ async def test_cancel_turns_never_dispatch_delegation_markers(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_resolved_delegation_never_dispatches_a_second_marker(monkeypatch):
+    # Live failure (jess_runtime.log 2026-09-13 12:37:38-40): "ping each agent"
+    # dispatched once through deterministic routing, then a second identical
+    # job spawned ~1.6s later from the acknowledgment reply's own marker --
+    # the model, asked only to narrate a dispatch that already happened, was
+    # still free to invent its own [[delegate:]] for the same task.
+    brain = _brain(monkeypatch, ["I have tasked my agent with pinging. ", "[[delegate: ping each network device]]"])
+
+    async def deterministic(_text):
+        return ("mock", "ping each network device")
+
+    monkeypatch.setattr(brain, "_resolve_delegation", deterministic)
+    dispatched = []
+    monkeypatch.setattr(
+        brain,
+        "_delegate_ack",
+        lambda agent, task, cwd=None: dispatched.append(("delegate_ack", agent, task)) or "ack",
+    )
+
+    await _collect(brain, "prove it, have each one ping each one")
+
+    assert dispatched == [("delegate_ack", "mock", "ping each network device")]
+
+
+@pytest.mark.asyncio
+async def test_an_approved_confirmation_never_dispatches_a_second_marker(monkeypatch):
+    # Same failure mode as above, reachable through the confirmation-approval
+    # path instead of deterministic routing: an approved (often destructive)
+    # task must not be free to run a second time from its own acknowledgment.
+    brain = _brain(monkeypatch, ["Approved and running. ", "[[delegate: delete the old logs]]"])
+    monkeypatch.setattr(cfg, "AGENT_CONFIRM_ENABLED", True)
+    brain._pending_confirmations["confirm-1"] = ("hermes", "delete the old logs", None, "destructive")
+    started = []
+
+    async def fake_start(*args, **kwargs):
+        started.append(args)
+        return "job-1"
+
+    monkeypatch.setattr(brain._bridge, "start", fake_start)
+    dispatched = []
+    monkeypatch.setattr(
+        brain,
+        "_delegate_ack",
+        lambda agent, task, cwd=None: dispatched.append((agent, task)) or "ack",
+    )
+
+    await _collect(brain, "yes")
+    await asyncio.sleep(0)  # let the fire-and-forget dispatch task actually run
+
+    assert dispatched == []  # the marker in the narration must not fire _delegate_ack again
+    assert len(started) == 1  # exactly the one dispatch from the approval itself
+
+
+@pytest.mark.asyncio
 async def test_announce_turns_never_dispatch_delegation_markers(monkeypatch):
     # Live failure: the butler's job-summary narration included a marker,
     # which spawned a brand-new job every time a job finished. Job mitosis.

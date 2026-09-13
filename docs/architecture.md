@@ -334,6 +334,24 @@ answer (still staged into the LLM context). `AGENT_ANNOUNCE_START` gates
 spoken job-start narration, which only fires when the starting job is the
 sole active one.
 
+In brain mode, a turn that already dispatched deterministically -- a routed
+delegation, or an approved/denied confirmation -- marks itself a control turn
+(`self._control_turn = True`) before generating the reply that narrates it.
+Left unset, the model's own narration is free to invent a second
+`[[delegate:]]` marker for the same task and run it again, since the LLM
+delegate instruction is unconditionally live in its system prompt and has no
+way to know a real dispatch already happened (confirmed live,
+`jess_runtime.log` 2026-09-13 12:37:38-40: "ping each agent" ran twice, ~1.6s
+apart, the second time from the acknowledgment reply itself).
+
+`AGENT_MOCK_BACKEND_ENABLED` (off by default) gates whether the "mock"
+backend -- which instantly "completes" any task with a canned response, for
+smoke-testing dispatch/announce/consult without a real agent installed -- is
+present in `AGENT_BACKENDS`/`AGENT_SPOKEN_ALIASES` at all. Confirmed live: a
+session had it selected as the active default agent, so every delegation
+"succeeded" with fabricated results and nothing real ever ran. Automated
+tests build their own backend dicts and are unaffected by this flag.
+
 `AGENT_CONFIRM_LOOP_LIMIT` defaults to `2` and stops a one-shot backend from
 repeatedly relaunching when it keeps asking for confirmation instead of doing
 the approved work.

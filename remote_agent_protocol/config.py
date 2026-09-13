@@ -383,7 +383,7 @@ MEM0_SEARCH_THRESHOLD = 0.1
 #
 # AGENT_BACKENDS: name -> command template. Placeholders:
 #   {task}   -> the task text        {python} -> this venv's python
-# "mock" ships with the repo for testing. Add real agents once installed, e.g.
+# Add real agents once installed, e.g.
 #   "hermes":   ["hermes", "-p", "{task}"]
 #   "openclaw": ["openclaw", "run", "{task}"]
 # (exact flags depend on the installed CLI -- adjust after `hermes --help`).
@@ -391,8 +391,21 @@ MEM0_SEARCH_THRESHOLD = 0.1
 # AGENT_ANNOUNCE: when True, a finished/failed job injects an update into the
 # conversation and Jess SPEAKS it immediately.
 # ---------------------------------------------------------------------------
+# "mock" instantly "completes" any task with a canned response -- useful for
+# exercising the dispatch/announce/consult machinery without a real agent
+# installed, but it must never be reachable from a live session: it would
+# silently swallow real requests and report fabricated success. Confirmed
+# live (jess_runtime.log 2026-09-13) -- a session had it selected as the
+# active default agent, so every delegation "succeeded" with a canned "Mock
+# task completed" and nothing real ever ran. Disabled by default; opt in with
+# AGENT_MOCK_BACKEND_ENABLED for a deliberate manual smoke test against a live
+# GUI/brain session. Automated tests build their own backend dicts rather
+# than reading this one, so they are unaffected either way.
+AGENT_MOCK_BACKEND_ENABLED = _env_bool("AGENT_MOCK_BACKEND_ENABLED", False)
+
 AGENT_BACKENDS = {
-    "mock": ["{python}", "-u", str(_ROOT / "scripts" / "mock_agent.py"), "{task}"],
+    **({"mock": ["{python}", "-u", str(_ROOT / "scripts" / "mock_agent.py"), "{task}"]}
+       if AGENT_MOCK_BACKEND_ENABLED else {}),
     # Hermes Agent (NousResearch) -- installed at %LOCALAPPDATA%\hermes.
     # Single-query mode streams progress and persists a session ID that
     # AgentBridge resumes. --quiet would hide productive activity from the host.
@@ -708,8 +721,7 @@ AGENT_SPOKEN_ALIASES = {
     "puppy": "code-puppy",
     # "code papi" is how the transcriber hears it in a noisy room.
     "code papi": "code-puppy",
-    "mock": "mock",
-    "the mock agent": "mock",
+    **({"mock": "mock", "the mock agent": "mock"} if AGENT_MOCK_BACKEND_ENABLED else {}),
     "codex": "codex",
     # STT renders "codex" as "codecs" often enough to earn an alias.
     "codecs": "codex",
