@@ -525,6 +525,7 @@ function renderStatus() {
   $("setupCoquiModel").textContent = s.tts?.coqui?.selectedModel || "--";
   $("settingsModel").textContent = s.model || "--";
   $("settingsAgent").textContent = s.toolUser;
+  $("settingsVersion").textContent = s.appVersion || "--";
   $("settingsMode").textContent = labelMode(s.voiceMode);
   state.wake = state.wake || s.wake;
   renderWakeStatus();

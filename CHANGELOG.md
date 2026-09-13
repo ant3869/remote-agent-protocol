@@ -10,7 +10,34 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-09-13
+
 ### Added
+
+- Spoken updates about agent work are written fresh every time instead of
+  repeating stock sentences. "Still working on it", heard a third time, is a
+  progress bar with a voice; each line is now generated from what the job is
+  actually doing, in the active persona's character. It runs on the small
+  model the intent router already keeps resident, so it costs no extra VRAM
+  and never queues behind the reply you are waiting on, and a missed deadline
+  speaks a varied stock line rather than making audio wait. Progress
+  narration is throttled on *facts* -- a job whose situation has not changed
+  stays quiet, however differently it would have been worded.
+- Each delegated backend speaks in its own voice (`HARNESS_VOICES`), so which
+  agent finished is audible before the words register, whichever persona is
+  currently front of house.
+- Agents share a commons: a `_commons` folder in the agent workspace where
+  they leave findings for each other and lessons for their own next run, with
+  a short briefing on every dispatch pointing at it. Separate CLI processes
+  stop rediscovering the same facts. Notes are written by agents, so they are
+  sanitized going in and fenced as untrusted coming out, and are never pasted
+  into the prompt of a backend that runs with tool approval disabled.
+- Agents can ask each other a question mid-task and hear the answer read back
+  in the other agent's voice (`@@JESS_CONSULT`). The limits are structural: a
+  consulted agent cannot consult in turn, each job gets a fixed number of
+  questions, an agent already in the chain cannot be asked again, elevated
+  backends are never a target, and a question that asks for a change rather
+  than an answer is refused outright.
 
 - The Agents page has a Check now button for remote machines, so a host you have
   just woken can be re-checked without waiting for the heartbeat interval.

@@ -288,7 +288,9 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
         await voice_session._announce_agent_job(job)
 
         self.assertEqual(voice_session._model_recovery, ("code-puppy", "find VR games"))
-        self.assertIn("usage", worker.frames[0].text.lower())
+        # The lead-in is written fresh every time, but the words the user has
+        # to say back must survive verbatim.
+        self.assertIn("switch code-puppy to openai", worker.frames[0].text.lower())
 
     async def test_contextual_switch_selects_failed_agent_without_retrying(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
@@ -330,7 +332,39 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(worker.frames[0], TTSSpeakFrame)
         self.assertIn("Dog drawn in Paint", worker.frames[0].text)
 
-    async def test_long_progress_event_is_spoken_once(self):
+    async def test_finished_job_speaks_in_its_harness_voice_and_restores(self):
+        """A harness's own voice is used for its result, then the pipeline is
+        switched back to the front-of-house persona voice -- so the next
+        normal conversational reply is never stuck in the harness's voice."""
+        from pipecat.frames.frames import TTSUpdateSettingsFrame
+
+        class FakeTTS:
+            class Settings:
+                def __init__(self, voice, **_):
+                    self.voice = voice
+
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        worker = RecordingWorker()
+        voice_session._worker = worker
+        voice_session._tts = FakeTTS()
+        job = agent_bridge.AgentJob("job-1", "code-puppy", "draw a dog")
+        job.status = agent_bridge.STATUS_DONE
+        job.summary = "Dog drawn in Paint"
+
+        await voice_session._announce_agent_job(job)
+
+        self.assertEqual(len(worker.frames), 3)
+        switch, speak, restore = worker.frames
+        self.assertIsInstance(switch, TTSUpdateSettingsFrame)
+        self.assertEqual(switch.delta.voice, session.cfg.HARNESS_VOICES["code-puppy"])
+        self.assertIsInstance(speak, TTSSpeakFrame)
+        self.assertIn("Dog drawn in Paint", speak.text)
+        self.assertIsInstance(restore, TTSUpdateSettingsFrame)
+        self.assertEqual(restore.delta.voice, personas.DEFAULT_PERSONA.voice)
+
+    async def test_unchanged_progress_detail_is_not_repeated(self):
+        """Throttling is on facts, not phrasing: when nothing about the job has
+        changed there is nothing new to say, however differently it'd be said."""
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
         worker = RecordingWorker()
         voice_session._worker = worker
@@ -341,8 +375,31 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
             "agent": "code-puppy",
             "task": "draw a dog",
             "state": "in_progress",
-            "action": "Still working",
-            "elapsed_secs": 30,
+            "action": "rendering the ears",
+            "elapsed_secs": 300,
+        }
+
+        voice_session._on_agent_event(event)
+        await asyncio.sleep(0)
+        voice_session._agent_last_spoken["job-1"] = (0.0, "rendering the ears")
+        voice_session._on_agent_event(event)
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(worker.frames), 1)
+
+    async def test_repeated_waiting_event_is_spoken_once(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        worker = RecordingWorker()
+        voice_session._worker = worker
+        event = {
+            "type": "agent_job",
+            "event": "progress",
+            "job_id": "job-1",
+            "agent": "code-puppy",
+            "task": "draw a dog",
+            "state": "waiting",
+            "action": "needs a filename",
+            "elapsed_secs": 5,
         }
 
         voice_session._on_agent_event(event)
@@ -406,7 +463,9 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
 
         self.assertEqual(len(worker.frames), 1)
-        self.assertIn("started", worker.frames[0].text)
+        # The wording is written fresh each time, so only the fact that the
+        # agent is named -- the part that keeps it unambiguous -- is asserted.
+        self.assertIn("code-puppy", worker.frames[0].text.lower())
 
     async def test_all_finished_event_is_spoken(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
@@ -424,8 +483,7 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(worker.frames), 1)
         self.assertIsInstance(worker.frames[0], TTSSpeakFrame)
-        self.assertIn("All active agents", worker.frames[0].text)
-        self.assertIn("completed", worker.frames[0].text)
+        self.assertTrue(worker.frames[0].text.strip())
 
 
 if __name__ == "__main__":

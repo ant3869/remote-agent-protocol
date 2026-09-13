@@ -34,7 +34,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from remote_agent_protocol import remote_protocol
+from remote_agent_protocol import collab, remote_protocol, voice_commands
+from remote_agent_protocol import config as cfg
 
 if TYPE_CHECKING:  # imported for typing only; keeps this module injection-only
     from remote_agent_protocol.remote_client import RemoteRegistry
@@ -259,6 +260,15 @@ class AgentJob:
     failure_detail: str = ""
     model_label: str = ""
     host_modified: bool = False  # the job touched the host app's own source
+    # Consultation bookkeeping. This is what makes the limits structural: an
+    # agent may ask for whatever it likes, but depth and chain travel with the
+    # job rather than with the request, so no wording gets a job past them.
+    consult_depth: int = 0  # 0 = the user's own job; 1 = answering a consult
+    consult_chain: tuple[str, ...] = ()  # agents already in this chain
+    consults_spent: int = 0  # questions this job has already asked
+    consults_seen: int = 0  # consult lines printed, accepted or not
+    consult_token: str = ""  # this job's private mailbox for consult answers
+    timeout_secs: float | None = None  # overrides the bridge default for this job
     _t0: float = field(default=0.0, repr=False)
     _last_status: float = field(default=0.0, repr=False)
     _host_before: str | None = field(default=None, repr=False)
@@ -293,9 +303,73 @@ def detect_provider_failure(line: str) -> str | None:
     return None
 
 
+_CONSULT_MARKER = "@@JESS_CONSULT"
+_CONSULT_PROTOCOL = """
+If another agent on this machine would know something you need, you may ask ONE
+of them one question. Print a single line:
+{marker} {{"id":"q1","agent":"<name>","question":"<your question>"}}
+Then read the file named after your id, with a .json suffix, in this folder:
+{folder}
+Check it every few seconds until it appears. It always appears -- on refusal
+too -- and looks like {{"ok":true,"answer":"..."}}. While
+you wait, print @@JESS_STATUS {{"state":"waiting","action":"waiting on <name>"}}
+each time you check, or you will look hung and be stopped. If it has not arrived
+after about {tries} checks, carry on without it and say so.
+You may ask: {peers}.
+Ask only when their answer changes what you do. You get {budget} question(s).
+""".strip()
+
+
 def with_status_protocol(task: str) -> str:
     """Append the small stdout status contract understood by AgentBridge."""
     return f"{task}\n\n{_STATUS_PROTOCOL}"
+
+
+def consult_protocol(peers: list[str], folder: str, *, budget: int, tries: int = 20) -> str:
+    """The stdout contract for asking another agent a question.
+
+    Only appended when a job may actually ask -- an agent told it can consult
+    when it cannot would burn a turn discovering otherwise.
+    """
+    if not peers:
+        return ""
+    return _CONSULT_PROTOCOL.format(
+        marker=_CONSULT_MARKER,
+        folder=folder,
+        peers=", ".join(sorted(peers)),
+        budget=budget,
+        tries=tries,
+    )
+
+
+def parse_consult_line(line: str) -> dict | None:
+    """Read one ``@@JESS_CONSULT`` line, or None if this isn't a real request.
+
+    Deliberately strict: everything here came from an agent's stdout, the id
+    later becomes a filename, and agent CLIs routinely echo the instructions
+    they were given straight back -- so the protocol's own example must not
+    read as somebody asking a question.
+    """
+    stripped = line.strip()
+    if not stripped.startswith(_CONSULT_MARKER):
+        return None
+    payload = stripped[len(_CONSULT_MARKER) :].strip()
+    try:
+        raw = json.loads(payload)
+    except ValueError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    consult_id = str(raw.get("id") or "").strip()
+    agent = str(raw.get("agent") or "").strip()
+    question = " ".join(str(raw.get("question") or "").split())
+    if not consult_id or not agent or not question:
+        return None
+    # The placeholders from the example, still in angle brackets: an echo of
+    # the contract, not a question.
+    if any(value.startswith("<") and value.endswith(">") for value in (agent, question)):
+        return None
+    return {"id": consult_id, "agent": agent, "question": question[:600]}
 
 
 def status_protocol() -> str:
@@ -647,13 +721,63 @@ def task_label(task: str) -> str:
     return ""
 
 
-def announcement(job: AgentJob) -> str:
-    """One-sentence-ish update for Jess to relay to the user."""
-    tamper = (
-        " Warning: this job modified my own source files -- review the working tree."
-        if job.host_modified
-        else ""
-    )
+def _trim_spoken_answer(answer: str, max_chars: int) -> str:
+    """Word-boundary trim for a long spoken answer, with a pointer to the rest.
+
+    The untrimmed text is still staged into the LLM context by the caller, so
+    "ask me for the rest" is a real offer, not a dead end.
+    """
+    cut = answer[:max_chars].rsplit(" ", 1)[0].rstrip(" ,.;:-")
+    return f"{cut}... ask me for the rest if you want the full answer."
+
+
+_TAMPER_WARNING = "Warning: this job modified my own source files -- review the working tree."
+
+
+def tamper_warning(job: AgentJob) -> str:
+    """The host-repo tamper warning for this job, or "" when it behaved."""
+    return _TAMPER_WARNING if job.host_modified else ""
+
+
+def recovery_hint(job: AgentJob) -> str:
+    """The exact words that recover a provider-side failure, or "" if none do.
+
+    Kept verbatim rather than narrated: the phrasing *is* the instruction the
+    user says back, so this is one of the few lines worth repeating exactly.
+    """
+    if job.failure_kind == "quota":
+        return f"Say 'switch {job.agent} to OpenAI' and then 'retry'."
+    if job.failure_kind in {"rate_limit", "capacity"}:
+        return f"You can say 'switch {job.agent} to OpenAI'."
+    return ""
+
+
+def spoken_answer(job: AgentJob, *, max_chars: int | None = None) -> str:
+    """Only the substance a finished job produced, trimmed for speech.
+
+    :func:`announcement` wraps this in fixed framing ("<agent> finished: ..."),
+    which is the repetition generated narration exists to replace: the
+    narrator writes a fresh lead-in and this supplies the part worth hearing.
+    """
+    if job.status != STATUS_DONE:
+        return ""
+    summary = job.summary if job.summary and not _unsafe_public_text(job.summary) else ""
+    summary = summary or summarize_output(job.lines)
+    answer = job.result if job.result and not _unsafe_public_text(job.result) else summary
+    if not answer:
+        return ""
+    if max_chars and len(answer) > max_chars:
+        answer = _trim_spoken_answer(answer, max_chars)
+    return answer
+
+
+def announcement(job: AgentJob, *, max_answer_chars: int | None = None) -> str:
+    """One-sentence-ish update for Jess to relay to the user.
+
+    ``max_answer_chars`` caps how much of a STATUS_DONE answer is read aloud;
+    None (the default) always speaks the full answer, unchanged from before.
+    """
+    tamper = f" {_TAMPER_WARNING}" if job.host_modified else ""
     questions = follow_up_questions(job)
     if questions:
         joined = " ".join(questions)
@@ -674,6 +798,8 @@ def announcement(job: AgentJob) -> str:
                 f"Agent '{job.agent}' finished {ref} but returned no result to relay -- "
                 f"re-run it to capture the output.{tamper}"
             )
+        if max_answer_chars and len(answer) > max_answer_chars:
+            answer = _trim_spoken_answer(answer, max_answer_chars)
         return f"{job.agent} finished: {answer}{tamper}"
     if job.status == STATUS_CANCELLED:
         return f"{job.agent} cancelled {ref}.{tamper}"
@@ -751,11 +877,15 @@ class AgentBridge:
         self._completion_grace_secs = completion_grace_secs
         self._workspace_dir = workspace_dir
         self._scope_preamble = scope_preamble
+        # The shared space agents leave notes for each other in (collab.py).
+        self._commons_enabled = bool(workspace_dir) and cfg.AGENT_COMMONS_ENABLED
         self._host_repo = host_repo
         self._model_targets = model_targets or {}
         self._model_overrides: dict[str, list[str]] = {}
         self._model_labels: dict[str, str] = {}
         self._session_ids: dict[str, str] = {}
+        # child job id -> (asker's mailbox token, consult id, who asked, question)
+        self._pending_consults: dict[str, tuple[str, str, str, str]] = {}
         # One lock per session-based agent (hermes/hermes-yolo): only one of
         # its turns may be in flight at a time, so a later turn always waits
         # for the earlier one to fully exit before resuming the same on-disk
@@ -822,8 +952,25 @@ class AgentBridge:
 
     # -- lifecycle ------------------------------------------------------------
 
+    def _emit(self, payload: dict) -> None:
+        """Push one event to the host; never let a listener break the bridge."""
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(payload)
+        except Exception as e:
+            logger.warning(f"agent event listener raised: {e}")
+
     async def start(
-        self, agent: str, task: str, cwd: str | None = None, *, announce_start: bool = False
+        self,
+        agent: str,
+        task: str,
+        cwd: str | None = None,
+        *,
+        announce_start: bool = False,
+        consult_depth: int = 0,
+        consult_chain: tuple[str, ...] = (),
+        timeout_secs: float | None = None,
     ) -> str:
         """Spawn a job and return its id immediately; output streams via events."""
         job = AgentJob(
@@ -833,6 +980,9 @@ class AgentBridge:
             machine=self.machine_for(agent),
             announce_start=announce_start,
             model_label=self._model_labels.get(agent, ""),
+            consult_depth=consult_depth,
+            consult_chain=consult_chain,
+            timeout_secs=timeout_secs,
         )
         job._t0 = time.monotonic()
         job._last_status = job._t0
@@ -941,11 +1091,43 @@ class AgentBridge:
             self._emit_all_finished_if_idle()
             job._launch_done.set()
             return
-        command_task = (
-            task
-            if agent == "mock"
-            else with_status_protocol(with_scope(task, cwd, self._scope_preamble))
-        )
+        if agent == "mock":
+            command_task = task
+        else:
+            scoped = with_scope(task, cwd, self._scope_preamble)
+            # Off the loop for the same reason the write in _notify_finished
+            # is: reading the commons is a couple of small files, but a slow
+            # disk must not stall the voice pipeline mid-dispatch.
+            briefed = await asyncio.to_thread(
+                collab.with_commons,
+                scoped,
+                self._workspace_dir if self._commons_enabled else None,
+                agent,
+                findings=cfg.AGENT_COMMONS_FINDINGS,
+                lessons=cfg.AGENT_COMMONS_LESSONS,
+                elevated=agent in cfg.AGENT_ELEVATED_BACKENDS,
+            )
+            command_task = with_status_protocol(briefed)
+            # Only offered when this job could actually ask: an agent told it
+            # may consult when it may not spends a turn finding out otherwise.
+            peers = self.consult_peers(job)
+            if peers:
+                # A mailbox of its own, named unpredictably: the id in a request
+                # is agent-chosen (the protocol's example is "q1"), so a shared
+                # folder would have concurrent jobs colliding by accident and
+                # would let anything else with disk access stage an answer
+                # before the real one arrives.
+                job.consult_token = collab.new_consult_token()
+                folder = await asyncio.to_thread(
+                    collab.consults_dir, self._workspace_dir, job.consult_token
+                )
+                if folder is None:
+                    job.consult_token = ""
+                else:
+                    await asyncio.to_thread(collab.prune_consults, self._workspace_dir)
+                    command_task += "\n\n" + consult_protocol(
+                        peers, str(folder), budget=cfg.AGENT_CONSULT_BUDGET
+                    )
         command = build_command(
             self._backends[agent], command_task, extra_args=self._model_overrides.get(agent)
         )
@@ -1048,6 +1230,150 @@ class AgentBridge:
 
     # -- internals ------------------------------------------------------------
 
+    def consult_peers(self, job: AgentJob) -> list[str]:
+        """Backends this job is actually allowed to ask, which may be none."""
+        if not cfg.AGENT_CONSULT_ENABLED or not self._commons_enabled:
+            return []
+        if job.consult_depth >= cfg.AGENT_CONSULT_MAX_DEPTH:
+            return []
+        if job.consults_spent >= cfg.AGENT_CONSULT_BUDGET:
+            return []
+        return [
+            name
+            for name in self._backends
+            if name != job.agent
+            and name != "mock"
+            and name not in job.consult_chain
+            and name not in cfg.AGENT_ELEVATED_BACKENDS
+        ]
+
+    async def _refuse_consult(self, job: AgentJob, request: dict, reason: str) -> None:
+        """Answer a consult with a refusal, so the asker stops waiting."""
+        logger.info(f"Refused consult from {job.agent} to {request['agent']}: {reason}")
+        # Off the loop: a refusal is cheap for the agent to trigger, so it must
+        # be cheap for the voice pipeline to absorb.
+        await asyncio.to_thread(
+            collab.write_consult_answer,
+            self._workspace_dir,
+            job.consult_token,
+            request["id"],
+            ok=False,
+            reason=reason,
+            agent=request["agent"],
+        )
+        self._emit(
+            {
+                "type": "agent_consult",
+                "event": "refused",
+                "job_id": job.job_id,
+                "agent": job.agent,
+                "peer": request["agent"],
+                "question": request["question"],
+                "reason": reason,
+            }
+        )
+
+    async def _handle_consult(self, job: AgentJob, request: dict) -> None:
+        """Vet one agent's question for another, and run it if it passes.
+
+        Every refusal still writes an answer file: an agent polling for a file
+        that never lands is an agent that hangs until its timeout.
+        """
+        peer = request["agent"]
+        if not collab.consult_id_ok(request["id"]) or not job.consult_token:
+            return  # unusable as a filename, so there is nowhere to reply
+        # Printing consult lines is free for an agent and costs us a file write
+        # each, so the *attempts* are capped too, not only the accepted ones.
+        job.consults_seen += 1
+        if job.consults_seen > cfg.AGENT_CONSULT_BUDGET * 4:
+            logger.warning(f"Ignoring further consult lines from {job.agent} ({job.job_id})")
+            return
+        allowed = self.consult_peers(job)
+        if not allowed:
+            await self._refuse_consult(job, request, "consulting is not available for this job")
+            return
+        if peer not in allowed:
+            await self._refuse_consult(
+                job, request, f"'{peer}' cannot be asked; available: {', '.join(allowed)}"
+            )
+            return
+        if voice_commands.requires_confirmation(
+            peer, request["question"], destructive_words=cfg.AGENT_DESTRUCTIVE_WORDS
+        ):
+            # The user asked for the original task, not for this. Anything that
+            # mutates the system needs them, and they are not in this loop.
+            await self._refuse_consult(
+                job, request, "that question asks for a change, not an answer"
+            )
+            return
+        if not await asyncio.to_thread(
+            collab.consult_slot_is_free, self._workspace_dir, job.consult_token, request["id"]
+        ):
+            # Something is already sitting where this answer would go, so the
+            # asker would read that instead of the peer's reply.
+            logger.warning(f"Consult slot {request['id']!r} was already occupied; refusing")
+            await self._refuse_consult(job, request, "that question id is already in use")
+            return
+
+        job.consults_spent += 1
+        question = collab.sanitize(request["question"])
+        if not question:
+            await self._refuse_consult(job, request, "the question could not be relayed")
+            return
+        self._emit(
+            {
+                "type": "agent_consult",
+                "event": "asked",
+                "job_id": job.job_id,
+                "agent": job.agent,
+                "peer": peer,
+                "question": question,
+            }
+        )
+        task = (
+            f"Answer this question from another agent working on a related task. "
+            f"Answer it and stop: do not change any files, install anything, or "
+            f"start work of your own.\n\nQuestion: {question}"
+        )
+        child_id = await self.start(
+            peer,
+            task,
+            consult_depth=job.consult_depth + 1,
+            consult_chain=job.consult_chain + (job.agent,),
+            timeout_secs=cfg.AGENT_CONSULT_TIMEOUT_SECS,
+        )
+        self._pending_consults[child_id] = (job.consult_token, request["id"], job.agent, question)
+
+    async def _answer_consult(self, job: AgentJob) -> None:
+        """Hand a finished consult's answer back to the agent waiting on it."""
+        pending = self._pending_consults.pop(job.job_id, None)
+        if pending is None:
+            return
+        token, consult_id, asker, question = pending
+        answer = job.result or job.summary
+        ok = job.status == STATUS_DONE and bool(answer)
+        await asyncio.to_thread(
+            collab.write_consult_answer,
+            self._workspace_dir,
+            token,
+            consult_id,
+            ok=ok,
+            answer=answer,
+            reason="" if ok else f"{job.agent} could not answer",
+            agent=job.agent,
+        )
+        self._emit(
+            {
+                "type": "agent_consult",
+                "event": "answered" if ok else "unanswered",
+                "job_id": job.job_id,
+                "agent": job.agent,
+                "peer": asker,
+                "question": question,
+                "answer": answer if ok else "",
+            }
+        )
+
     async def _fail_fast(self, job: AgentJob, reason: str) -> str:
         job.status = STATUS_FAILED
         job.state = STATE_FAILED
@@ -1109,9 +1435,11 @@ class AgentBridge:
             pending_status.clear()
             return False
 
+        # A consult is one question, so it is given less rope than a full job.
+        silence_timeout = job.timeout_secs or self._timeout_secs
         while True:
-            if self._timeout_secs > 0:
-                raw = await asyncio.wait_for(proc.stdout.readline(), self._timeout_secs)
+            if silence_timeout > 0:
+                raw = await asyncio.wait_for(proc.stdout.readline(), silence_timeout)
             else:
                 raw = await proc.stdout.readline()
             if not raw:
@@ -1124,6 +1452,11 @@ class AgentBridge:
             ):
                 self._session_ids[job.agent] = session_match.group(1)
                 continue
+            consult_request = parse_consult_line(line)
+            if consult_request is not None:
+                await self._handle_consult(job, consult_request)
+                continue
+
             failure_kind = detect_provider_failure(line)
             if failure_kind:
                 job.failure_kind = failure_kind
@@ -1194,7 +1527,9 @@ class AgentBridge:
             if failed and job.failure_kind and not job.summary:
                 job.summary = job.failure_detail
             if failed and not job.summary and job.returncode is not None:
-                job.summary = f"Agent failed with exit code {job.returncode} without reporting details"
+                job.summary = (
+                    f"Agent failed with exit code {job.returncode} without reporting details"
+                )
                 job.failure_detail = job.summary
         if job.status == STATUS_DONE and not job.result:
             job.result = fallback_result(job.lines)
@@ -1245,6 +1580,22 @@ class AgentBridge:
 
     async def _notify_finished(self, job: AgentJob) -> None:
         """Run best-effort persistence and voice callbacks for terminal jobs."""
+        # First, because another agent is blocked polling for this answer.
+        await self._answer_consult(job)
+        if self._commons_enabled:
+            # Off the loop: the commons is a couple of short appends, but a
+            # slow disk must never hold up announcing that a job finished.
+            await asyncio.to_thread(
+                collab.record_outcome,
+                self._workspace_dir,
+                agent=job.agent,
+                task=job.task,
+                status=job.status,
+                summary=job.summary,
+                result=job.result,
+                failure_kind=job.failure_kind,
+                failure_detail=job.failure_detail,
+            )
         if self._on_persist is not None:
             try:
                 await self._on_persist(job)

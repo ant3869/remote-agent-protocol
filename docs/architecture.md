@@ -192,6 +192,13 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
 - The repository vendors the complete Pipecat framework. Upstream updates should
   be merged from the `upstream` Git remote without mixing custom code into
   `src/pipecat` unless the framework itself must change.
+- Agent consultation's answer-file rendezvous has a narrow window: a consult
+  slot is empty between being accepted and the answer landing, so another
+  process that both knew the random mailbox token and won that timing could
+  stage something there first (`collab.consult_slot_is_free` checks only at
+  acceptance). Closing this fully needs a pending-marker handshake on the
+  agent side; `AGENT_CONSULT_ENABLED=false` disables consulting entirely if
+  that residual risk is unacceptable for a given deployment.
 
 ## Agent configuration
 
@@ -246,11 +253,86 @@ WebSocket. Payloads have a monotonically increasing per-session sequence and
 contain allowlisted metadata only. A port collision is shown as degraded health
 without stopping voice. See `lifecycle-websocket.md` for the schema.
 
-`AGENT_PROGRESS_INTERVAL_SECS` controls UI heartbeats;
-`AGENT_VOICE_PROGRESS_MIN_SECS` and `AGENT_VOICE_PROGRESS_INTERVAL_SECS` keep
-spoken updates useful but sparse. Terminal updates use TTS directly and therefore
-do not depend on Ollama. Bounded runtime diagnostics are written to
-`jess_runtime.log`.
+`AGENT_PROGRESS_INTERVAL_SECS` controls UI heartbeats. Only a job that is
+WAITING or BLOCKED on the user is spoken as progress; routine "still working"/
+"completed a step" updates stay GUI/log-only. Terminal updates use TTS
+directly and therefore do not depend on Ollama. Bounded runtime diagnostics
+are written to `jess_runtime.log`.
+
+Spoken lines about agent work are generated, not canned: `narration.py`
+writes each one fresh from what the job is actually doing, in the active
+persona's voice, so no status sentence is heard twice. It runs on the small
+model `intent_router` already keeps resident (`NARRATION_MODEL`, defaulting
+to `INTENT_MODEL`), never the large chat model answering the user -- so it
+adds no VRAM and never queues behind a reply. Progress narration prefetches
+during a job's dead time; missing the `NARRATION_TIMEOUT_SECS` deadline
+speaks a rotating stock line instead, so audio never waits on generation.
+Throttling is on *facts*, not phrasing (`_agent_last_spoken` holds the last
+detail, not the last sentence): a job whose situation hasn't changed stays
+quiet however differently it would be worded. Text that must survive
+verbatim -- an agent's actual answer, its question, the words that recover a
+failure (`agent_bridge.recovery_hint`) -- is passed through as the `body`
+the narrator writes around, so substance never drifts.
+
+Agents share a commons (`collab.py`): a `_commons` folder inside
+`AGENT_WORKSPACE_DIR` holding `findings.jsonl` (what a job learned),
+`lessons.jsonl` (what an agent got wrong, fed back to its own next run), and
+`notes/` for anything longer. Every dispatch carries a short briefing naming
+the folder, so separate CLI processes stop rediscovering the same facts.
+Notes are written by agents, so one agent's output becomes another's prompt --
+the commons is an indirect prompt-injection path by construction, and is
+built accordingly. Going in, `collab.sanitize` fails closed: a note carrying
+anything credential-shaped (AWS keys, PEM blocks, JWTs, connection strings,
+vendor token prefixes) or shaped like an instruction to whoever reads it next
+("ignore previous...", `rm -rf`, `curl | sh`, a request to re-run with
+`--dangerously-skip-permissions`) is dropped entirely rather than cleaned up.
+Coming out, borrowed notes are fenced with a per-process random token, so a
+note cannot forge the marker that ends the section it is quoted inside.
+
+The load-bearing mitigation is `AGENT_ELEVATED_BACKENDS`: the harnesses whose
+command line disables tool approval (`hermes --yolo`, `codex --sandbox
+danger-full-access`, `claude -p --dangerously-skip-permissions`) are never
+handed another agent's text at all. They are told where the commons is and
+may read it themselves -- an ordinary file read they can weigh -- rather than
+receiving those words inside their own instructions. Their own past lessons
+still travel, since those come from this app rather than from another agent.
+A text label is not a security boundary for an LLM; keeping the text out of
+the prompt of the processes that run unsupervised tools is.
+
+Agents can also ask each other questions mid-task. A running job prints
+`@@JESS_CONSULT {"id":...,"agent":...,"question":...}` and then polls
+`_commons/consults/<id>.json`; the bridge vets the request
+(`AgentBridge._handle_consult`), runs the named backend as a child job, and
+writes the answer back to that file. Polling is what makes this work with
+one-shot CLIs, which cannot be handed anything after launch -- the waiting
+agent prints a `waiting` status each time it checks, which both keeps the
+silence timeout from reaping it and gives the exchange something to narrate.
+Both sides are spoken aloud in their own harness voices
+(`session._announce_agent_consult`), so who is talking is audible without any
+line having to say so.
+
+The request comes from an agent's own stdout, so the limits are structural
+rather than advisory -- `consult_depth` and `consult_chain` travel with the
+job, not with the request, so no wording gets a job past them. A consulted
+agent cannot consult in turn (`AGENT_CONSULT_MAX_DEPTH`), a job gets a fixed
+number of questions (`AGENT_CONSULT_BUDGET`), an agent already in the chain
+cannot be asked again, the target may never be an elevated backend, and a
+question that reads as destructive is refused outright -- the user authorized
+the original task, not that, and they are not in this loop. Every refusal
+still writes an answer file, because an agent polling for a file that never
+appears is an agent that hangs. Consult ids are validated as filenames
+(`collab.consult_id_ok`), never escaped.
+
+Each delegated backend has its own Kokoro voice (`HARNESS_VOICES`) so a
+finished/failed job is recognizable by ear, independent of whichever persona
+is currently front-of-house. `session._speak_agent_text` builds the
+[switch voice, speak, restore front-of-house voice] frame list as one unit
+under a lock, so two jobs finishing close together can't interleave one
+job's voice switch with another's speech; a completion answer longer than
+`AGENT_RESULT_SPEAK_MAX_CHARS` is trimmed with a spoken pointer to the full
+answer (still staged into the LLM context). `AGENT_ANNOUNCE_START` gates
+spoken job-start narration, which only fires when the starting job is the
+sole active one.
 
 `AGENT_CONFIRM_LOOP_LIMIT` defaults to `2` and stops a one-shot backend from
 repeatedly relaunching when it keeps asking for confirmation instead of doing

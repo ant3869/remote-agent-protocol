@@ -28,8 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import URLError
 
+from remote_agent_protocol import __version__, dashboard
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import dashboard
 
 _MIN_PYTHON = (3, 11)
 
@@ -416,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.parse_args(argv)
+    print(f"Remote Agent Protocol v{__version__}\n")
     results = run_checks()
     print(format_results(results))
     return exit_code(results)

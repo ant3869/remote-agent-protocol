@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 from loguru import logger
 
 from remote_agent_protocol import (
+    __version__,
     agent_bridge,
     app_state,
     coqui_tts,
@@ -802,6 +803,7 @@ class WebVoiceApp:
             agent_states[str(job.get("agent", "Agent"))] = job
         return {
             "appName": cfg.APP_NAME,
+            "appVersion": __version__,
             "subtitle": "Premium local AI control center",
             "mode": cfg.RAP_MODE,
             "session": self._session_state,

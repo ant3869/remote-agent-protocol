@@ -27,8 +27,18 @@ real-time audio pipeline.
 - Rapid corrections such as “wait, actually use httpx” cancel and replace the
   newest agent job; delegated prompts carry a bounded, explicitly untrusted
   conversation snapshot so contextual references survive the handoff.
-- Completed jobs speak the agent's substantive result, while live tool, step,
-  and last-completed fields continue advancing in the Agents panel.
+- Every spoken update about agent work -- start, progress, and result -- is
+  written fresh each time instead of repeating a stock sentence, on the small
+  model already resident for intent routing (no extra VRAM, no added
+  latency). Each delegated backend speaks in its own voice, so which agent
+  finished is audible before the words register, while live tool, step, and
+  last-completed fields continue advancing in the Agents panel.
+- Agents share a commons: a workspace folder where finished jobs leave
+  findings for each other and lessons for their own next run, and can ask
+  each other one question mid-task and hear the answer read back. A
+  consulted agent can't consult in turn, gets a fixed question budget, and
+  a harness running with tool approval disabled is never handed another
+  agent's text.
 - The selected tool user is the default for unnamed work, not the only agent:
   address Hermes, Code Puppy, Codex, or Claude Code explicitly for one request,
   then unnamed work returns to the persisted default automatically.

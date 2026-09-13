@@ -42,6 +42,7 @@ from remote_agent_protocol import (
     memory,
     memory_manager,
     multimodal_prompt,
+    narration,
     ollama_models,
     remote_client,
     stt_factory,
@@ -127,6 +128,23 @@ class VoiceSession:
             else None
         )
         self._agent_last_spoken: dict[str, tuple[float, str]] = {}
+        # Serializes every agent/harness narration so two jobs finishing close
+        # together can never interleave one job's voice-switch frame with
+        # another job's speech (see _speak_agent_text). _front_of_house_voice
+        # is whatever the live conversational voice should be once a harness
+        # is done talking -- kept in sync by _apply_tts, the single funnel
+        # every persona/voice change already goes through.
+        self._announce_lock = asyncio.Lock()
+        # Writes every spoken line about agent work, so none of it is the same
+        # sentence twice. Inert until run() enables it -- constructing a
+        # session must never reach for the network.
+        self._narrator = narration.Narrator(persona.name, persona.personality)
+        self._front_of_house_voice: dict = {
+            "voice": persona.voice,
+            "voice_backend": persona.voice_backend,
+            "model": persona.voice_model,
+            "tts_options": persona.tts_options,
+        }
         self._default_agent_backend = cfg.AGENT_DEFAULT_BACKEND
         if persona.tool_user:
             self.set_default_agent_backend(persona.tool_user)
@@ -331,6 +349,8 @@ class VoiceSession:
             await self._lifecycle_ws.start()
         self._remotes.start()
         self._start_voicebox_warmups()
+        # Narration shares the router's model, so the warmup below covers both.
+        self._narrator.enable()
         self._spawn(self._router.warmup(), name="intent-router-warmup")
         # The reply model too, not just the router: a cold load lands on the
         # first spoken turn otherwise.
@@ -698,7 +718,18 @@ class VoiceSession:
             voice_backend=voice_backend,
             tts_options=tts_options,
         )
-        await self._worker.queue_frames([TTSUpdateSettingsFrame(delta=delta)])
+        # Same lock the harness announcements use: this both queues a frame and
+        # moves the voice they restore to, so it has to be ordered against them
+        # or a switch can be silently undone by an announcement already in
+        # flight with the old voice.
+        async with self._announce_lock:
+            await self._worker.queue_frames([TTSUpdateSettingsFrame(delta=delta)])
+            self._front_of_house_voice = {
+                "voice": voice,
+                "voice_backend": voice_backend,
+                "model": model,
+                "tts_options": tts_options,
+            }
         logger.info(f"TTS -> {voice_backend} voice={voice} model={model or '-'}")
 
     def _tts_delta(
@@ -729,6 +760,7 @@ class VoiceSession:
 
     async def _apply_persona(self, persona: Persona) -> None:
         assert self._llm is not None and self._worker is not None
+        self._narrator.set_persona(persona.name, persona.personality)
         await self._apply_persona_tts(persona)
         delta = self._llm.Settings(
             model=persona.model_name(cfg.LLM_MODEL),
@@ -1379,8 +1411,69 @@ class VoiceSession:
                 existing_keys=existing_keys,
             )
 
+    def _harness_voice(self, agent: str) -> str | None:
+        """Kokoro voice id for a harness backend, or None for no distinct voice.
+
+        Strips a remote "<host>:" prefix (e.g. "laptop:hermes") since the
+        voice is keyed by backend name, not by which machine ran it.
+        """
+        return cfg.HARNESS_VOICES.get(agent.rsplit(":", 1)[-1])
+
+    async def _speak_agent_text(self, text: str, *, agent: str | None = None) -> None:
+        """Speak one line of agent/harness narration.
+
+        When ``agent`` has its own voice (config.HARNESS_VOICES), the whole
+        [switch voice, speak, restore front-of-house voice] envelope is built
+        as one frame list and queued under a shared lock -- so two jobs
+        finishing close together can never have their voice-switch and speech
+        frames interleaved with each other (the concrete bug behind "voices
+        talking over each other": independent queue_frames() calls racing).
+        """
+        if self._worker is None:
+            return
+        voice = self._harness_voice(agent) if agent else None
+        switching = (
+            bool(voice) and self._tts is not None and tts_factory.voice_switch_supported(voice)
+        )
+        async with self._announce_lock:
+            # The restore frame is built inside the lock, not before it: the
+            # voice to come back to is read at the last possible moment, so a
+            # persona switch landing mid-announcement isn't undone by a
+            # restore frame that captured the previous voice.
+            frames: list = []
+            if switching:
+                frames.append(
+                    TTSUpdateSettingsFrame(
+                        delta=self._tts_delta(voice=voice, model=None, voice_backend="kokoro")
+                    )
+                )
+            frames.append(TTSSpeakFrame(text=text, append_to_context=True))
+            if switching:
+                frames.append(
+                    TTSUpdateSettingsFrame(delta=self._tts_delta(**self._front_of_house_voice))
+                )
+            await self._worker.queue_frames(frames)
+
+    async def _narrate_and_speak(
+        self, moment: narration.Moment, *, key: str | None = None, body: str = ""
+    ) -> None:
+        """Write this moment's line fresh, then speak it in the right voice.
+
+        ``body`` is text that must survive verbatim -- an agent's actual
+        answer, its question, the words that recover a failure. The narrator
+        only ever writes the framing around it, so the substance can't drift.
+        """
+        line = await self._narrator.line(moment, key=key)
+        text = f"{line} {body}".strip() if body else line
+        await self._speak_agent_text(text, agent=moment.agent or None)
+
     async def _announce_agent_job(self, job: agent_bridge.AgentJob) -> None:
         """Speak terminal agent status directly, without depending on the LLM."""
+        # job_id never repeats, so leaving these keyed by it after the job
+        # stops progressing (a confirmation hold relaunches under a new id)
+        # is an unbounded leak over a long-running session.
+        self._agent_last_spoken.pop(job.job_id, None)
+        self._narrator.drop_prefetched(job.job_id)
         if job.status == agent_bridge.STATUS_DONE and self._model_recovery:
             if self._model_recovery[0] == job.agent:
                 self._model_recovery = None
@@ -1411,15 +1504,52 @@ class VoiceSession:
                 )
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
-        # announcement() frames a follow-up question as "Agent 'X' needs your
-        # input: ..." so the user knows the agent is asking and about what.
-        # Speaking the bare question here instead made it sound like the persona
-        # asking out of nowhere -- a user heard a stray "Are you running
-        # cmd.exe?" (the agent narrating its own reasoning) and had no idea what
-        # it meant, then their confused reply was misrouted into new tasks
-        # (jess_runtime.log 2026-07-07 03:47).
-        text = agent_bridge.announcement(job)
-        await self._worker.queue_frames([TTSSpeakFrame(text=text, append_to_context=True)])
+        moment, body = self._terminal_moment(job)
+        if moment is None:
+            await self._speak_agent_text(agent_bridge.announcement(job), agent=job.agent)
+            return
+        await self._narrate_and_speak(moment, body=body)
+
+    def _terminal_moment(self, job: agent_bridge.AgentJob) -> tuple[narration.Moment | None, str]:
+        """What to narrate about a finished job, and what must be said verbatim.
+
+        The narrator writes the lead-in; everything returned as ``body`` is
+        quoted exactly, because it is either the agent's own answer or the
+        words the user has to say back. A None moment means this case is rare
+        and precise enough to keep its fixed wording.
+
+        The lead-in always names the agent, which is what stopped a bare
+        question from sounding like the persona asking out of nowhere -- a
+        user once heard a stray "Are you running cmd.exe?" (the agent
+        narrating its own reasoning), had no idea what it meant, and their
+        confused reply was misrouted into new tasks (jess_runtime.log
+        2026-07-07 03:47).
+        """
+        tamper = agent_bridge.tamper_warning(job)
+        questions = agent_bridge.follow_up_questions(job)
+        if questions:
+            body = " ".join(questions)
+            moment = narration.Moment(kind=narration.KIND_WAITING, agent=job.agent, task=job.task)
+        elif job.status == agent_bridge.STATUS_DONE:
+            body = agent_bridge.spoken_answer(job, max_chars=cfg.AGENT_RESULT_SPEAK_MAX_CHARS)
+            if not body:
+                body = "It didn't return anything to relay, so it's worth a re-run."
+            moment = narration.Moment(
+                kind=narration.KIND_DONE, agent=job.agent, task=job.task, detail=job.summary
+            )
+        elif job.status == agent_bridge.STATUS_FAILED:
+            body = agent_bridge.recovery_hint(job)
+            moment = narration.Moment(
+                kind=narration.KIND_FAILED,
+                agent=job.agent,
+                task=job.task,
+                detail=job.summary or job.failure_detail,
+                note=job.failure_kind,
+            )
+        else:
+            # Cancelled: the user asked for it, so nothing here surprises them.
+            return None, ""
+        return moment, f"{body} {tamper}".strip() if tamper else body
 
     async def _hold_agent_confirmation(self, job: agent_bridge.AgentJob, prompt_text: str) -> None:
         """A sub-agent "finished" by asking permission instead of a real result.
@@ -1478,6 +1608,9 @@ class VoiceSession:
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
 
+        if event.get("type") == "agent_consult":
+            self._announce_agent_consult(event)
+            return
         if event.get("event") == "started" and event.get("announce_start"):
             self._announce_agent_start(event)
             return
@@ -1491,54 +1624,115 @@ class VoiceSession:
     def _announce_all_agents_finished(self) -> None:
         """Narrate the aggregate idle event once active agent jobs finish."""
         self._spawn(
-            self._worker.queue_frames(
-                [TTSSpeakFrame(text="All active agents completed.", append_to_context=True)]
-            ),
+            self._narrate_and_speak(narration.Moment(kind=narration.KIND_IDLE)),
             name="agent-all-finished",
         )
 
-    def _announce_agent_start(self, event: dict) -> None:
-        agent = event.get("agent", "Agent")
-        label = agent_bridge.task_label(event.get("task", ""))
-        text = f"{agent} started on {label}." if label else f"{agent} is on it."
+    def _announce_agent_consult(self, event: dict) -> None:
+        """Voice one side of an agent-to-agent exchange, in that agent's voice.
+
+        The question is spoken by whoever asked and the answer by whoever
+        answered, so the two harness voices carry who is talking without any
+        line having to say so. Both sides go through the same serialized
+        announcer as everything else, so they take turns rather than overlap.
+
+        A refusal stays silent: the asker is told in its answer file, and the
+        user did not ask to hear about a guardrail doing its job.
+        """
+        kind = event.get("event")
+        if kind == "asked":
+            moment = narration.Moment(
+                kind=narration.KIND_CONSULT,
+                agent=event.get("agent", "the agent"),
+                detail=event.get("question", ""),
+                note=event.get("peer", ""),
+            )
+            body = ""
+        elif kind == "answered":
+            moment = narration.Moment(
+                kind=narration.KIND_DONE,
+                agent=event.get("agent", "the agent"),
+                note=f"answering {event.get('peer', 'the other one')}",
+            )
+            body = event.get("answer", "")
+        else:
+            return
         self._spawn(
-            self._worker.queue_frames([TTSSpeakFrame(text=text, append_to_context=True)]),
+            self._narrate_and_speak(moment, body=body),
+            name=f"agent-consult-{event.get('job_id', '')}",
+        )
+
+    def _announce_agent_start(self, event: dict) -> None:
+        """Speak a job's start, but only when it's the sole active job.
+
+        Narrating every concurrent start back to back with several harnesses
+        running is clutter however well it's worded; a start is only worth
+        interrupting for when nothing else is competing for the moment.
+        """
+        if not cfg.AGENT_ANNOUNCE_START or len(self._bridge.active_jobs()) > 1:
+            return
+        moment = narration.Moment(
+            kind=narration.KIND_STARTED,
+            agent=event.get("agent", "the agent"),
+            task=event.get("task", ""),
+        )
+        self._spawn(
+            self._narrate_and_speak(moment),
             name=f"agent-start-{event.get('job_id', '')}",
         )
 
     def _maybe_announce_agent_progress(self, event: dict) -> None:
-        """Narrate a progress event, throttled so we don't talk over every step."""
-        agent = event.get("agent", "Agent")
+        """Narrate what a job is doing now, throttled, in fresh words each time.
+
+        Progress is worth hearing -- it's the part that makes a long job feel
+        like someone working rather than dead air -- but only when it says
+        something new. So the throttle is on *facts*, not phrasing: a state
+        whose detail hasn't changed is skipped, and the wording is never
+        reused even when the situation repeats.
+
+        A throttled-out event is not wasted: it's the cue to write the next
+        line during the job's dead time, so the line that does get spoken is
+        already waiting when its turn comes.
+        """
         state = event.get("state")
-        action = event.get("action", "").strip()
-        if state in {agent_bridge.STATE_WAITING, agent_bridge.STATE_BLOCKED}:
-            text = f"{agent} is {state}: {action or 'it needs attention'}."
-            urgent = True
+        urgent = state in {agent_bridge.STATE_WAITING, agent_bridge.STATE_BLOCKED}
+        # An empty detail stays empty. Substituting a placeholder here reads
+        # fine to the model but splices straight into the fallback templates,
+        # which is how you get "Still running: still going."
+        if urgent:
+            kind = narration.KIND_WAITING
+            detail = event.get("action", "").strip()
         elif state == agent_bridge.STATE_STEP_COMPLETED:
-            step = event.get("last_completed_step") or action or "a major step"
-            text = f"{agent} completed {step}."
-            urgent = False
+            kind = narration.KIND_WORKING
+            detail = event.get("last_completed_step") or event.get("action", "").strip()
         elif state == agent_bridge.STATE_IN_PROGRESS:
-            label = agent_bridge.task_label(event.get("task", ""))
-            suffix = label if label else "it"
-            text = f"{agent} is still working on {suffix}."
-            urgent = False
+            kind = narration.KIND_WORKING
+            detail = event.get("action", "").strip()
         else:
             return
 
-        elapsed = float(event.get("elapsed_secs") or 0.0)
-        if not urgent and elapsed < cfg.AGENT_VOICE_PROGRESS_MIN_SECS:
-            return
-        now = time.monotonic()
         job_id = event.get("job_id", "")
-        last_time, last_text = self._agent_last_spoken.get(job_id, (0.0, ""))
-        if text == last_text or (
-            not urgent and now - last_time < cfg.AGENT_VOICE_PROGRESS_INTERVAL_SECS
+        elapsed = float(event.get("elapsed_secs") or 0.0)
+        moment = narration.Moment(
+            kind=kind,
+            agent=event.get("agent", "the agent"),
+            task=event.get("task", ""),
+            detail=detail,
+            elapsed_secs=elapsed,
+        )
+        now = time.monotonic()
+        last_time, last_detail = self._agent_last_spoken.get(job_id, (0.0, ""))
+        if not urgent and (
+            elapsed < cfg.AGENT_VOICE_PROGRESS_MIN_SECS
+            or now - last_time < cfg.AGENT_VOICE_PROGRESS_INTERVAL_SECS
         ):
+            self._spawn(self._narrator.prefetch(job_id, moment), name=f"agent-prefetch-{job_id}")
             return
-        self._agent_last_spoken[job_id] = (now, text)
+        if detail == last_detail:
+            return  # same situation as last time; saying it again adds nothing
+        self._agent_last_spoken[job_id] = (now, detail)
         self._spawn(
-            self._worker.queue_frames([TTSSpeakFrame(text=text, append_to_context=True)]),
+            self._narrate_and_speak(moment, key=job_id),
             name=f"agent-progress-{job_id}",
         )
 

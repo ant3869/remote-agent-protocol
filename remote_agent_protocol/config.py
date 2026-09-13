@@ -454,6 +454,36 @@ AGENT_MACHINES = {
 AGENT_ANNOUNCE = True
 
 # ---------------------------------------------------------------------------
+# Per-harness voice profiles: each delegated backend gets its own Kokoro voice
+# so a finished/failed job is recognizable by ear before the words register,
+# independent of whichever persona is currently front-of-house. Deliberately
+# Kokoro-only (a same-model settings delta -- no extra VRAM, no warmup),
+# unlike Voicebox voices, and deliberately distinct from every built-in
+# persona voice in personas.py so a harness is never mistaken for a persona
+# talking. hermes-yolo intentionally reuses hermes's voice: the spoken text
+# already names the exact backend ("hermes-yolo finished..."), so a second
+# voice slot would add nothing.
+# ---------------------------------------------------------------------------
+HARNESS_VOICES = {
+    "mock": "af_nova",
+    "hermes": "am_liam",
+    "hermes-yolo": "am_liam",
+    "code-puppy": "af_bella",
+    "codex": "am_echo",
+    "claude-code": "bf_isabella",
+    **_parse_string_map(_env("HARNESS_VOICES_JSON", ""), "HARNESS_VOICES_JSON"),
+}
+# A spoken completion answer longer than this gets a trimmed lead-in instead
+# of a full verbatim readout; the untrimmed text still lands in the LLM
+# context (session._announce_agent_job) so a follow-up question still gets
+# the real answer. 0 disables trimming (always speak the full answer).
+AGENT_RESULT_SPEAK_MAX_CHARS = int(_env("AGENT_RESULT_SPEAK_MAX_CHARS", "220"))
+# Speak "<agent> started on <task>" only when it's the sole active job --
+# narrating every concurrent start was the original "five things announced
+# at once" clutter with multiple harnesses running.
+AGENT_ANNOUNCE_START = _env_bool("AGENT_ANNOUNCE_START", True)
+
+# ---------------------------------------------------------------------------
 # Remote agent backends. Another machine runs `python -m
 # remote_agent_protocol.remote_host` and offers the agents installed there; this
 # machine discovers them and delegates as if they were local. Discovered agents
@@ -514,9 +544,7 @@ S2S_VOICE_FILE = _env("S2S_VOICE_FILE", str(DATA_DIR / "s2s_voice.txt"))
 # The audio frontend owns the microphone in brain mode. This atomic JSON bridge
 # carries Free Talk / Wake Word plus the detector settings it needs, mirroring
 # the existing mute and voice handshakes.
-S2S_VOICE_MODE_FILE = _env(
-    "S2S_VOICE_MODE_FILE", str(DATA_DIR / "s2s_input_mode.json")
-)
+S2S_VOICE_MODE_FILE = _env("S2S_VOICE_MODE_FILE", str(DATA_DIR / "s2s_input_mode.json"))
 S2S_VOICE_MODE_STATUS_FILE = _env(
     "S2S_VOICE_MODE_STATUS_FILE", str(DATA_DIR / "s2s_input_mode_status.json")
 )
@@ -541,8 +569,11 @@ AGENT_JOB_TIMEOUT_SECS = float(_env("AGENT_JOB_TIMEOUT_SECS", "300"))
 # Grace period between a polite terminate() and a hard kill() when a job is
 # cancelled or times out. Gives the agent a moment to flush output and exit.
 AGENT_JOB_KILL_GRACE_SECS = float(_env("AGENT_JOB_KILL_GRACE_SECS", "3"))
-# Silent jobs emit a UI heartbeat at this interval. Voice heartbeats are
-# separately throttled so the transcript stays useful without becoming noisy.
+# Silent jobs emit a UI heartbeat at this interval. Routine progress ("still
+# working", "completed a step") is never spoken -- only a job that's WAITING
+# or BLOCKED on the user is (session._maybe_announce_agent_progress) -- so
+# these two throttles are currently unused by the voice path; kept in case a
+# future mode wants throttled routine narration back.
 AGENT_PROGRESS_INTERVAL_SECS = float(_env("AGENT_PROGRESS_INTERVAL_SECS", "30"))
 AGENT_VOICE_PROGRESS_MIN_SECS = float(_env("AGENT_VOICE_PROGRESS_MIN_SECS", "20"))
 AGENT_VOICE_PROGRESS_INTERVAL_SECS = float(_env("AGENT_VOICE_PROGRESS_INTERVAL_SECS", "60"))
@@ -560,6 +591,44 @@ AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_histo
 # minutes (jess_runtime.log 2026-07-05 12:35). A neutral, gitignored sandbox
 # keeps an agent from ever waking up inside its host's source tree.
 AGENT_WORKSPACE_DIR = _env("AGENT_WORKSPACE_DIR", str(DATA_DIR / "agent_workspace"))
+
+# The commons (collab.py): a "_commons" folder inside the workspace where
+# agents leave findings for each other and lessons for their own next run.
+# Every dispatched task gets a short briefing pointing at it, so separate CLI
+# processes stop rediscovering the same facts. Borrowed notes are always
+# labelled untrusted -- another agent wrote them.
+AGENT_COMMONS_ENABLED = _env_bool("AGENT_COMMONS_ENABLED", True)
+# Backends whose command line disables tool approval -- hermes --yolo,
+# codex --sandbox danger-full-access, claude -p --dangerously-skip-permissions.
+# Nothing gates their file and shell calls, so another agent's notes are never
+# pasted into their prompt (collab.briefing); they are told where the commons
+# is and can read it themselves, which is a file read they can weigh rather
+# than words arriving inside their own instructions.
+AGENT_ELEVATED_BACKENDS = frozenset(
+    _parse_string_map(_env("AGENT_ELEVATED_BACKENDS_JSON", ""), "AGENT_ELEVATED_BACKENDS_JSON")
+    or {"hermes-yolo": "", "codex": "", "claude-code": ""}
+)
+# How much of the shared space rides along on each dispatch. Nothing here is
+# spoken, but it is prompt tokens on every job, so it stays small.
+AGENT_COMMONS_FINDINGS = int(_env("AGENT_COMMONS_FINDINGS", "4"))
+AGENT_COMMONS_LESSONS = int(_env("AGENT_COMMONS_LESSONS", "3"))
+
+# Agent-to-agent consultation: a running job can ask one other backend a
+# single question and wait for the answer through the commons. The request
+# comes from an agent's own output, so every limit here is structural rather
+# than advisory -- an agent cannot talk its way past any of them:
+#   depth   a consulted agent may not consult in turn, so chains cannot grow
+#   budget  a job gets a fixed number of questions and then no more
+#   cycle   an agent already in this chain cannot be asked again
+#   target  never an elevated backend -- a question written by one agent must
+#           not become the prompt of a process whose tools nothing gates
+#   intent  a question that reads as destructive is refused outright, because
+#           the user never asked for it; only they can authorize that
+AGENT_CONSULT_ENABLED = _env_bool("AGENT_CONSULT_ENABLED", True)
+AGENT_CONSULT_MAX_DEPTH = int(_env("AGENT_CONSULT_MAX_DEPTH", "1"))
+AGENT_CONSULT_BUDGET = int(_env("AGENT_CONSULT_BUDGET", "2"))
+# A consult is one question, not a project, so it gets less rope than a job.
+AGENT_CONSULT_TIMEOUT_SECS = float(_env("AGENT_CONSULT_TIMEOUT_SECS", "120"))
 
 # Scope guidance added after every dispatched task (the status protocol is
 # appended). A coding agent handed a vague task treats whatever directory it
@@ -691,6 +760,22 @@ INTENT_MODEL = _env("INTENT_MODEL", "") or "qwen2.5:3b"
 # for the occasional cold reload; raise it for a larger, slower classifier.
 INTENT_TIMEOUT_SECS = float(_env("INTENT_TIMEOUT_SECS", "2.5"))
 INTENT_KEEP_ALIVE = _env("INTENT_KEEP_ALIVE", "5m")
+
+# ---------------------------------------------------------------------------
+# Spoken narration of agent work (narration.py). Repeating the same status
+# sentence is what turns a conversation back into a progress bar, so every
+# line about a job is written fresh from what the job is actually doing.
+#
+# It deliberately runs on the SAME small model the intent router already keeps
+# resident rather than the large chat model: narration then costs no extra
+# VRAM and never queues behind the reply the user is waiting on. Missing the
+# deadline is expected and cheap -- a rotating stock line speaks instead, so
+# audio never waits on generation.
+# ---------------------------------------------------------------------------
+NARRATION_ENABLED = _env_bool("NARRATION_ENABLED", True)
+NARRATION_MODEL = _env("NARRATION_MODEL", "") or INTENT_MODEL
+NARRATION_TIMEOUT_SECS = float(_env("NARRATION_TIMEOUT_SECS", "1.2"))
+NARRATION_KEEP_ALIVE = _env("NARRATION_KEEP_ALIVE", "") or INTENT_KEEP_ALIVE
 # At/above dispatch confidence a task runs. Between confirm and dispatch is
 # the uncertain band: read-only lookups run anyway (a wrong lookup is
 # harmless), state-changing tasks are held for a spoken yes/no. Below the
