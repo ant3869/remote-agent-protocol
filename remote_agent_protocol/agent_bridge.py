@@ -306,15 +306,17 @@ def detect_provider_failure(line: str) -> str | None:
 _CONSULT_MARKER = "@@JESS_CONSULT"
 _CONSULT_PROTOCOL = """
 If another agent on this machine would know something you need, you may ask ONE
-of them one question. Print a single line:
-{marker} {{"id":"q1","agent":"<name>","question":"<your question>"}}
+of them one question. Print a single line shaped like this, with the agent name
+and your real question substituted in place of the two placeholders -- never
+print the placeholders themselves:
+{marker} {{"id":"q1","agent":"the agent's name","question":"the real question"}}
 Then read the file named after your id, with a .json suffix, in this folder:
 {folder}
 Check it every few seconds until it appears. It always appears -- on refusal
-too -- and looks like {{"ok":true,"answer":"..."}}. While
-you wait, print @@JESS_STATUS {{"state":"waiting","action":"waiting on <name>"}}
-each time you check, or you will look hung and be stopped. If it has not arrived
-after about {tries} checks, carry on without it and say so.
+too -- and looks like {{"ok":true,"answer":"..."}}. Keep reporting your normal
+"waiting" status while you check, describing in your own words what you are
+actually waiting on, or you will look hung and be stopped. If it has not
+arrived after about {tries} checks, carry on without it and say so.
 You may ask: {peers}.
 Ask only when their answer changes what you do. You get {budget} question(s).
 """.strip()
