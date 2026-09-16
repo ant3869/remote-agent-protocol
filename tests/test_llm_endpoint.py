@@ -126,3 +126,42 @@ def test_orchestration_reasoning_falls_back_when_the_cloud_refuses(cloud):
     assert result.text == "local answer"
     assert any("example.test" in u for u in seen), "the cloud must be tried first"
     assert any("/api/chat" in u for u in seen), "and the local model must catch it"
+
+
+def test_an_openrouter_key_alone_is_enough(monkeypatch):
+    """One key should configure all three callers without further settings.
+
+    Asking someone to set a base URL, a key, and three model names before
+    anything improves is a poor trade for "use a faster model".
+    """
+    import importlib
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    for name in ("CLOUD_LLM_BASE_URL", "CLOUD_LLM_API_KEY", "CLOUD_LLM_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    reloaded = importlib.reload(cfg)
+    try:
+        assert reloaded.CLOUD_LLM_BASE_URL == "https://openrouter.ai/api/v1"
+        assert reloaded.CLOUD_LLM_API_KEY == "sk-or-test"
+        assert reloaded.CLOUD_LLM_MODEL, "a default model is needed or nothing routes to cloud"
+        for kind in KINDS:
+            chain = llm_endpoint.chain(kind)
+            assert [e.cloud for e in chain] == [True, False]
+    finally:
+        monkeypatch.undo()
+        importlib.reload(cfg)
+
+
+def test_an_explicit_endpoint_still_wins_over_openrouter(monkeypatch):
+    import importlib
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("CLOUD_LLM_BASE_URL", "https://elsewhere.test/v1")
+    monkeypatch.setenv("CLOUD_LLM_MODEL", "some/other-model")
+    reloaded = importlib.reload(cfg)
+    try:
+        assert reloaded.CLOUD_LLM_BASE_URL == "https://elsewhere.test/v1"
+        assert reloaded.CLOUD_LLM_MODEL == "some/other-model"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(cfg)

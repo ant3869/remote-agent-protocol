@@ -277,10 +277,26 @@ OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
 # back to the local model on any failure (see llm_endpoint.chain), so an
 # expired key or a provider outage costs one slow turn, not a broken app.
 # ---------------------------------------------------------------------------
-CLOUD_LLM_BASE_URL = _env("CLOUD_LLM_BASE_URL", "").rstrip("/")
-CLOUD_LLM_API_KEY = _env("CLOUD_LLM_API_KEY", "")
+# OpenRouter is the path of least resistance -- one key reaches every provider --
+# so setting OPENROUTER_API_KEY alone is enough and the rest default around it.
+# An explicit CLOUD_LLM_* still wins, which is what points this at a different
+# OpenAI-compatible host.
+OPENROUTER_API_KEY = _env("OPENROUTER_API_KEY", "")
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Measured on this machine, same prompt, time to first token: the local persona
+# took ~7s and this took 1.34s. It also answered the classifier's JSON schema on
+# every attempt, where pricier models returned null content, so one model covers
+# all three callers until there is a reason to split them.
+_OPENROUTER_DEFAULT_MODEL = "mistralai/mistral-nemo"
+
+CLOUD_LLM_BASE_URL = (
+    _env("CLOUD_LLM_BASE_URL", "") or (_OPENROUTER_BASE_URL if OPENROUTER_API_KEY else "")
+).rstrip("/")
+CLOUD_LLM_API_KEY = _env("CLOUD_LLM_API_KEY", "") or OPENROUTER_API_KEY
 # The persona that speaks. This is the one that decides how long the user waits.
-CLOUD_LLM_MODEL = _env("CLOUD_LLM_MODEL", "")
+CLOUD_LLM_MODEL = _env("CLOUD_LLM_MODEL", "") or (
+    _OPENROUTER_DEFAULT_MODEL if OPENROUTER_API_KEY else ""
+)
 # The router and the orchestrator's own reasoning. Both run per turn on short
 # prompts, so a small fast model suits them; both default to the persona's.
 CLOUD_INTENT_MODEL = _env("CLOUD_INTENT_MODEL", "")

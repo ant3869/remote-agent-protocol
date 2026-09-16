@@ -559,7 +559,14 @@ async def classify_with_cloud(
         async with http.post(endpoint.chat_url, json=payload, headers=endpoint.headers) as resp:
             resp.raise_for_status()
             data = await resp.json()
-    return json.loads(data["choices"][0]["message"]["content"])
+    content = (data.get("choices") or [{}])[0].get("message", {}).get("content")
+    if not content:
+        # Seen live: a hosted model can answer 200 with null content, having
+        # spent its budget in a reasoning channel instead. Say so plainly so the
+        # caller falls back to the local classifier rather than raising a
+        # TypeError out of json.loads.
+        raise RuntimeError(f"{endpoint.label} returned no classification content")
+    return json.loads(content)
 
 
 def _normalize_verdict(raw: object) -> dict | None:

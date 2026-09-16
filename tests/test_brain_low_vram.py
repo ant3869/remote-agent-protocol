@@ -30,6 +30,13 @@ class FakeHttp:
 
 @pytest.mark.asyncio
 async def test_brain_chat_request_includes_configured_keep_alive(monkeypatch):
+    # keep_alive is Ollama's own field -- a hosted endpoint rejects it, so the
+    # payload carries it only when the local model is the one being asked. Pin
+    # the chain local here, or this reads whichever endpoint the machine
+    # running the tests happens to have configured.
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL", "")
     monkeypatch.setattr(cfg, "LLM_KEEP_ALIVE", "5m")
     session = brain.BrainSession(personas.DEFAULT_PERSONA)
     fake_http = FakeHttp()
