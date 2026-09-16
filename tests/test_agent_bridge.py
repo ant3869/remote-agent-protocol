@@ -1,10 +1,13 @@
 import asyncio
 import json
+import os
 import sys
 import unittest
+from unittest import mock
 from unittest.mock import AsyncMock
 
 from remote_agent_protocol import agent_bridge
+from remote_agent_protocol import config as cfg
 
 MOCK_BACKEND = {"mock": ["{python}", "-u", "scripts/mock_agent.py", "{task}"]}
 
@@ -76,6 +79,75 @@ class PureHelperTests(unittest.TestCase):
             "rate_limit",
         )
         self.assertIsNone(agent_bridge.detect_provider_failure("finished normally"))
+
+    def test_provider_failure_ignores_phrases_inside_echoed_content(self):
+        """A codex job was killed mid-run for "quota" because it printed a log.
+
+        jess_agent_history.json 2026-09-14T20:04: the agent echoed a
+        discoveries file whose text contained a quota phrase, and the bridge
+        read that as a live provider status and terminated the process.
+        """
+        echoed = (
+            "- 2026-08-08T15:10:00-05:00 [TOOL] Notes from an earlier run about "
+            "how the harness behaves when a provider reports usage limit reached "
+            "and what the recovery wording should be, plus a long tail of further "
+            "context that a real provider banner would never carry with it, going on "
+            "well past the length any provider status line ever reaches, because it "
+            "is a prose note rather than a status at all, as the log shows it was."
+        )
+        self.assertGreater(len(echoed), agent_bridge._PROVIDER_FAILURE_MAX_CHARS)
+        self.assertIsNone(agent_bridge.detect_provider_failure(echoed))
+        # The same phrase, shaped like an actual banner, still counts.
+        self.assertEqual(
+            agent_bridge.detect_provider_failure("Error: usage limit reached"),
+            "quota",
+        )
+
+    def test_a_verbose_json_error_body_is_still_a_provider_failure(self):
+        """The length guard must not hide a provider that answers in JSON."""
+        body = json.dumps(
+            {
+                "error": {
+                    "message": (
+                        "You exceeded your current quota, please check your plan and "
+                        "billing details. For more information on this, read the docs "
+                        "at the usual place. Your credit balance is too low to access "
+                        "this model. Please go to Plans and Billing to upgrade or to "
+                        "purchase additional credits before retrying this request again."
+                    ),
+                    "type": "insufficient_quota",
+                    "param": None,
+                    "code": "insufficient_quota",
+                }
+            }
+        )
+        self.assertGreater(len(body), agent_bridge._PROVIDER_FAILURE_MAX_CHARS)
+        self.assertEqual(agent_bridge.detect_provider_failure(body), "quota")
+
+    def test_auth_failure_is_classified_and_explained(self):
+        """jess_agent_history.json 2026-09-13T14:06: a 401 went unclassified."""
+        self.assertEqual(
+            agent_bridge.detect_provider_failure(
+                "Error executing prompt: status_code: 401, model_name: claude-sonnet-5"
+            ),
+            "auth",
+        )
+        job = agent_bridge.AgentJob(job_id="job-1", agent="code-puppy", task="t")
+        job.status = agent_bridge.STATUS_FAILED
+        job.failure_kind = "auth"
+        self.assertIn("authenticate", agent_bridge.announcement(job).lower())
+        self.assertIn("api key", agent_bridge.recovery_hint(job).lower())
+
+    def test_interactive_prompt_tail_finds_the_approval_menu(self):
+        """The menu five stalled code-puppy jobs sat on (2026-09-13/14)."""
+        lines = [
+            "Core plugins version: 0.0.43",
+            "Proposed change to config.py",
+            "❯ Reject with feedback (tell Ralph what to change) ↑/↓ move "
+            "↵ enter select ⎋ esc cancel",
+        ]
+        self.assertIn("enter select", agent_bridge.interactive_prompt_tail(lines))
+        self.assertIsNone(agent_bridge.interactive_prompt_tail(["all done", "wrote 3 files"]))
 
     def test_model_override_uses_exact_configured_target(self):
         bridge = agent_bridge.AgentBridge(
@@ -611,6 +683,43 @@ class BridgeLifecycleTests(unittest.TestCase):
             "\n".join(second.lines),
         )
         self.assertNotIn("Session:", "\n".join(second.lines))
+
+    def test_hermes_session_rotates_after_max_resumed_turns(self):
+        """A hermes-family session must not resume forever -- see config.py's
+        AGENT_HERMES_SESSION_MAX_TURNS docstring: unbounded resume made real
+        turnaround creep from ~8s to 700-1200s and some jobs return no
+        result at all. Once the turn cap is hit, the next job must NOT pass
+        --resume with the stale id, i.e. it starts a clean session.
+        """
+        events: list[dict] = []
+        script = (
+            "import sys; "
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"ok",'
+            '"result":"ok"}\', flush=True); '
+            "print('Session:        20260707_174900_abc123', flush=True); "
+            "print('ARGV ' + ' '.join(sys.argv[1:]), flush=True)"
+        )
+        backend = {"hermes": ["{python}", "-u", "-c", script, "chat", "-q", "{task}"]}
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(backend, events.append, completion_grace_secs=0.01)
+
+            async def run_turn(task):
+                job_id = await bridge.start("hermes", task)
+                target = sum(event["event"] == "finished" for event in events) + 1
+                while sum(event["event"] == "finished" for event in events) < target:
+                    await asyncio.sleep(0.01)
+                return bridge.get(job_id)
+
+            await run_turn("turn 1")
+            await run_turn("turn 2 (hits the cap)")
+            return await run_turn("turn 3 (should rotate)")
+
+        with mock.patch.object(cfg, "AGENT_HERMES_SESSION_MAX_TURNS", 1):
+            third = self._run(scenario())
+        third_lines = "\n".join(third.lines)
+        self.assertNotIn("--resume 20260707_174900_abc123", third_lines)
+        self.assertIn("ARGV chat -q", third_lines)
 
     def test_wrapped_hermes_status_beats_resume_footer(self):
         events: list[dict] = []
@@ -1313,6 +1422,215 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertTrue(heartbeats)
         self.assertEqual(heartbeats[0]["action"], "Opening Paint")
 
+    def test_silent_agent_is_reported_as_a_timeout_not_a_mystery(self):
+        """Four claude-code jobs died at 300s with no recorded reason."""
+        events: list[dict] = []
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", "import time; time.sleep(10)"]},
+                events.append,
+                timeout_secs=0.5,
+                kill_grace_secs=0.2,
+            )
+            job_id = await bridge.start("mock", "think quietly")
+            for _ in range(100):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
+        self.assertEqual(job.failure_kind, "timeout")
+        self.assertIn("0s", job.failure_detail)
+        self.assertIn("went quiet", job.summary)
+        self.assertIn("went quiet", agent_bridge.announcement(job).lower())
+
+    def test_agent_stalled_on_an_approval_menu_says_so(self):
+        """~33 minutes were burned on prompts nothing could answer."""
+        events: list[dict] = []
+        script = (
+            "import time; "
+            "print('Core plugins version: 0.0.43', flush=True); "
+            "print('enter select  esc cancel', flush=True); "
+            "time.sleep(10)"
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]},
+                events.append,
+                timeout_secs=0.5,
+                kill_grace_secs=0.2,
+            )
+            job_id = await bridge.start("mock", "edit the config")
+            for _ in range(100):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.failure_kind, "interactive_prompt")
+        self.assertIn("esc cancel", job.failure_detail)
+        # Not the startup banner, which is what the log actually reported.
+        self.assertNotIn("Core plugins version", job.summary)
+        self.assertIn("approval", agent_bridge.announcement(job).lower())
+
+    def test_failure_with_no_usable_output_still_says_something(self):
+        """jess_agent_history.json has 8 rows failed with no reason recorded.
+
+        The relayed sentence ended at "Last output: " with nothing after it.
+        """
+        events: list[dict] = []
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", "raise SystemExit(3)"]},
+                events.append,
+                timeout_secs=8,
+                kill_grace_secs=0.2,
+            )
+            job_id = await bridge.start("mock", "do the thing")
+            for _ in range(100):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
+        self.assertTrue(job.summary.strip(), "a failed job must carry a reason")
+        self.assertFalse(agent_bridge.announcement(job).rstrip().endswith("Last output:"))
+
+    def test_agent_printing_non_ascii_is_not_killed_by_the_host_encoding(self):
+        """mock_agent died on a cp1252 stdout before reporting anything.
+
+        jess_agent_history.json 2026-08-08T19:00: UnicodeEncodeError inside the
+        agent, because the child inherited a non-UTF-8 stdout while the bridge
+        decodes its output as UTF-8.
+        """
+        events: list[dict] = []
+        script = "print('⚠ starting', flush=True); print('all done', flush=True)"
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]},
+                events.append,
+                timeout_secs=8,
+                kill_grace_secs=0.2,
+            )
+            job_id = await bridge.start("mock", "greet")
+            for _ in range(100):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PYTHONIOENCODING", None)
+            job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_DONE)
+        self.assertNotIn("UnicodeEncodeError", " ".join(job.lines))
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EchoedPromptTests(unittest.TestCase):
+    """An agent that repeats its prompt must still get its answer relayed.
+
+    jess_agent_history.json: every hermes job from 2026-09-13 onward finished
+    `done` with result="" and summary="". Hermes echoes the injected prompt,
+    which latched the prompt-skip block; the only way out was a heading that
+    only Code Puppy prints, so the answer was dropped with the echo and the
+    user heard "it delivered nothing".
+    """
+
+    def _echoed_prompt(self) -> list[str]:
+        injected = (
+            cfg.AGENT_SCOPE_PREAMBLE.format(cwd="C:/scratch")
+            + "\n\nlook up the release notes\n\n"
+            + agent_bridge.status_protocol()
+        )
+        return [line for line in injected.splitlines() if line.strip()]
+
+    def test_the_answer_survives_an_echoed_prompt(self):
+        answer = ["release page:", "- rolled up 338 PRs into a stable tag"]
+        alone = agent_bridge.fallback_result(answer)
+        after_echo = agent_bridge.fallback_result(self._echoed_prompt() + answer)
+
+        self.assertTrue(alone, "sanity: the answer alone has to survive")
+        self.assertEqual(after_echo, alone, "echoing the prompt must not cost the answer")
+
+    def test_the_echoed_prompt_itself_is_still_withheld(self):
+        lines = self._echoed_prompt() + ["release page:"]
+        kept = " ".join(agent_bridge._user_facing_output_lines(lines))
+
+        self.assertIn("release page:", kept)
+        self.assertNotIn("[Scope:", kept)
+        self.assertNotIn("@@JESS_STATUS", kept)
+
+    def test_the_boundary_follows_an_edited_status_protocol(self):
+        """The protocol is editable from the GUI; a stale literal would re-break this."""
+        original = agent_bridge.status_protocol()
+        try:
+            agent_bridge.set_status_protocol("Report status somehow.\nTHE VERY LAST LINE.")
+            lines = ["[Scope: do the thing]", "THE VERY LAST LINE.", "the actual answer"]
+            self.assertEqual(agent_bridge._user_facing_output_lines(lines), ["the actual answer"])
+        finally:
+            agent_bridge.set_status_protocol(original)
+
+
+class JobRetentionTests(unittest.TestCase):
+    """Finished jobs must not accumulate for the life of the process.
+
+    Job ids never repeat and this is a desktop process that runs for days, so
+    an unbounded dict of AgentJob (each holding up to _MAX_KEPT_LINES of
+    output) grows without limit across a long session.
+    """
+
+    def _bridge(self) -> agent_bridge.AgentBridge:
+        return agent_bridge.AgentBridge({"mock": ["{python}"]}, lambda _e: None)
+
+    def test_finished_jobs_are_capped(self):
+        bridge = self._bridge()
+        for index in range(agent_bridge._MAX_KEPT_JOBS + 25):
+            job = agent_bridge.AgentJob(job_id=f"job-{index}", agent="mock", task="t")
+            job.status = agent_bridge.STATUS_DONE
+            bridge._jobs[job.job_id] = job
+
+        bridge._trim_finished_jobs()
+
+        self.assertLessEqual(len(bridge._jobs), agent_bridge._MAX_KEPT_JOBS)
+        # The newest survive; the oldest are the ones shed.
+        self.assertIsNotNone(bridge.get(f"job-{agent_bridge._MAX_KEPT_JOBS + 24}"))
+        self.assertIsNone(bridge.get("job-0"))
+
+    def test_an_active_job_is_never_forgotten(self):
+        """However old: cancel and status still have to find it."""
+        bridge = self._bridge()
+        running = agent_bridge.AgentJob(job_id="job-oldest", agent="mock", task="t")
+        running.status = agent_bridge.STATUS_RUNNING
+        bridge._jobs[running.job_id] = running
+        for index in range(agent_bridge._MAX_KEPT_JOBS + 25):
+            job = agent_bridge.AgentJob(job_id=f"job-{index}", agent="mock", task="t")
+            job.status = agent_bridge.STATUS_DONE
+            bridge._jobs[job.job_id] = job
+
+        bridge._trim_finished_jobs()
+
+        self.assertIsNotNone(bridge.get("job-oldest"))
+
+    def test_a_short_session_is_left_alone(self):
+        bridge = self._bridge()
+        for index in range(5):
+            job = agent_bridge.AgentJob(job_id=f"job-{index}", agent="mock", task="t")
+            job.status = agent_bridge.STATUS_DONE
+            bridge._jobs[job.job_id] = job
+
+        bridge._trim_finished_jobs()
+
+        self.assertEqual(len(bridge._jobs), 5)

@@ -16,6 +16,7 @@ const state = {
   agentPrompts: null,
   confirmHistory: [],
   remoteHosts: [],
+  orchestration: null,
   jobLines: {},
   catalogs: {},
   catalogVersion: null,
@@ -28,6 +29,18 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+const conversation = window.RapConversation.createStore();
+const conversationView = window.RapConversation.createView({
+  store: conversation, log: $("chatLog"), newMessages: $("newMessagesBtn"), live: $("conversationLive"),
+  inspect: (jobId) => {
+    state.selectedAgentJobId = jobId;
+    document.querySelector('[data-view="agents"]')?.click();
+    renderAgentDetail();
+    ensureJobLines(jobId);
+  },
+  decide: (action, token) => post(action, { token }),
+  cancel: (jobId) => post("cancel_agent", { job_id: jobId }),
+});
 const uiShell = window.RapUiShell;
 const ACTIVE_AGENT_STATUSES = new Set(["running", "waiting", "blocked"]);
 
@@ -221,6 +234,11 @@ async function poll() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     const restored = state.connectionLost;
+    if (data.conversation) {
+      conversation.restore(data.conversation);
+      $("conversationHistoryNotice").hidden = !data.conversation.truncated;
+      conversationView.render({ announce: false });
+    }
     state.latest = data.latest;
     state.status = mergeCatalogs(data.status);
     await refreshCatalogsIfStale();
@@ -228,7 +246,7 @@ async function poll() {
       addMessage("sys", "System", "UI connection restored.");
       inputControls.connected();
     }
-    data.events.forEach(handleEvent);
+    data.events.forEach(event => handleEvent({ ...event, replayed_snapshot: Boolean(data.conversation) }));
     renderStatus();
   } catch (error) {
     if (!state.connectionLost) {
@@ -245,6 +263,12 @@ async function poll() {
 }
 
 function handleEvent(event) {
+  if (event.type === "conversation_reset" && !event.replayed_snapshot) {
+    conversation.clear(event.conversation_epoch);
+    $("conversationHistoryNotice").hidden = true;
+    renderChat();
+  }
+  if (!event.replayed_snapshot && event.conversation_row && conversation.apply(event.conversation_row)) renderChat();
   if (["transcript", "draft_voice", "turn", "speaking", "wake", "agent_job", "agent_confirm"].includes(event.type)) {
     state.avatar.lastActivityAt = Date.now();
   }
@@ -256,13 +280,13 @@ function handleEvent(event) {
   if (event.type === "agent_job" && ["failed", "timeout", "cancelled"].includes(event.status)) state.avatar.failedAt = Date.now();
 
   if (event.type === "transcript") {
-    addMessage(event.role || "assistant", event.role === "user" ? "You" : currentPersona(), event.text || "");
+    if (!event.conversation_processed) addMessage(event.role || "assistant", event.speaker_name || (event.role === "user" ? "You" : "Assistant (unknown)"), event.text || "");
   } else if (event.type === "draft_voice") {
     state.voiceDraft = event.text || "";
     $("voiceDraftLabel").textContent = state.voiceDraft ? `Voice draft: ${state.voiceDraft}` : "Voice transcript appears here when context is held.";
     if (event.intent === "send") sendMessage();
   } else if (event.type === "sys") {
-    addMessage("sys", "System", event.text || "");
+    if (!event.conversation_processed) addMessage("sys", "System", event.text || "");
   } else if (event.type === "agent_job") {
     storeAgentEvent(event);
     renderAgentEvent(event);
@@ -390,26 +414,15 @@ async function saveAvatarSettings(overrides = {}) {
 
 function addMessage(role, name, text) {
   if (!text) return;
-  state.messages.push({ role, name, text });
+  const key = `local:${crypto.randomUUID()}`;
+  conversation.apply({ key, id: Date.now(), type: role === "sys" ? "sys" : "transcript",
+    role, speaker_name: name, text, final: true, delivery: "text_only" });
   renderChat();
 }
 
 function renderChat() {
-  const log = $("chatLog");
-  if (!state.messages.length) return;
-  log.innerHTML = "";
-  state.messages.slice(-80).forEach((message) => {
-    const row = document.createElement("article");
-    row.className = `message ${message.role}`;
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = message.name;
-    const body = document.createElement("div");
-    body.textContent = message.text;
-    row.append(name, body);
-    log.appendChild(row);
-  });
-  log.scrollTop = log.scrollHeight;
+  conversationView.render();
+  $("conversationHistoryNotice").hidden = !conversation.truncated;
 }
 
 // Brain mode moves the microphone and speakers into an external realtime
@@ -796,6 +809,7 @@ function renderAgents(s) {
 }
 
 function renderAgentEvent(event) {
+  if (event.conversation_processed) return;
   const label = event.action || event.state || event.event || "agent update";
   if (event.event === "progress") addMessage("agent", event.agent || "Agent", label);
   if (event.event === "finished") {
@@ -1092,10 +1106,10 @@ function renderStatusDashboard(s) {
   }
   const incidents = coreServices.filter(([, , tone]) => tone === "error" || tone === "warning");
   const serviceNodes = coreServices.map(([label, value, tone, role]) => (
-    `<article class="status-service-node"><span class="status-icon">${label.slice(0, 2).toUpperCase()}</span><div><small>${escapeHtml(role)}</small><strong>${escapeHtml(label)}</strong><p>${escapeHtml(value)}</p></div><b class="status-${tone}">${tone}</b></article>`
+    `<article class="status-service-node"><span class="status-icon">${window.RapIcons.svg(({ Session: "power", "Voice input": "mic", Ollama: "cpu", TTS: "speaker", Memory: "memory" })[label])}</span><div><small>${escapeHtml(role)}</small><strong>${escapeHtml(label)}</strong><p>${escapeHtml(value)}</p></div><b class="status-${tone}">${tone}</b></article>`
   )).join("");
   const resourceCards = resources.map(([label, value, tone]) => (
-    `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "--")}</strong><i class="status-${tone}">${tone}</i></article>`
+    `<article${label === "Default agent" ? ' data-actor="harness"' : ""}><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "--")}</strong><i class="status-${tone}">${tone}</i></article>`
   )).join("");
   const incidentBody = incidents.length
     ? incidents.map(([label, value, tone]) => `<p><i class="status-${tone}"></i><span><strong>${escapeHtml(label)}</strong>${escapeHtml(value)}</span></p>`).join("")
@@ -1109,8 +1123,207 @@ function renderStatusDashboard(s) {
     <aside class="status-inspection" aria-label="Runtime incidents and resources">
       <section class="status-incidents"><header><span>Incidents</span><b>${incidents.length}</b></header>${incidentBody}</section>
       <section class="status-resource-stack"><header>Resources and routing</header>${resourceCards}</section>
+      ${orchestrationPanelHtml(state.orchestration)}
+      <!-- orchestration data is fetched separately; see maybeRefreshOrchestration -->
       <section class="status-timeline"><span>Latest snapshot</span><strong>${runtimeConnected ? "Live state received" : "Waiting for connection"}</strong><small>${runtimeConnected ? "Refresh or wait for the next runtime event." : "Displayed values are unconfirmed until RAP reconnects."}</small></section>
     </aside>`;
+  bindOrchestrationControls();
+  maybeRefreshOrchestration();
+}
+
+const ORCHESTRATION_MODES = ["local", "cloud", "hybrid"];
+const QUOTA_STRATEGIES = ["economy", "balanced", "performance", "cloud_preferred"];
+
+function orchestrationPanelHtml(o) {
+  if (!o) {
+    return '<section class="status-resource-stack" id="orchestrationPanel"><header>Persona orchestration</header><p class="muted">Loading...</p></section>';
+  }
+  if (o.unavailable) {
+    return `<section class="status-resource-stack" id="orchestrationPanel">
+      <header>Persona orchestration</header>
+      <article>
+        <span>Orchestration status</span>
+        <strong class="status-error">unavailable</strong>
+      </article>
+      <p class="muted">${escapeHtml(o.unavailable)}</p>
+    </section>`;
+  }
+  const modeButtons = ORCHESTRATION_MODES.map((mode) => (
+    `<button type="button" class="chip-toggle${mode === o.mode ? " active" : ""}" data-orch-mode="${mode}">${escapeHtml(mode)}</button>`
+  )).join("");
+  const quotaOptions = QUOTA_STRATEGIES.map((strategy) => (
+    `<option value="${strategy}"${strategy === o.quota_strategy ? " selected" : ""}>${escapeHtml(strategy.replace("_", " "))}</option>`
+  )).join("");
+  const cloud = o.cloud_status || {};
+  const local = o.local_status || {};
+  // Three explicit states, never a hidden/blank one: Connected (reachable and
+  // authenticated), Not connected (reachable but rejected/unauthenticated),
+  // Unavailable (SDK/CLI missing or unreachable), plus "not checked yet".
+  let authTone = "warning";
+  let authLabel = "not checked yet";
+  if (cloud.available === true && cloud.authenticated === true) {
+    authTone = "success";
+    authLabel = "connected";
+  } else if (cloud.available === false && cloud.authenticated === false) {
+    authTone = "error";
+    authLabel = "not connected";
+  } else if (cloud.available === false) {
+    authTone = "error";
+    authLabel = "unavailable";
+  }
+  const localTone = local.available === true ? "success" : local.available === false ? "error" : "warning";
+  const localLabel = local.available === null || local.available === undefined
+    ? "not checked yet"
+    : local.available ? "reachable" : "unavailable";
+  const models = Array.isArray(cloud.models) ? cloud.models : [];
+  const modelLabel = cloud.reasoning_model
+    ? `${cloud.reasoning_model}${models.length ? ` (${models.length} available)` : ""}`
+    : (models.length ? `${models.length} available` : "unavailable");
+  const telemetry = o.telemetry || {};
+  const statRow = (label, value) => (
+    `<article><span>${escapeHtml(label)}</span><strong>${value === null || value === undefined ? "--" : `${value}%`}</strong></article>`
+  );
+  return `
+    <section class="status-resource-stack" id="orchestrationPanel">
+      <header>Persona orchestration</header>
+      <article>
+        <span>Mode</span>
+        <strong>${escapeHtml(o.mode || "--")}</strong>
+      </article>
+      <div class="orchestration-modes">${modeButtons}</div>
+      <article>
+        <span>Strategy</span>
+        <select id="orchQuotaSelect">${quotaOptions}</select>
+      </article>
+      <article>
+        <span>Copilot (${escapeHtml(o.cloud_provider || "copilot")})</span>
+        <strong>${escapeHtml(authLabel)}</strong>
+        <i class="status-${authTone}">${escapeHtml(authTone)}</i>
+        <button type="button" id="orchCheckAuthBtn" class="link-button">Check now</button>
+      </article>
+      <article>
+        <span>Cloud model</span>
+        <strong>${escapeHtml(modelLabel)}</strong>
+      </article>
+      <article>
+        <span>Local provider (${escapeHtml(o.local_provider || "local")})</span>
+        <strong>${escapeHtml(localLabel)}</strong>
+        <i class="status-${localTone}">${escapeHtml(localTone)}</i>
+      </article>
+      <div class="orchestration-stats">
+        ${statRow("Local resolution", telemetry.local_resolution_pct)}
+        ${statRow("Cloud escalation", telemetry.cloud_escalation_pct)}
+        ${statRow("Routing failures", telemetry.routing_failure_pct)}
+        ${statRow("Fallback rate", telemetry.fallback_pct)}
+      </div>
+      <details class="orchestration-events" open>
+        <summary>Recent routing decisions</summary>
+        ${orchestrationEventsHtml(o.recent_events)}
+      </details>
+    </section>`;
+}
+
+// The status view re-renders on every poll, but the orchestration payload has
+// its own endpoint -- without this the panel would only ever load when the
+// Status nav button was clicked, so arriving there by page reload (or just
+// sitting on it) left it stuck on "Loading...".
+let orchestrationLoadedAt = 0;
+let orchestrationLoading = false;
+const ORCHESTRATION_REFRESH_MS = 5000;
+
+function maybeRefreshOrchestration() {
+  if (orchestrationLoading) return;
+  const statusVisible = !$("statusView")?.hidden;
+  if (!statusVisible) return;
+  const stale = Date.now() - orchestrationLoadedAt > ORCHESTRATION_REFRESH_MS;
+  if (!state.orchestration || stale) loadOrchestrationStatus();
+}
+
+function orchestrationEventsHtml(events) {
+  if (!events || !events.length) {
+    return '<p class="muted">No routing decisions recorded yet.</p>';
+  }
+  const rows = events.map((e) => {
+    const when = e.timestamp ? new Date(e.timestamp * 1000).toLocaleTimeString() : "";
+    if (e.stage === "route") {
+      const harnessChange = e.original_harness && e.original_harness !== e.harness
+        ? `${escapeHtml(e.original_harness)} &rarr; ${escapeHtml(e.harness)}`
+        : escapeHtml(e.harness || "--");
+      const risk = typeof e.risk_score === "number" ? e.risk_score.toFixed(2) : "--";
+      const routeLatency = typeof e.route_latency_ms === "number" ? `${Math.round(e.route_latency_ms)}ms` : "--";
+      return `<li class="orch-event orch-event-route">
+        <span class="orch-event-time">${when}</span>
+        <span class="status-pill agent-state${e.route === "cloud" ? " busy" : ""}"><span></span><em>${escapeHtml(e.route || "?")}</em></span>
+        <strong>${harnessChange}</strong>
+        <span class="muted">risk ${risk} &middot; ${routeLatency}</span>
+        ${e.reason ? `<p class="orch-event-reason" title="${escapeHtml(e.reason)}">${escapeHtml(e.reason)}</p>` : ""}
+      </li>`;
+    }
+    const outcomeTone = e.outcome === "success" ? "success" : e.outcome === "failed" ? "error" : "warning";
+    return `<li class="orch-event orch-event-outcome">
+      <span class="orch-event-time">${when}</span>
+      <b class="status-${outcomeTone}">${escapeHtml(e.outcome || "?")}</b>
+      <strong>${escapeHtml(e.harness || "--")}</strong>
+      <span class="muted">${e.route ? `via ${escapeHtml(e.route)}` : ""}${e.fallback ? " (fallback)" : ""}</span>
+    </li>`;
+  }).join("");
+  return `<ul class="orchestration-event-list">${rows}</ul>`;
+}
+
+function bindOrchestrationControls() {
+  document.querySelectorAll("[data-orch-mode]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await post("set_orchestration_mode", { mode: button.dataset.orchMode });
+      await loadOrchestrationStatus();
+    });
+  });
+  // Dynamically rendered (no static placeholder in index.html), so looked up
+  // via getElementById directly rather than the $() shorthand reserved for
+  // static ids (see tests/test_web_layout_v3.py).
+  const quotaSelect = document.getElementById("orchQuotaSelect");
+  if (quotaSelect) {
+    quotaSelect.addEventListener("change", async () => {
+      await post("set_quota_strategy", { strategy: quotaSelect.value });
+      await loadOrchestrationStatus();
+    });
+  }
+  const checkAuthBtn = document.getElementById("orchCheckAuthBtn");
+  if (checkAuthBtn) {
+    checkAuthBtn.addEventListener("click", async () => {
+      checkAuthBtn.disabled = true;
+      try {
+        await post("check_copilot_auth");
+        // The probe runs on the session loop; give it a moment before polling.
+        setTimeout(() => loadOrchestrationStatus(), 1500);
+      } finally {
+        checkAuthBtn.disabled = false;
+      }
+    });
+  }
+}
+
+async function loadOrchestrationStatus() {
+  orchestrationLoading = true;
+  try {
+    const response = await fetch("/api/orchestration");
+    if (!response.ok) {
+      // Never leave the panel on "Loading..." -- a silent return here is what
+      // made a 500 look like an endless load. Show what actually happened.
+      let detail = `HTTP ${response.status}`;
+      try {
+        const body = await response.json();
+        if (body?.error?.message) detail = `${detail}: ${body.error.message}`;
+      } catch (_ignored) { /* non-JSON error body */ }
+      state.orchestration = { unavailable: detail };
+    } else {
+      state.orchestration = await response.json();
+    }
+  } catch (error) {
+    state.orchestration = { unavailable: error?.message || "request failed" };
+  }
+  orchestrationLoading = false;
+  orchestrationLoadedAt = Date.now();
+  renderStatusDashboard(state.status || {});
 }
 
 function renderMemory() {
@@ -1359,7 +1572,7 @@ function commandPaletteItems() {
     { id: "action:focus-message", group: "Actions", label: "Focus message", hint: "Ctrl L", action: () => $("messageInput").focus() },
     { id: "action:toggle-mic", group: "Actions", label: "Toggle mic", hint: "Ctrl M", action: () => inputControls.run("mute", { muted: !state.status?.muted }) },
     { id: "action:cycle-voice-mode", group: "Actions", label: "Cycle voice mode", hint: "", action: () => inputControls.run("voice_mode", { mode: nextMode(state.status?.voiceMode, state.status?.mode) }) },
-    { id: "action:new-chat", group: "Actions", label: "New chat", hint: "", action: () => { state.messages = []; renderChat(); post("restart_chat"); } },
+    { id: "action:new-chat", group: "Actions", label: "New chat", hint: "", action: () => { post("restart_chat"); } },
     { id: "action:refresh-memory", group: "Actions", label: "Refresh memory", hint: "", action: () => { navigateTo("memory"); post("refresh_memory", { query: $("memorySearch").value }); } },
     { id: "action:export-diagnostics", group: "Actions", label: "Export diagnostics", hint: "", action: () => post("export_diagnostics") },
     { id: "action:start-ollama", group: "Actions", label: "Start Ollama", hint: "", action: () => post("start_ollama") },
@@ -1454,6 +1667,10 @@ function renderCommandPalette() {
     button.setAttribute("aria-selected", String(index === state.paletteIndex));
     button.className = `palette-result${index === state.paletteIndex ? " active" : ""}`;
     button.innerHTML = `<span>${escapeHtml(item.label)}</span>${item.hint ? `<em>${escapeHtml(item.hint)}</em>` : ""}`;
+    if (item.group === "Personas") button.dataset.actor = "persona";
+    if (item.group === "Agent Jobs") button.dataset.actor = "harness";
+    const navigationIcon = { control: "home", agents: "agents", personas: "persona", memory: "memory", setup: "terminal", status: "activity", settings: "settings" }[item.id.replace("nav:", "")];
+    button.prepend(window.RapIcons.node(navigationIcon || ({ Personas: "persona", "Agent Jobs": "agents", Memory: "memory" })[item.group] || "terminal"));
     button.addEventListener("mouseenter", () => {
       state.paletteIndex = index;
       results.querySelectorAll(".palette-result").forEach((option, optionIndex) => {
@@ -1564,6 +1781,7 @@ function bind() {
       $("appTitle").textContent = uiShell.viewTitle(button.dataset.view);
       if (button.dataset.view === "memory") post("refresh_memory", { query: $("memorySearch").value });
       if (button.dataset.view === "agents") loadAgentsPage().catch((error) => showAgentPromptNotice(`Agents refresh failed: ${error.message}`, false));
+      if (button.dataset.view === "status") loadOrchestrationStatus();
     });
   });
   $("muteBtn").addEventListener("click", () => inputControls.run("mute", { muted: !state.status?.muted }));
@@ -1615,6 +1833,11 @@ function bind() {
   });
   $("sendBtn").addEventListener("click", sendMessage);
   $("delegateBtn").addEventListener("click", delegateMessage);
+  $("stopAllBtn").addEventListener("click", async () => {
+    $("stopAllBtn").disabled = true;
+    try { await post("cancel_all_agents"); }
+    finally { $("stopAllBtn").disabled = false; }
+  });
   $("messageInput").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -1642,7 +1865,7 @@ function bind() {
     state.activeConfirm = null;
     renderConfirm();
   });
-  $("restartChatBtn").addEventListener("click", () => { state.messages = []; renderChat(); post("restart_chat"); });
+  $("restartChatBtn").addEventListener("click", () => { post("restart_chat"); });
   $("freeVramBtn").addEventListener("click", () => post("free_vram"));
   $("startOllamaBtn").addEventListener("click", () => post("start_ollama"));
   $("diagnosticsBtn").addEventListener("click", () => post("export_diagnostics"));
@@ -1653,7 +1876,7 @@ function bind() {
     );
   });
   $("settingsMuteBtn").addEventListener("click", () => inputControls.run("mute", { muted: !state.status?.muted }));
-  $("settingsRestartBtn").addEventListener("click", () => { state.messages = []; renderChat(); post("restart_chat"); });
+  $("settingsRestartBtn").addEventListener("click", () => { post("restart_chat"); });
   $("settingsMemoryBtn").addEventListener("click", () => post("refresh_memory", { query: $("memorySearch").value }));
   $("settingsDiagnosticsBtn").addEventListener("click", () => post("export_diagnostics"));
   $("settingsOllamaBtn").addEventListener("click", () => post("start_ollama"));

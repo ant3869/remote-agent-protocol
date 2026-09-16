@@ -1,0 +1,11 @@
+**
+!remote_agent_protocol/
+!remote_agent_protocol/__init__.py
+!remote_agent_protocol/conversation.py
+!remote_agent_protocol/web_app/
+!remote_agent_protocol/web_app/conversation.js
+!tests/
+!tests/test_conversation.py
+!tests/js/
+!tests/js/conversation.test.mjs
+!Dockerfile.conversation

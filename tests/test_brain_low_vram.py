@@ -20,9 +20,11 @@ class FakeResponse:
 class FakeHttp:
     def __init__(self):
         self.payloads = []
+        self.calls = []
 
-    def post(self, url, json, timeout):
+    def post(self, url, json, timeout, headers=None):
         self.payloads.append(json)
+        self.calls.append({"url": url, "headers": headers or {}})
         return FakeResponse()
 
 

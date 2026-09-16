@@ -18,6 +18,7 @@ from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
+    InterruptionFrame,
     LLMRunFrame,
     LLMUpdateSettingsFrame,
     TTSSpeakFrame,
@@ -45,6 +46,7 @@ from remote_agent_protocol import (
     narration,
     ollama_models,
     remote_client,
+    remote_protocol,
     stt_factory,
     tts_factory,
     voice_commands,
@@ -53,6 +55,14 @@ from remote_agent_protocol import (
 )
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import personas as persona_catalog
+from remote_agent_protocol.conversation import ConversationEvents
+from remote_agent_protocol.orchestration import telemetry as orchestration_telemetry
+from remote_agent_protocol.orchestration.orchestrator import (
+    OrchestrationContext,
+    PersonaOrchestrator,
+)
+from remote_agent_protocol.orchestration.providers.copilot import CopilotProvider
+from remote_agent_protocol.orchestration.providers.local import LocalProvider
 from remote_agent_protocol.persona_tts import PersonaTTSService
 from remote_agent_protocol.personas import Persona
 from remote_agent_protocol.session_processors import (
@@ -66,6 +76,7 @@ from remote_agent_protocol.session_processors import (
     TranscriptTap,
     looks_like_delegation_promise,
 )
+from remote_agent_protocol.speech_events import SpeechPlaybackTap
 
 
 class VoiceSession:
@@ -87,6 +98,8 @@ class VoiceSession:
         """
         self._persona = persona
         self._on_event = on_event
+        self._conversation = ConversationEvents(lambda: self._persona.name, "queued")
+        self._pending_speech: dict[str, dict] = {}
         self._on_avatar_audio = on_avatar_audio
 
         # Populated by build():
@@ -116,6 +129,22 @@ class VoiceSession:
             host_repo=cfg.AGENT_HOST_REPO,
             remotes=self._remotes,
         )
+        # Local/Cloud/Hybrid orchestration layer, additive on top of the
+        # router/bridge above: risk-scores whether ORCHESTRATION REASONING
+        # itself (harness pick, ambiguous-result interpretation) should
+        # escalate to the cloud provider. Constructing these never touches
+        # the network -- CopilotProvider only talks to the Copilot SDK when
+        # a turn actually calls into it.
+        self._orchestrator = PersonaOrchestrator(
+            bridge=self._bridge,
+            local_provider=LocalProvider(),
+            cloud_provider=CopilotProvider(
+                model_map=cfg.COPILOT_MODEL_MAP,
+                reasoning_effort=cfg.COPILOT_REASONING_EFFORT or None,
+            ),
+            telemetry=orchestration_telemetry.TelemetryRecorder(cfg.ORCHESTRATION_TELEMETRY_FILE),
+        )
+        self._pending_structured_decision = None
         self._lifecycle_ws = (
             lifecycle_ws.LifecycleEventServer(
                 host=cfg.LIFECYCLE_WS_HOST,
@@ -274,7 +303,7 @@ class VoiceSession:
             stt,
             STTNoiseFilter(),  # drop Whisper silence-hallucinations before anything sees them
             ManualPromptDraftTap(self._manual_prompt_enabled, self._on_draft_voice),
-            TranscriptTap(self._on_event, role="user"),  # raw text, pre-delegation
+            TranscriptTap(self._emit, role="user", conversation=self._conversation),
             DelegationTap(
                 self._delegate_ack,
                 self._resolve_delegation,
@@ -291,10 +320,16 @@ class VoiceSession:
             # Before the assistant tap + TTS, so markers never reach speech or GUI.
             processors.append(LLMDelegateTap(self._llm_delegate, on_response=self._on_llm_response))
         processors += [
-            TranscriptTap(self._on_event, role="assistant"),
+            TranscriptTap(
+                self._emit,
+                role="assistant",
+                conversation=self._conversation,
+                pending_speech=self._pending_speech,
+            ),
             self._tts,
             AvatarAudioTap(self._on_avatar_audio),
             transport.output(),
+            SpeechPlaybackTap(self._emit, self._pending_speech),
             # After the output transport so it sees every service's metrics
             # (including TTS) plus the bot speaking / turn markers, exactly once.
             TranscriptTap(self._on_event, role="telemetry"),
@@ -352,6 +387,11 @@ class VoiceSession:
         # Narration shares the router's model, so the warmup below covers both.
         self._narrator.enable()
         self._spawn(self._router.warmup(), name="intent-router-warmup")
+        # Probe providers once so the orchestration panel shows real status on
+        # first view instead of "not checked yet" until someone clicks Check now.
+        self._spawn(
+            self._orchestrator.refresh_provider_status(), name="orchestration-provider-probe"
+        )
         # The reply model too, not just the router: a cold load lands on the
         # first spoken turn otherwise.
         self._spawn(
@@ -639,6 +679,37 @@ class VoiceSession:
         """Update the scope preamble used for future delegated jobs."""
         self._bridge.set_scope_preamble(preamble)
 
+    # -- persona orchestration (Local / Cloud / Hybrid) ----------------------
+
+    def orchestration_status(self) -> dict:
+        """Synchronous snapshot for the UI -- never touches the network itself."""
+        return self._orchestrator.status()
+
+    def check_copilot_auth(self) -> None:
+        """Actively re-probe the Copilot SDK now; the result lands on the next poll."""
+        self._schedule(self._orchestrator.refresh_provider_status())
+
+    def set_orchestration_mode(self, mode: str) -> None:
+        """Change the global orchestration mode; invalid values are logged and ignored."""
+        try:
+            self._orchestrator.set_mode(mode)
+        except ValueError as exc:
+            logger.warning(str(exc))
+
+    def set_orchestration_quota_strategy(self, strategy: str) -> None:
+        """Change the quota strategy; invalid values are logged and ignored."""
+        try:
+            self._orchestrator.set_quota_strategy(strategy)
+        except ValueError as exc:
+            logger.warning(str(exc))
+
+    def set_persona_orchestration_override(self, persona: str, mode: str | None) -> None:
+        """Set (``mode``) or clear (``None``) one persona's mode override."""
+        try:
+            self._orchestrator.set_persona_mode(persona, mode)
+        except ValueError as exc:
+            logger.warning(str(exc))
+
     def send_text(self, text: str) -> None:
         """Typed input: same brain as voice (incl. delegation), spoken reply."""
         self._schedule(self._send_text(text))
@@ -662,6 +733,21 @@ class VoiceSession:
     def cancel_agent_task(self, job_id: str) -> None:
         """Kill a running delegated job."""
         self._schedule(self._bridge.cancel(job_id))
+
+    def cancel_all_agent_tasks(self) -> None:
+        """Stop every active job and interrupt whatever is being spoken.
+
+        The GUI kill switch. Bypasses routing/the classifier entirely: a
+        spoken "cancel" has to be heard, transcribed, and routed correctly to
+        work, and under load (several concurrent jobs) that same pipeline is
+        the thing most likely to be slow or misrouting. This acts directly.
+        """
+        self._schedule(self._cancel_all_agent_tasks())
+
+    async def _cancel_all_agent_tasks(self) -> None:
+        if self._worker is not None:
+            await self._worker.queue_frames([InterruptionFrame()])
+        await self._bridge.cancel_active(None, all_jobs=True)
 
     def _start_voicebox_warmups(self) -> None:
         if not cfg.VOICEBOX_WARMUP_ENABLED:
@@ -812,6 +898,7 @@ class VoiceSession:
 
     async def _do_restart(self) -> None:
         assert self._context is not None and self._worker is not None
+        await self._worker.queue_frames([InterruptionFrame()])
         self._context.set_messages([])  # forget this conversation
         self._context.add_message({"role": "user", "content": cfg.KICKOFF_FIRST})
         await self._worker.queue_frames([LLMRunFrame()])
@@ -896,6 +983,8 @@ class VoiceSession:
         await self._refresh_memories()
 
     async def _forget_short_term_memory(self) -> None:
+        if self._worker is not None:
+            await self._worker.queue_frames([InterruptionFrame()])
         if self._context is not None:
             self._context.set_messages([])
         memory.save_memory(cfg.MEMORY_FILE, [])
@@ -908,10 +997,23 @@ class VoiceSession:
         decision = await self._router.route(text, self._default_agent_backend)
         self._record_routing(decision)
         if decision.action == intent_router.ACTION_NONE:
+            self._pending_structured_decision = None
             return None
         self._force_confirm = decision.action == intent_router.ACTION_CONFIRM
         self._force_confirm_reason = decision.reason if self._force_confirm else ""
-        return decision.agent, decision.task
+        # UNDERSTAND + ROUTE: may escalate orchestration reasoning (never the
+        # task execution itself) to the cloud provider. _delegate_ack_ex
+        # consumes this structured decision rather than re-inferring the
+        # harness -- it is authoritative for this dispatch.
+        structured = await self._orchestrator.evaluate(
+            decision, OrchestrationContext(persona=self._persona.name)
+        )
+        self._pending_structured_decision = structured
+        logger.info(
+            f"Orchestration[{structured.route}] risk={structured.risk_score:.2f}"
+            f" harness={structured.target_harness} reason={structured.reason_summary!r}"
+        )
+        return structured.target_harness, structured.task
 
     def _record_routing(self, decision: intent_router.RoutingDecision) -> None:
         """Log, emit, and retain one routing decision for inspection."""
@@ -938,7 +1040,35 @@ class VoiceSession:
                 }
             )
 
+    def _gate_dispatch(self, agent: str, task: str, structured=None) -> str | None:
+        """Global/per-harness concurrency + duplicate-task admission.
+
+        The single centralized check every real-dispatch call site goes
+        through immediately before calling ``AgentBridge.start()`` --
+        callers never re-implement or duplicate the concurrency logic
+        itself (see ``orchestration.concurrency.ConcurrencyGuard``). This is
+        layered BENEATH the existing ``_agent_ack_turn`` / dedup /
+        destructive-confirmation safeguards, which decide whether a turn may
+        attempt a dispatch at all; this decides whether the attempt fits the
+        active-job budget right now, regardless of which path led here.
+
+        Returns ``None`` when the dispatch may proceed, else a
+        human-readable denial reason.
+        """
+        if structured is not None:
+            allowed, reason = self._orchestrator.admit(structured)
+        else:
+            allowed, reason = self._orchestrator.admit_by_task(agent, task)
+        if allowed:
+            return None
+        logger.info(f"Orchestrator withheld delegation [{agent}]: {task} ({reason})")
+        return reason
+
     async def _start_agent_task(self, agent: str, task: str, cwd: str | None = None) -> None:
+        deny_reason = self._gate_dispatch(agent, task)
+        if deny_reason is not None:
+            self._emit({"type": "sys", "text": f"Not dispatched -- {deny_reason}."})
+            return
         await self._bridge.start(
             agent, self._with_delegation_context(task), cwd, announce_start=True
         )
@@ -980,6 +1110,13 @@ class VoiceSession:
         self._remember_delegation(task)
         force_confirm, self._force_confirm = self._force_confirm, False
         forced_reason, self._force_confirm_reason = self._force_confirm_reason, ""
+        # Set only when this call came from _resolve_delegation's real routing
+        # decision; None for the LLM-marker and broken-promise-correction
+        # callers below, which reach this method directly. Either way,
+        # _gate_dispatch (below) checks concurrency/duplicate admission --
+        # with the StructuredDecision when there is one (so telemetry can
+        # attribute the route), or by (agent, task) alone when there isn't.
+        structured, self._pending_structured_decision = self._pending_structured_decision, None
         destructive = cfg.AGENT_CONFIRM_ENABLED and voice_commands.requires_confirmation(
             agent,
             task,
@@ -1007,7 +1144,20 @@ class VoiceSession:
                 }
             )
             logger.info(f"Delegation held for confirmation [{agent}]: {task} ({reason})")
+            # NOT run through admit() here: nothing has been reserved or
+            # dispatched yet, so there is nothing for the concurrency guard
+            # to check until the user actually confirms (see
+            # _approve_delegation, which re-checks at that point instead).
             return cfg.DELEGATION_CONFIRM_PROMPT.format(agent=agent, task=task), True
+        # Concurrency/duplicate admission belongs immediately before the real
+        # dispatch, not before a hold -- a held task may never actually run,
+        # and admitting it here would falsely reserve a slot for it.
+        deny_reason = self._gate_dispatch(agent, task, structured)
+        if deny_reason is not None:
+            return (
+                f"[Not dispatched -- {deny_reason}. Tell the user in ONE short sentence "
+                "why this wasn't started.]"
+            ), True
         execution_task = self._with_delegation_context(task)
         self._spawn(self._bridge.start(agent, execution_task, cwd), name=f"delegate-{agent}")
         return cfg.DELEGATION_ACK_PROMPT.format(agent=agent, task=task), False
@@ -1144,6 +1294,9 @@ class VoiceSession:
             }
         )
         if decision == "approve":
+            deny_reason = self._gate_dispatch(agent, task)
+            if deny_reason is not None:
+                return f"[Not dispatched -- {deny_reason}.]"
             execution_task = self._with_delegation_context(task)
             self._spawn(self._bridge.start(agent, execution_task, cwd), name=f"delegate-{agent}")
             return cfg.AGENT_CONFIRM_APPROVED_PROMPT.format(agent=agent, task=task)
@@ -1162,6 +1315,15 @@ class VoiceSession:
         cancel_request = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
         if cancel_request is not None:
             return await self._handle_agent_cancel_command(cancel_request)
+
+        # Before the per-agent progress question: "is hermes up" asks whether
+        # an agent can take work, not how an existing job is going.
+        rollcall = voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES)
+        if rollcall is not None:
+            return self._handle_agent_rollcall(rollcall[0])
+        status_request = voice_commands.parse_agent_status(text, cfg.AGENT_SPOKEN_ALIASES)
+        if status_request is not None:
+            return self._handle_agent_status(status_request)
 
         correction = voice_commands.parse_task_correction(text)
         if correction is not None:
@@ -1200,6 +1362,75 @@ class VoiceSession:
             return f"[Agent update: cancelled {count} active {noun}.]"
         return "[Agent update: there were no matching active tasks to cancel.]"
 
+    def _handle_agent_rollcall(self, agent: str | None = None) -> str:
+        """Answer "which agents are there?" from what RAP itself knows.
+
+        An agent cannot report on its peers -- asked to, it guesses, and a
+        guess delivered in the persona's voice reads exactly like a fact. RAP
+        knows which backends are configured, whether each one can be launched,
+        which remote machines are answering, and what is running right now, so
+        the roll call is answered here and never delegated.
+        """
+        self._agent_ack_turn = True
+        remote_states = {state["name"]: state for state in self._bridge.remote_hosts()}
+        active: dict[str, int] = {}
+        for job in self._bridge.active_jobs():
+            active[job.agent] = active.get(job.agent, 0) + 1
+        backends = [
+            name
+            for name in self._bridge.backend_names()
+            if agent is None or name == agent or name.endswith(f":{agent}")
+        ]
+        rows = []
+        for backend in backends:
+            split = remote_protocol.split_backend_name(backend)
+            if split is not None and split[0] in remote_states:
+                state = remote_states[split[0]]
+                ready = "ready" if state["online"] else f"unreachable ({state['error']})"
+                where = state["machine"]
+            else:
+                status, detail = agent_bridge.executable_status(cfg.AGENT_BACKENDS.get(backend, []))
+                ready = "ready" if status == "ok" else f"not runnable here ({detail})"
+                where = self._bridge.machine_for(backend)
+            busy = f", {active[backend]} job(s) running" if backend in active else ""
+            rows.append(f"{backend} on {where}: {ready}{busy}")
+        if not rows:
+            missing = (
+                f"there is no agent backend named '{agent}'"
+                if agent
+                else "no agent backends are configured"
+            )
+            return f"[Agent roll call: {missing}. Answer from this; do not start any new work.]"
+        listed = "; ".join(rows)
+        return (
+            f"[Agent roll call: {listed}. This is Remote Agent Protocol's own check of each "
+            "backend -- whether it can be started here and whether its machine is answering -- "
+            "not a reply from the agents themselves. Report it as such, briefly, and do not "
+            "start any new work.]"
+        )
+
+    def _handle_agent_status(self, status_request: tuple[str | None]) -> str:
+        """Answer a progress question from live job state instead of delegating.
+
+        Without this, "how's that going" / "any update?" reached the intent
+        router like any other utterance -- which, having no notion that a job
+        is already running, could dispatch a brand-new one just to answer a
+        question about the one already in flight.
+        """
+        (agent,) = status_request
+        self._agent_ack_turn = True
+        jobs = self._bridge.active_jobs(agent)
+        if not jobs:
+            scope = f"for {agent}" if agent else "right now"
+            return (
+                f"[Agent status: no active agent tasks {scope}. "
+                "Answer from this; do not start any new work.]"
+            )
+        lines = "; ".join(
+            f"{job.agent} is {job.status} on '{agent_bridge.task_label(job.task)}'" for job in jobs
+        )
+        return f"[Agent status: {lines}. Answer from this; do not start any new work.]"
+
     async def _handle_task_correction(self, text: str, correction: str) -> str | None:
         if self._pending_confirmations:
             token = next(reversed(self._pending_confirmations))
@@ -1220,6 +1451,10 @@ class VoiceSession:
             )
             return cfg.DELEGATION_CONFIRM_PROMPT.format(agent=agent, task=revised)
         if self._bridge.has_active():
+            # Not gated by _gate_dispatch: replace_latest cancels the job it
+            # replaces before starting the corrected one, so the active-job
+            # count this checks against is net-unchanged -- it is a
+            # correction to an already-admitted dispatch, not a new one.
             job_id = await self._bridge.replace_latest(correction)
             if job_id is not None:
                 return f"[Agent update: cancelled the prior task and restarted it as {job_id}.]"
@@ -1230,6 +1465,11 @@ class VoiceSession:
         if self._model_recovery is None:
             return None
         agent, task = self._model_recovery
+        deny_reason = self._gate_dispatch(agent, task)
+        if deny_reason is not None:
+            # Leave _model_recovery set so "retry" can be said again once
+            # there's room, rather than losing the recovery record here.
+            return f"[Agent model control: retry withheld -- {deny_reason}.]"
         self._model_recovery = None
         await self._bridge.start(agent, task)
         return f"[Agent model control: retrying the failed task on '{agent}'.]"
@@ -1245,6 +1485,13 @@ class VoiceSession:
                 "Tell the user the switch is unsupported and do not claim it succeeded.]"
             )
         if retry and recovery is not None and recovery[0] == agent:
+            deny_reason = self._gate_dispatch(agent, recovery[1])
+            if deny_reason is not None:
+                return (
+                    f"[Agent model control: switched '{agent}' to {label}, but the retry was "
+                    f"withheld -- {deny_reason}. Say the switch happened and they can retry "
+                    "again shortly.]"
+                )
             self._model_recovery = None
             await self._bridge.start(agent, recovery[1])
             return (
@@ -1280,6 +1527,10 @@ class VoiceSession:
             }
         )
         if decision == "approve":
+            deny_reason = self._gate_dispatch(agent, task)
+            if deny_reason is not None:
+                await self._inject_and_run(f"[Not dispatched -- {deny_reason}.]")
+                return
             await self._bridge.start(agent, self._with_delegation_context(task), cwd)
             await self._inject_and_run(
                 cfg.AGENT_CONFIRM_APPROVED_PROMPT.format(agent=agent, task=task)
@@ -1419,7 +1670,9 @@ class VoiceSession:
         """
         return cfg.HARNESS_VOICES.get(agent.rsplit(":", 1)[-1])
 
-    async def _speak_agent_text(self, text: str, *, agent: str | None = None) -> None:
+    async def _speak_agent_text(
+        self, text: str, *, agent: str | None = None, job_id: str | None = None
+    ) -> None:
         """Speak one line of agent/harness narration.
 
         When ``agent`` has its own voice (config.HARNESS_VOICES), the whole
@@ -1447,7 +1700,16 @@ class VoiceSession:
                         delta=self._tts_delta(voice=voice, model=None, voice_backend="kokoro")
                     )
                 )
-            frames.append(TTSSpeakFrame(text=text, append_to_context=True))
+            speech = TTSSpeakFrame(text=text, append_to_context=True)
+            speech.metadata["conversation"] = self._conversation.utterance(
+                speaker_name=agent if switching else self._persona.name,
+                speaker_id=agent if switching else self._persona.name,
+                role="agent" if switching else "assistant",
+                source_agent=agent,
+                job_id=job_id,
+                relation="agent_speech" if switching else ("relay" if agent else "speech"),
+            )
+            frames.append(speech)
             if switching:
                 frames.append(
                     TTSUpdateSettingsFrame(delta=self._tts_delta(**self._front_of_house_voice))
@@ -1455,7 +1717,12 @@ class VoiceSession:
             await self._worker.queue_frames(frames)
 
     async def _narrate_and_speak(
-        self, moment: narration.Moment, *, key: str | None = None, body: str = ""
+        self,
+        moment: narration.Moment,
+        *,
+        key: str | None = None,
+        body: str = "",
+        job_id: str | None = None,
     ) -> None:
         """Write this moment's line fresh, then speak it in the right voice.
 
@@ -1465,7 +1732,7 @@ class VoiceSession:
         """
         line = await self._narrator.line(moment, key=key)
         text = f"{line} {body}".strip() if body else line
-        await self._speak_agent_text(text, agent=moment.agent or None)
+        await self._speak_agent_text(text, agent=moment.agent or None, job_id=job_id or key)
 
     async def _announce_agent_job(self, job: agent_bridge.AgentJob) -> None:
         """Speak terminal agent status directly, without depending on the LLM."""
@@ -1485,6 +1752,10 @@ class VoiceSession:
             await self._hold_agent_confirmation(job, confirmation_prompt)
             return
         self._agent_confirm_streak.pop(job.agent, None)
+        # TRACK -> RELAY: telemetry close-out for a genuinely terminal job.
+        # A no-op (route left blank) when this job wasn't one the
+        # orchestrator dispatched (e.g. a manual Delegate-button job).
+        self._orchestrator.record_outcome(job)
 
         # Stage the agent's actual answer in the LLM context so follow-ups like
         # "what were they?" are answered from the result rather than restating
@@ -1506,9 +1777,11 @@ class VoiceSession:
             return
         moment, body = self._terminal_moment(job)
         if moment is None:
-            await self._speak_agent_text(agent_bridge.announcement(job), agent=job.agent)
+            await self._speak_agent_text(
+                agent_bridge.announcement(job), agent=job.agent, job_id=job.job_id
+            )
             return
-        await self._narrate_and_speak(moment, body=body)
+        await self._narrate_and_speak(moment, body=body, job_id=job.job_id)
 
     def _terminal_moment(self, job: agent_bridge.AgentJob) -> tuple[narration.Moment | None, str]:
         """What to narrate about a finished job, and what must be said verbatim.
@@ -1658,7 +1931,7 @@ class VoiceSession:
         else:
             return
         self._spawn(
-            self._narrate_and_speak(moment, body=body),
+            self._narrate_and_speak(moment, body=body, job_id=event.get("job_id")),
             name=f"agent-consult-{event.get('job_id', '')}",
         )
 
@@ -1677,7 +1950,7 @@ class VoiceSession:
             task=event.get("task", ""),
         )
         self._spawn(
-            self._narrate_and_speak(moment),
+            self._narrate_and_speak(moment, job_id=event.get("job_id")),
             name=f"agent-start-{event.get('job_id', '')}",
         )
 
@@ -1751,7 +2024,9 @@ class VoiceSession:
     async def _speak_text(self, text: str) -> None:
         if self._worker is None:
             return
-        await self._worker.queue_frames([TTSSpeakFrame(text=text, append_to_context=False)])
+        speech = TTSSpeakFrame(text=text, append_to_context=False)
+        speech.metadata["conversation"] = self._conversation.utterance()
+        await self._worker.queue_frames([speech])
 
     async def _forget_semantic_memory(self) -> None:
         if self._mem0_service is None:
@@ -1766,7 +2041,7 @@ class VoiceSession:
 
     def _emit(self, event: dict) -> None:
         if self._on_event is not None:
-            self._on_event(event)
+            self._on_event(self._conversation.stamp(event))
 
     def shutdown(self) -> None:
         """Ask the pipeline to end gracefully (safe to call from any thread)."""

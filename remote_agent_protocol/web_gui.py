@@ -50,6 +50,12 @@ from remote_agent_protocol.avatar_audio import (
 )
 from remote_agent_protocol.brain import LLMUnavailable
 from remote_agent_protocol.brain_adapter import BrainSessionAdapter
+from remote_agent_protocol.conversation import (
+    DELIVERY_TERMINAL,
+    ConversationEvents,
+    ConversationStore,
+    SpeechText,
+)
 from remote_agent_protocol.session import VoiceSession
 
 logging_setup.setup_logging(cfg.DEBUG_MODE)
@@ -130,6 +136,8 @@ class WebVoiceApp:
         self._events_in: queue.Queue[dict] = queue.Queue()
         self._event_log: deque[dict] = deque(maxlen=800)
         self._event_id = 0
+        self._conversation = ConversationStore()
+        self._conversation_events = ConversationEvents(lambda: "Assistant (unknown)")
         self._lock = threading.RLock()
         self._stop = threading.Event()
         # Bound to this process, not persisted: the server has no other auth,
@@ -256,11 +264,17 @@ class WebVoiceApp:
             "memory_forget_semantic": self._action_memory_forget_semantic,
             "approve": self._action_approve,
             "deny": self._action_deny,
+            "cancel_agent": self._action_cancel_agent,
+            "cancel_all_agents": self._action_cancel_all_agents,
             "start_ollama": self._action_start_ollama,
             "free_vram": self._action_free_vram,
             "check_machines": self._action_check_machines,
             "export_diagnostics": self._action_export_diagnostics,
             "reboot_session": self._action_reboot_session,
+            "set_orchestration_mode": self._action_set_orchestration_mode,
+            "set_quota_strategy": self._action_set_quota_strategy,
+            "check_copilot_auth": self._action_check_copilot_auth,
+            "set_persona_orchestration_override": self._action_set_persona_orchestration_override,
         }
 
     def run(self) -> None:
@@ -395,11 +409,16 @@ class WebVoiceApp:
             self._publish(evt)
 
     def _publish(self, evt: dict) -> None:
-        evt = _json_safe(evt)
+        evt = _json_safe(self._conversation_events.stamp(evt))
         with self._lock:
             self._fold_event(evt)
             self._event_id += 1
-            row = {"id": self._event_id, **evt}
+            row = {**evt, "id": self._event_id}
+            conversation_row = self._conversation.apply(row)
+            if conversation_row is not None:
+                row["conversation_row"] = conversation_row
+            row["conversation_epoch"] = self._conversation.epoch
+            row["conversation_processed"] = True
             self._event_log.append(row)
 
     def _fold_event(self, evt: dict) -> None:
@@ -707,6 +726,10 @@ class WebVoiceApp:
             "remoteHosts": self._session.remote_hosts(),
         }
 
+    def _orchestration_payload(self) -> dict:
+        """Local/Cloud/Hybrid orchestration status -- never blocks on the network."""
+        return self._session.orchestration_status()
+
     def _job_lines_payload(self, job_id: str) -> dict:
         """Raw output for one job, live or from persisted history."""
         job = self._agent_jobs.get(job_id)
@@ -809,6 +832,7 @@ class WebVoiceApp:
         return {
             "appName": cfg.APP_NAME,
             "appVersion": __version__,
+            "conversationEpoch": self._conversation.epoch,
             "subtitle": "Premium local AI control center",
             "mode": cfg.RAP_MODE,
             "session": self._session_state,
@@ -910,7 +934,102 @@ class WebVoiceApp:
         with self._lock:
             events = [evt for evt in self._event_log if evt["id"] > after]
             latest = self._event_id
-        return {"events": events, "latest": latest, "status": self._status_payload()}
+            gap = bool(self._event_log and after < self._event_log[0]["id"] - 1)
+            snapshot = (
+                self._conversation.snapshot() if after == 0 or gap or after > latest else None
+            )
+        return {
+            "events": events,
+            "latest": latest,
+            "status": self._status_payload(),
+            "conversation": snapshot,
+            "history_gap": gap,
+        }
+
+    def _clear_conversation(self) -> None:
+        with self._lock:
+            self._conversation.clear()
+            self._conversation.retire(self._conversation_events.reset())
+            session = getattr(self, "_session", None)
+            source = getattr(session, "_conversation", None)
+            if source is None:
+                source = getattr(getattr(session, "_brain", None), "_conversation", None)
+            if source is not None:
+                self._conversation.retire(source.reset())
+            self._event_log.clear()
+            self._publish({"type": "conversation_reset"})
+
+    def _speech_fallback(self, text: str) -> SpeechText:
+        """Publish the exact bridge error reply before handing it to external TTS."""
+        utterance = self._conversation_events.utterance(
+            text,
+            speaker_name=self._persona.name,
+            speaker_id=self._persona.name,
+            delivery="playback_unconfirmed",
+        )
+        self._publish(utterance)
+        return SpeechText(text, utterance)
+
+    def _ingest_speech(self, payload: dict) -> bool:
+        """Accept authenticated, ordered frontend playback acknowledgements."""
+        if not isinstance(payload, dict):
+            return False
+        ident = payload.get("message_id")
+        sequence = payload.get("sequence")
+        delivery = payload.get("delivery")
+        spoken = payload.get("spoken_text")
+        if (
+            not isinstance(ident, str)
+            or not ident
+            or len(ident) > 160
+            or type(sequence) is not int
+            or sequence < 0
+            or not isinstance(delivery, str)
+            or delivery not in {"queued", "playing", "played", "interrupted", "failed"}
+            or (spoken is not None and (not isinstance(spoken, str) or len(spoken) > 100000))
+        ):
+            return False
+        with self._lock:
+            old = self._conversation.rows.get("speech:" + ident)
+            if old is None:
+                # Independent frontend speech must identify this conversation epoch.
+                if (
+                    payload.get("conversation_epoch") != self._conversation.epoch
+                    or payload.get("source") != "external"
+                    or not isinstance(payload.get("text"), str)
+                    or not payload["text"].strip()
+                    or len(payload["text"]) > 100000
+                ):
+                    return False
+                old = self._conversation_events.utterance(
+                    payload["text"],
+                    message_id=ident,
+                    session_id=self._conversation.epoch,
+                    speaker_name=str(payload.get("speaker_name") or "External speaker")[:100],
+                    delivery="playback_unconfirmed",
+                    source="external",
+                )
+                self._publish(old)
+            elif payload.get("session_id") != old.get("session_id"):
+                return False
+            if (
+                sequence <= old.get("playback_sequence", -1)
+                or old.get("delivery") in DELIVERY_TERMINAL
+                or (old.get("delivery") == "playing" and delivery == "queued")
+            ):
+                return False
+            self._publish(
+                {
+                    "type": "transcript",
+                    "message_id": ident,
+                    "session_id": old.get("session_id"),
+                    "playback_update": True,
+                    "delivery": delivery,
+                    "playback_sequence": sequence,
+                    **({"spoken_text": spoken} if spoken is not None else {}),
+                }
+            )
+        return True
 
     def _action(self, name: str, payload: dict) -> dict:
         handler = self._actions.get(name)
@@ -998,9 +1117,7 @@ class WebVoiceApp:
         if not cfg.S2S_MIC_MUTE_STATUS_FILE:
             return
         try:
-            status = json.loads(
-                Path(cfg.S2S_MIC_MUTE_STATUS_FILE).read_text(encoding="utf-8-sig")
-            )
+            status = json.loads(Path(cfg.S2S_MIC_MUTE_STATUS_FILE).read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             return
         self._s2s_mute_ready = (
@@ -1190,9 +1307,10 @@ class WebVoiceApp:
                     # Talk here could falsely claim an open microphone after a
                     # failed Wake Word -> Free Talk transition.
                     recovery_generation = self._write_s2s_voice_mode(confirmed_mode)
-                    recovered = recovery_generation is not None and self._await_s2s_voice_mode(
-                        confirmed_mode, recovery_generation
-                    )[0]
+                    recovered = (
+                        recovery_generation is not None
+                        and self._await_s2s_voice_mode(confirmed_mode, recovery_generation)[0]
+                    )
                     self._s2s_mode_ready = recovered
                     self._voice_mode = confirmed_mode
                     self._session.set_voice_mode(confirmed_mode)
@@ -1330,6 +1448,7 @@ class WebVoiceApp:
         self._session.start_agent_task(self._session.default_agent_backend(), bundle.agent_prompt())
 
     def _action_restart_chat(self, payload: dict) -> None:
+        self._clear_conversation()
         self._session.restart_conversation()
 
     def _action_refresh_memory(self, payload: dict) -> None:
@@ -1346,6 +1465,7 @@ class WebVoiceApp:
         self._session.delete_semantic_memory(str(payload.get("id", "")))
 
     def _action_memory_forget_short(self, payload: dict) -> None:
+        self._clear_conversation()
         self._session.forget_short_term_memory()
 
     def _action_memory_forget_semantic(self, payload: dict) -> None:
@@ -1356,6 +1476,16 @@ class WebVoiceApp:
 
     def _action_deny(self, payload: dict) -> None:
         self._session.deny_agent_task(str(payload.get("token", "")))
+
+    def _action_cancel_agent(self, payload: dict) -> dict | None:
+        job_id = str(payload.get("job_id", "")).strip()
+        if not job_id:
+            return {"ok": False, "error": "job_id is required"}
+        self._session.cancel_agent_task(job_id)
+        return None
+
+    def _action_cancel_all_agents(self, payload: dict) -> None:
+        self._session.cancel_all_agent_tasks()
 
     def _action_start_ollama(self, payload: dict) -> None:
         threading.Thread(target=self._start_ollama, daemon=True).start()
@@ -1379,6 +1509,36 @@ class WebVoiceApp:
             "message": f"Checking {len(hosts)} machine(s)...",
             "status": self._status_payload(),
         }
+
+    def _action_set_orchestration_mode(self, payload: dict) -> dict:
+        mode = str(payload.get("mode", "")).strip().lower()
+        if mode not in {"local", "cloud", "hybrid"}:
+            return {"ok": False, "error": f"unknown orchestration mode: {mode!r}"}
+        self._session.set_orchestration_mode(mode)
+        return {"ok": True, "status": self._orchestration_payload()}
+
+    def _action_set_quota_strategy(self, payload: dict) -> dict:
+        strategy = str(payload.get("strategy", "")).strip().lower()
+        if strategy not in {"economy", "balanced", "performance", "cloud_preferred"}:
+            return {"ok": False, "error": f"unknown quota strategy: {strategy!r}"}
+        self._session.set_orchestration_quota_strategy(strategy)
+        return {"ok": True, "status": self._orchestration_payload()}
+
+    def _action_check_copilot_auth(self, payload: dict) -> dict:
+        """Kick off a fresh Copilot auth/health probe; the result lands on the next poll."""
+        self._session.check_copilot_auth()
+        return {"ok": True, "message": "Checking Copilot authentication..."}
+
+    def _action_set_persona_orchestration_override(self, payload: dict) -> dict:
+        persona = str(payload.get("persona", "")).strip()
+        if not persona:
+            return {"ok": False, "error": "no persona given"}
+        raw_mode = payload.get("mode")
+        mode = str(raw_mode).strip().lower() if raw_mode else None
+        if mode is not None and mode not in {"local", "cloud", "hybrid"}:
+            return {"ok": False, "error": f"unknown orchestration mode: {mode!r}"}
+        self._session.set_persona_orchestration_override(persona, mode)
+        return {"ok": True, "status": self._orchestration_payload()}
 
     def _action_export_diagnostics(self, payload: dict) -> None:
         threading.Thread(target=self._export_diagnostics, daemon=True).start()
@@ -1664,7 +1824,12 @@ class WebVoiceApp:
                     )
                     return
                 if parsed.path == "/v1/models":
-                    self._send_json({"object": "list", "data": [{"id": cfg.S2S_BRIDGE_MODEL, "object": "model"}]})
+                    self._send_json(
+                        {
+                            "object": "list",
+                            "data": [{"id": cfg.S2S_BRIDGE_MODEL, "object": "model"}],
+                        }
+                    )
                     return
                 if parsed.path == "/api/status":
                     self._send_json(app._status_payload())
@@ -1674,6 +1839,9 @@ class WebVoiceApp:
                     return
                 if parsed.path == "/api/agents":
                     self._send_json(app._agents_payload())
+                    return
+                if parsed.path == "/api/orchestration":
+                    self._send_json(app._orchestration_payload())
                     return
                 if parsed.path == "/api/agent-lines":
                     job_id = parse_qs(parsed.query).get("job", [""])[0]
@@ -1708,7 +1876,7 @@ class WebVoiceApp:
                     with contextlib.suppress(Exception):
                         self._send_json(
                             openai_bridge._chat_completion(
-                                _LLM_UNREACHABLE_REPLY, cfg.S2S_BRIDGE_MODEL
+                                app._speech_fallback(_LLM_UNREACHABLE_REPLY), cfg.S2S_BRIDGE_MODEL
                             )
                         )
                 except Exception as exc:
@@ -1727,15 +1895,34 @@ class WebVoiceApp:
                 parsed = urlparse(self.path)
                 if parsed.path == "/v1/chat/completions":
                     if not self._authorized_s2s():
-                        self._send_json({"error": {"message": "unauthorized", "type": "authentication_error"}}, status=HTTPStatus.UNAUTHORIZED)
+                        self._send_json(
+                            {"error": {"message": "unauthorized", "type": "authentication_error"}},
+                            status=HTTPStatus.UNAUTHORIZED,
+                        )
                         return
                     payload = self._read_json()
                     text = openai_bridge._latest_user_text(payload)
                     if not text:
-                        self._send_json({"error": {"message": "no user message", "type": "invalid_request_error"}}, status=HTTPStatus.BAD_REQUEST)
+                        self._send_json(
+                            {
+                                "error": {
+                                    "message": "no user message",
+                                    "type": "invalid_request_error",
+                                }
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
                         return
                     if not hasattr(app._session, "complete_text"):
-                        self._send_json({"error": {"message": "GUI session is not in brain mode", "type": "server_error"}}, status=HTTPStatus.CONFLICT)
+                        self._send_json(
+                            {
+                                "error": {
+                                    "message": "GUI session is not in brain mode",
+                                    "type": "server_error",
+                                }
+                            },
+                            status=HTTPStatus.CONFLICT,
+                        )
                         return
                     model = str(payload.get("model") or cfg.S2S_BRIDGE_MODEL)
                     streaming = bool(payload.get("stream")) and cfg.S2S_BRIDGE_STREAMING
@@ -1769,14 +1956,29 @@ class WebVoiceApp:
                     return
                 if parsed.path == "/api/avatar-envelope":
                     if not self._authorized_s2s():
-                        self._send_json({"error": {"message": "unauthorized"}}, status=HTTPStatus.UNAUTHORIZED)
+                        self._send_json(
+                            {"error": {"message": "unauthorized"}}, status=HTTPStatus.UNAUTHORIZED
+                        )
                         return
                     app._ingest_avatar_envelope(self._read_json())
                     self._send_json({"ok": True})
                     return
+                if parsed.path == "/api/speech-events":
+                    if not self._authorized_s2s():
+                        self._send_json(
+                            {"error": {"message": "unauthorized"}}, status=HTTPStatus.UNAUTHORIZED
+                        )
+                        return
+                    accepted = app._ingest_speech(self._read_json())
+                    self._send_json(
+                        {"ok": accepted}, status=HTTPStatus.OK if accepted else HTTPStatus.CONFLICT
+                    )
+                    return
                 if parsed.path == "/api/turn-timing":
                     if not self._authorized_s2s():
-                        self._send_json({"error": {"message": "unauthorized"}}, status=HTTPStatus.UNAUTHORIZED)
+                        self._send_json(
+                            {"error": {"message": "unauthorized"}}, status=HTTPStatus.UNAUTHORIZED
+                        )
                         return
                     accepted = app._ingest_turn_timing(self._read_json())
                     self._send_json(
@@ -1889,10 +2091,19 @@ class WebVoiceApp:
                     if first:
                         write(
                             openai_bridge._stream_chunk(
-                                chunk_id, model, created, {"content": _LLM_UNREACHABLE_REPLY}
+                                chunk_id,
+                                model,
+                                created,
+                                {"content": app._speech_fallback(_LLM_UNREACHABLE_REPLY)},
                             )
                         )
-                write(openai_bridge._stream_chunk(chunk_id, model, created, {}, finish_reason="stop"))
+                finally:
+                    close = getattr(pieces, "close", None)
+                    if close is not None:
+                        close()
+                write(
+                    openai_bridge._stream_chunk(chunk_id, model, created, {}, finish_reason="stop")
+                )
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
 

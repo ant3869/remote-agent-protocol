@@ -12,8 +12,17 @@ real-time audio pipeline.
 
 ## Features
 
+- The conversation streams speaker-labeled text, groups agent progress and
+  consultations by task, and preserves full results alongside spoken relays.
+  Reloading recovers recent conversation independently of telemetry; external
+  playback remains unconfirmed until acknowledged. See
+  [conversation and playback](docs/conversation-events.md).
 - Voice and typed input share one brain: STT → delegation routing → memory →
   Ollama → TTS, with live persona/voice/model switching from the local web UI.
+- The persona, the intent classifier, and the orchestrator's reasoning each run
+  locally or against any OpenAI-compatible cloud endpoint, chosen per model. A
+  cloud failure falls back to the local model, so the machine keeps working
+  offline; see the `CLOUD_LLM_*` settings in `env.example`.
 - The composer can bundle held voice, typed notes, links, images, and files into
   one reviewed prompt before the assistant or a delegated agent sees it.
 - Voice modes cover Free Talk, Wake Word, and Push To Talk, with the selected
@@ -61,6 +70,9 @@ real-time audio pipeline.
   `env.example`.
 - Conversation memory, vector state, and job history live under ignored
   `data/`; voice-stack subprocess output lives under ignored `logs/`.
+  The voice-stack launcher puts child-process temporary files in
+  `data/stack-tmp/`, keeping large speech-model extraction on the project data
+  drive instead of Windows Temp; allow several gigabytes of free space there.
 - A low-VRAM **brain mode** (`RAP_MODE=brain`) drops the local audio graph and
   exposes routing, delegation, confirmations, personas, and short-term
   transcript context over an OpenAI-compatible endpoint, so an external

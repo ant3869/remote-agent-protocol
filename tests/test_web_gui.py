@@ -280,9 +280,7 @@ def test_brain_health_rejects_a_session_that_cannot_accept_turns(monkeypatch, se
         server.server_close()
 
 
-def test_brain_startup_keeps_input_mode_unconfirmed_until_external_telemetry(
-    monkeypatch, tmp_path
-):
+def test_brain_startup_keeps_input_mode_unconfirmed_until_external_telemetry(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "RAP_MODE", "brain")
     monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(tmp_path / "muted.flag"))
     monkeypatch.setattr(cfg, "S2S_VOICE_MODE_FILE", str(tmp_path / "mode.json"))
@@ -300,7 +298,7 @@ def test_avatar_speaking_events_do_not_invent_wake_detector_phases():
     )[0]
 
     assert "updateWakePhase" not in speaking_branch
-    assert 'state.wake.window_secs || 3' not in script
+    assert "state.wake.window_secs || 3" not in script
 
 
 def test_brain_boot_does_not_publish_ready_before_the_adapter_runs(monkeypatch):
@@ -528,6 +526,28 @@ def test_web_memory_actions_call_session_methods():
     ]
 
 
+def test_web_cancel_actions_call_session_methods():
+    app = WebVoiceApp()
+    session = FakeMemorySession()
+    app._session = session
+
+    assert app._action("cancel_agent", {"job_id": "job-3"})["ok"] is True
+    assert app._action("cancel_all_agents", {})["ok"] is True
+
+    assert session.calls == [("cancel_agent", "job-3"), ("cancel_all",)]
+
+
+def test_web_cancel_agent_rejects_missing_job_id():
+    app = WebVoiceApp()
+    session = FakeMemorySession()
+    app._session = session
+
+    result = app._action("cancel_agent", {})
+
+    assert result["ok"] is False
+    assert session.calls == []
+
+
 def test_web_memory_add_rejects_empty_text():
     app = WebVoiceApp()
     app._session = FakeMemorySession()
@@ -570,6 +590,12 @@ class FakeMemorySession:
 
     def agent_backends(self):
         return []
+
+    def cancel_agent_task(self, job_id):
+        self.calls.append(("cancel_agent", job_id))
+
+    def cancel_all_agent_tasks(self):
+        self.calls.append(("cancel_all",))
 
 
 class FakeThread:
@@ -1124,9 +1150,7 @@ def test_persona_create_duplicate_and_delete_custom(monkeypatch):
 
     deleted = app._action("persona_delete", {"name": duplicate_name})
     assert deleted["ok"] is True
-    assert duplicate_name not in [
-        row["name"] for row in app._catalogs_payload()["personas"]
-    ]
+    assert duplicate_name not in [row["name"] for row in app._catalogs_payload()["personas"]]
     assert saved[-1].custom_personas.get(duplicate_name) is None
 
 
@@ -1285,12 +1309,12 @@ def test_gui_exposes_openai_chat_completion_route_for_s2s():
 def test_gui_brain_mode_uses_stable_s2s_bridge_port():
     source = inspect.getsource(WebVoiceApp.run)
 
-    assert "cfg.S2S_BRIDGE_PORT if cfg.RAP_MODE == \"brain\" else 0" in source
+    assert 'cfg.S2S_BRIDGE_PORT if cfg.RAP_MODE == "brain" else 0' in source
 
 
 def test_avatar_audio_tap_sits_between_tts_and_local_output():
     source = Path("remote_agent_protocol/session.py").read_text(encoding="utf-8")
-    output_block = source.split('TranscriptTap(self._on_event, role="assistant")', 1)[1]
+    output_block = source.split("conversation=self._conversation", 1)[1]
 
     assert output_block.index("self._tts") < output_block.index("AvatarAudioTap(")
     assert output_block.index("AvatarAudioTap(") < output_block.index("transport.output()")
@@ -1528,7 +1552,9 @@ def test_every_voice_picker_carries_its_own_preview_button():
         ("personaEditVoice", "personaTestVoiceBtn"),
         ("settingsVoiceSelect", "settingsTestVoiceBtn"),
     ]:
-        picker = f'<span class="voice-picker"><select id="{select_id}"></select><button id="{button_id}"'
+        picker = (
+            f'<span class="voice-picker"><select id="{select_id}"></select><button id="{button_id}"'
+        )
         assert picker in html
 
     # The persona editor stages its edits, so its preview has to send the form's
@@ -1633,9 +1659,7 @@ def test_the_agents_payload_leaves_raw_output_behind():
 
 def test_one_job_can_still_be_asked_for_its_output():
     app = WebVoiceApp()
-    app._publish(
-        {"type": "agent_job", "job_id": "job-1", "status": "done", "lines": ["only line"]}
-    )
+    app._publish({"type": "agent_job", "job_id": "job-1", "status": "done", "lines": ["only line"]})
 
     assert app._job_lines_payload("job-1") == {
         "job_id": "job-1",

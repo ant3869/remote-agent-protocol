@@ -1,6 +1,7 @@
 """One-command voice stack: discovery, ordering, and readiness gating."""
 
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -98,6 +99,20 @@ def test_child_environment_advertises_selected_dynamic_ports(monkeypatch):
     assert env["S2S_BRIDGE_API_KEY"] == "per-launch-secret"
 
 
+def test_children_extract_models_on_the_data_drive(monkeypatch, tmp_path):
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
+    for key in ("TMP", "TEMP", "TMPDIR"):
+        monkeypatch.setenv(key, "full-system-drive")
+
+    env = voice_stack.child_env()
+
+    expected = str((cfg.DATA_DIR / "stack-tmp").resolve())
+    assert (cfg.DATA_DIR / "stack-tmp").is_dir()
+    for key in ("TMP", "TEMP", "TMPDIR"):
+        assert env[key] == expected
+        assert os.environ[key] == "full-system-drive"
+
+
 def test_stages_start_brain_then_server_then_client(tmp_path):
     stages = voice_stack.build_stages(tmp_path)
 
@@ -143,6 +158,8 @@ def test_client_ready_file_rejects_a_dead_pid(monkeypatch, tmp_path):
 def test_spawn_removes_a_stale_ready_file(monkeypatch, tmp_path):
     ready_file = tmp_path / "client.ready"
     ready_file.write_text('{"ready": true, "pid": 1}', encoding="utf-8")
+    # Stale means its process is gone, so nothing is there to be reaped.
+    monkeypatch.setattr(voice_stack, "process_is_running", lambda _pid: False)
     stage = voice_stack.Stage(
         name="client",
         args=["client"],
@@ -301,7 +318,9 @@ def _ollama_that_starts_on_demand(monkeypatch, *, tags_once_started):
 
 
 def test_a_stopped_ollama_is_started_rather_than_reported(monkeypatch):
-    state = _ollama_that_starts_on_demand(monkeypatch, tags_once_started=[f"{cfg.LLM_MODEL}:latest"])
+    state = _ollama_that_starts_on_demand(
+        monkeypatch, tags_once_started=[f"{cfg.LLM_MODEL}:latest"]
+    )
 
     assert voice_stack.ensure_llm_backend() is None
     assert state["started_on"] == "localhost:11434"
@@ -538,9 +557,7 @@ def test_shutdown_uses_soft_stop_before_force(monkeypatch, tmp_path):
         return 0
 
     process.wait = wait
-    monkeypatch.setattr(
-        voice_stack, "_force_process_tree", lambda _process: calls.append("force")
-    )
+    monkeypatch.setattr(voice_stack, "_force_process_tree", lambda _process: calls.append("force"))
 
     voice_stack._shutdown([(stage, process)])
 
@@ -586,10 +603,7 @@ def test_shutdown_force_kills_tree_when_no_soft_stop_exists(monkeypatch, tmp_pat
 
 
 def test_shutdown_stops_children_in_reverse_order(monkeypatch, tmp_path):
-    stages = [
-        voice_stack.Stage(name=f"stage-{index}", args=[], cwd=tmp_path)
-        for index in range(3)
-    ]
+    stages = [voice_stack.Stage(name=f"stage-{index}", args=[], cwd=tmp_path) for index in range(3)]
     processes = [_FakeProcess() for _ in stages]
     forced = []
     monkeypatch.setattr(voice_stack, "_force_process_tree", forced.append)
@@ -667,7 +681,9 @@ def test_client_receives_authoritative_paths_not_the_scripts_hardcoded_ones(monk
     assert args[args.index("--port") + 1] == "9777"
     assert args[args.index("--external-voice-file") + 1] == str(tmp_path / "voice.txt")
     assert args[args.index("--external-mute-file") + 1] == str(tmp_path / "mute.flag")
-    assert args[args.index("--avatar-envelope-url") + 1] == "http://127.0.0.1:9999/api/avatar-envelope"
+    assert (
+        args[args.index("--avatar-envelope-url") + 1] == "http://127.0.0.1:9999/api/avatar-envelope"
+    )
     assert args[args.index("--avatar-envelope-api-key") + 1] == "secret"
     assert args[args.index("--input-state-url") + 1] == "http://127.0.0.1:9999/api/input-state"
     assert args[args.index("--input-state-api-key") + 1] == "secret"
@@ -752,29 +768,27 @@ def test_a_free_machine_reports_no_occupied_ports(monkeypatch):
     assert voice_stack.occupied_ports() == []
 
 
-def test_a_leftover_run_is_closed_instead_of_blocking_the_launch(monkeypatch, tmp_path):
-    # The common case behind a held lock is a crashed run whose process is still
-    # sitting there. The app has always reaped that on its own next launch, so
-    # refusing here would turn a self-healing situation into a dead end.
+def test_a_launch_refuses_while_another_instance_holds_the_slot(monkeypatch, tmp_path):
+    # Windows releases the mutex when its holder dies, crash included, so a held
+    # lock is always a live process -- never leftover state. An instance someone
+    # walked away from and one they are using run the same command line, so
+    # taking the slot means killing a working app. Refuse and let them close it.
     home = _kokoro_frontend(tmp_path, launcher_text="--tts pocket")
     monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: home)
     monkeypatch.setattr(voice_stack, "ensure_llm_backend", lambda: None)
     monkeypatch.setattr(voice_stack.process_guard, "instance_is_running", lambda: True)
-    reclaimed = []
     monkeypatch.setattr(
         voice_stack.process_guard,
         "reclaim_instance_slot",
-        lambda: reclaimed.append(True) or True,
+        lambda *a, **k: pytest.fail("a live instance must never be reclaimed"),
     )
     spawned = []
     monkeypatch.setattr(
         voice_stack, "_spawn", lambda stage, env: spawned.append(stage.name) or _FakeProcess(1)
     )
 
-    voice_stack.run_stack()
-
-    assert reclaimed == [True]
-    assert spawned == ["RAP brain + GUI"], "the launch proceeds once the slot is free"
+    assert voice_stack.run_stack() == 2
+    assert spawned == [], "nothing may be started while another instance holds the slot"
 
 
 def test_a_second_launch_refuses_instead_of_duplicating(monkeypatch, tmp_path):
@@ -806,3 +820,123 @@ def test_a_clear_machine_proceeds_past_the_instance_guard(monkeypatch, tmp_path)
 
     voice_stack.run_stack()
     assert spawned == ["RAP brain + GUI"]
+
+
+# Seven frontend instances were found alive at once on 2026-09-14, one per
+# stack start since the day before, each still holding the microphone.
+
+
+def test_a_frontend_left_by_an_earlier_run_is_stopped_before_starting_a_new_one(
+    monkeypatch, tmp_path
+):
+    ready = tmp_path / "s2s_client.ready"
+    ready.write_text(json.dumps({"pid": 4242, "ready": True}), encoding="utf-8")
+    killed: list[list[str]] = []
+    monkeypatch.setattr(voice_stack, "process_is_running", lambda pid: pid == 4242)
+    monkeypatch.setattr(
+        voice_stack.subprocess, "run", lambda args, **kw: killed.append(args) or None
+    )
+
+    reaped = voice_stack.reap_previous_stage(ready)
+
+    assert reaped == 4242
+    # /T as well: the frontend spawns an audio child that outlives it.
+    assert killed and "4242" in killed[0] and "/T" in killed[0]
+
+
+def test_a_dead_pid_in_the_handshake_file_is_left_alone(monkeypatch, tmp_path):
+    ready = tmp_path / "s2s_client.ready"
+    ready.write_text(json.dumps({"pid": 4242, "ready": True}), encoding="utf-8")
+    monkeypatch.setattr(voice_stack, "process_is_running", lambda pid: False)
+    monkeypatch.setattr(
+        voice_stack.subprocess, "run", lambda *a, **k: pytest.fail("killed a dead pid")
+    )
+
+    assert voice_stack.reap_previous_stage(ready) is None
+
+
+def test_a_missing_or_unreadable_handshake_file_is_not_an_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        voice_stack.subprocess, "run", lambda *a, **k: pytest.fail("nothing to kill")
+    )
+    assert voice_stack.reap_previous_stage(tmp_path / "absent.ready") is None
+
+    garbled = tmp_path / "garbled.ready"
+    garbled.write_text("not json at all", encoding="utf-8")
+    assert voice_stack.reap_previous_stage(garbled) is None
+
+
+# A second launch used to take the single-instance slot by killing whatever
+# held it, which on 2026-09-15 terminated a healthy running stack mid-session.
+
+
+def _preflight_ok(monkeypatch, tmp_path):
+    """Get run_stack past its environment checks so the guard is what decides."""
+    monkeypatch.setattr(voice_stack, "resolve_s2s_home", lambda: tmp_path)
+    monkeypatch.setattr(voice_stack, "missing_frontend_pieces", lambda _home: [])
+    monkeypatch.setattr(voice_stack, "missing_kokoro_requirements", lambda _home: [])
+    monkeypatch.setattr(voice_stack, "ensure_llm_backend", lambda: None)
+
+
+def test_the_launcher_tears_the_stack_down_when_its_window_closes(monkeypatch, tmp_path):
+    """Closing the window skips `finally`, so the handler has to do the work."""
+    _preflight_ok(monkeypatch, tmp_path)
+    monkeypatch.setattr(voice_stack.process_guard, "instance_is_running", lambda: False)
+    monkeypatch.setattr(voice_stack, "select_stack_ports", lambda: (1, 2))
+    monkeypatch.setattr(voice_stack, "select_audio_devices", lambda _home: (None, None))
+    monkeypatch.setattr(voice_stack, "child_env", lambda **_kw: {"TEMP": str(tmp_path)})
+
+    handlers: list = []
+    monkeypatch.setattr(
+        voice_stack.process_guard, "install_close_handler", lambda cb: handlers.append(cb)
+    )
+    shutdowns: list[int] = []
+    monkeypatch.setattr(voice_stack, "_shutdown", lambda started: shutdowns.append(len(started)))
+    # One stage that reports itself as never becoming ready, so run_stack
+    # returns promptly instead of supervising forever.
+    stage = voice_stack.Stage(name="client", args=["x"], cwd=tmp_path)
+    monkeypatch.setattr(voice_stack, "build_stages", lambda *a, **k: [stage])
+    monkeypatch.setattr(voice_stack, "_spawn", lambda *a, **k: _FakeProcess())
+    monkeypatch.setattr(voice_stack, "_await_ready", lambda *a, **k: False)
+
+    voice_stack.run_stack()
+
+    assert handlers, "the launcher must register a close handler"
+    # The finally already ran once; the handler firing afterwards must not
+    # start a second teardown of the same stages.
+    handlers[0]()
+    assert shutdowns == [1], f"expected exactly one teardown, got {shutdowns}"
+
+
+def test_rap_owns_the_end_of_turn_patience(monkeypatch, tmp_path):
+    """A pause mid-sentence used to end the turn and route the fragment.
+
+    The frontend launcher ships values that cut a hesitating speaker off; RAP
+    forwards its own after them, and that launcher keeps the last duplicate.
+    """
+    monkeypatch.setattr(cfg, "S2S_VAD_MIN_SILENCE_MS", 1234)
+    monkeypatch.setattr(cfg, "S2S_VAD_SPECULATIVE_REOPEN_MS", 999)
+    monkeypatch.setattr(cfg, "S2S_VAD_UNANSWERED_REOPEN_MS", 4321)
+
+    stages = voice_stack.build_stages(
+        tmp_path,
+        bridge_port=1,
+        ws_port=2,
+        bridge_api_key="k",
+        input_device=None,
+        output_device=None,
+    )
+    args = next(s for s in stages if "server" in s.name).args
+    for flag, expected in (
+        ("--min_silence_ms", "1234"),
+        ("--speculative_reopen_ms", "999"),
+        ("--unanswered_reopen_ms", "4321"),
+    ):
+        assert flag in args, f"{flag} is not forwarded, so the launcher's own value wins"
+        assert args[args.index(flag) + 1] == expected
+
+
+def test_reopen_windows_are_not_shorter_than_the_end_of_turn_wait():
+    """A tail that arrives after the turn closed has to be able to rejoin it."""
+    assert cfg.S2S_VAD_SPECULATIVE_REOPEN_MS >= cfg.S2S_VAD_MIN_SILENCE_MS * 0.5
+    assert cfg.S2S_VAD_UNANSWERED_REOPEN_MS >= cfg.S2S_VAD_SPECULATIVE_REOPEN_MS

@@ -225,6 +225,8 @@ def save_state(path: str | Path, state: AppState) -> None:
             tmp.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
             os.replace(tmp, p)
     except OSError as e:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)  # else a failed save litters data/ forever
         logger.warning(f"Couldn't save app state to {p}: {e}")
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)

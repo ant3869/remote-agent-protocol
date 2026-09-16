@@ -20,7 +20,7 @@ from typing import Any
 from loguru import logger
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import job_store, voices
+from remote_agent_protocol import job_store, memory_manager, voices
 from remote_agent_protocol.brain import ANNOUNCE_PREFIX, BrainSession
 from remote_agent_protocol.multimodal_prompt import MultimodalPromptBundle
 from remote_agent_protocol.personas import Persona
@@ -65,8 +65,8 @@ class BrainSessionAdapter:
 
     def complete_text(self, text: str, timeout: float = 180.0) -> str:
         """Run one user text turn and return assistant text for realtime frontends."""
-        future = self._submit(self._complete_with_activity(text))
-        return str(future.result(timeout=timeout))
+        future = self._submit(self._brain.complete(text, delivery="playback_unconfirmed"))
+        return future.result(timeout=timeout)
 
     def stream_text(self, text: str, timeout: float = 180.0) -> Iterator[str]:
         """Yield assistant text as it is generated, for realtime frontends.
@@ -88,14 +88,18 @@ class BrainSessionAdapter:
             finally:
                 pieces.put(done)
 
-        self._submit(pump())
-        while True:
-            piece = pieces.get(timeout=timeout)
-            if piece is done:
-                return
-            if isinstance(piece, Exception):
-                raise piece
-            yield piece
+        future = self._submit(pump())
+        try:
+            while True:
+                piece = pieces.get(timeout=timeout)
+                if piece is done:
+                    return
+                if isinstance(piece, Exception):
+                    raise piece
+                yield piece
+        finally:
+            if not future.done():
+                future.cancel()
 
     def send_text(self, text: str) -> None:
         """Submit one typed user turn without blocking the GUI thread."""
@@ -112,9 +116,7 @@ class BrainSessionAdapter:
             return
         content = bundle.agent_prompt()
         self._submit(
-            self._complete_with_activity(
-                summary or "Shared multimodal prompt", llm_content=content
-            )
+            self._complete_with_activity(summary or "Shared multimodal prompt", llm_content=content)
         )
 
     def speak_text(self, text: str) -> None:
@@ -155,6 +157,16 @@ class BrainSessionAdapter:
         """Request cancellation of one active agent job."""
         self._submit(self._brain._bridge.cancel(job_id))  # noqa: SLF001 - compatibility facade
 
+    def cancel_all_agent_tasks(self) -> None:
+        """Stop every active agent job right now -- the GUI kill switch.
+
+        Bypasses routing/the classifier entirely: a spoken "cancel" has to be
+        heard, transcribed, and routed correctly to work, and under load
+        (several concurrent jobs) that same pipeline is the thing most likely
+        to be slow or misrouting. This calls the bridge directly instead.
+        """
+        self._submit(self._brain._bridge.cancel_active(None, all_jobs=True))  # noqa: SLF001
+
     def restart_conversation(self) -> None:
         """Clear short-term conversation context and notify the GUI."""
         self._brain._messages.clear()  # noqa: SLF001 - intentional adapter seam
@@ -165,14 +177,21 @@ class BrainSessionAdapter:
         rows = []
         if cfg.MEMORY_ENABLED:
             rows = [
-                {"scope": "short", "source": "transcript", "text": str(row.get("content", "")), "id": ""}
+                {
+                    "scope": "short",
+                    "source": "transcript",
+                    "text": str(row.get("content", "")),
+                    "id": "",
+                }
                 for row in self._brain._messages[-cfg.MEMORY_MAX_MSGS :]  # noqa: SLF001
             ]
         self._emit({"type": "memory", "scope": "short", "rows": rows})
 
     def add_semantic_memory(self, text: str) -> None:
         """Log the unsupported semantic-memory write instead of faking success."""
-        logger.info("Semantic memory add ignored in brain adapter until mem0 facade is added: %r", text)
+        logger.info(
+            "Semantic memory add ignored in brain adapter until mem0 facade is added: %r", text
+        )
 
     def delete_semantic_memory(self, memory_id: str) -> None:
         """Log the unsupported semantic-memory deletion."""
@@ -215,6 +234,60 @@ class BrainSessionAdapter:
         """Re-run host discovery on the brain loop."""
         self._submit(self._brain._remotes.discover())  # noqa: SLF001
 
+    def export_snapshot(self) -> dict:
+        """JSON-able snapshot of the brain session for the diagnostics bundle.
+
+        Same keys as ``VoiceSession.export_snapshot`` so one bundle format reads
+        across both modes. The voice reported is the one actually handed to the
+        realtime frontend, which is not always the persona's own -- that gap is
+        exactly what someone exporting diagnostics is usually chasing.
+        """
+        persona = self._brain._persona  # noqa: SLF001 - compatibility facade
+        return {
+            "persona": persona.name,
+            "model": self._model_override,
+            "voice": self._published_voice() or "(none published)",
+            "voice_backend": "external",
+            "voice_mode": self._voice_mode,
+            "default_agent_backend": self._brain._default_agent_backend,  # noqa: SLF001
+            "agent_backends": self._brain._bridge.backend_names(),  # noqa: SLF001
+            "recent_routing": list(self._brain._routing_history),  # noqa: SLF001
+            "short_term_memory": memory_manager.transcript_rows(
+                self._brain._messages[-cfg.MEMORY_MAX_MSGS :]  # noqa: SLF001
+            ),
+        }
+
+    def _published_voice(self) -> str:
+        """Read back the voice currently published for the realtime frontend."""
+        if not cfg.S2S_VOICE_FILE:
+            return ""
+        try:
+            return Path(cfg.S2S_VOICE_FILE).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    # -- persona orchestration (Local / Cloud / Hybrid) ----------------------
+
+    def orchestration_status(self) -> dict:
+        """Synchronous orchestration snapshot for the UI."""
+        return self._brain.orchestration_status()
+
+    def check_copilot_auth(self) -> None:
+        """Re-probe both providers on the brain loop; result lands on the next poll."""
+        self._submit(self._brain.refresh_provider_status())
+
+    def set_orchestration_mode(self, mode: str) -> None:
+        """Change the global orchestration mode."""
+        self._brain.set_orchestration_mode(mode)
+
+    def set_orchestration_quota_strategy(self, strategy: str) -> None:
+        """Change the quota strategy."""
+        self._brain.set_orchestration_quota_strategy(strategy)
+
+    def set_persona_orchestration_override(self, persona: str, mode: str | None) -> None:
+        """Set or clear one persona's orchestration mode override."""
+        self._brain.set_persona_orchestration_override(persona, mode)
+
     def default_agent_backend(self) -> str:
         """Return the brain's current default agent backend."""
         return self._brain._default_agent_backend  # noqa: SLF001
@@ -225,6 +298,10 @@ class BrainSessionAdapter:
             return
         self._brain._default_agent_backend = backend  # noqa: SLF001
         self._emit({"type": "default_agent_changed", "agent": backend})
+
+    def set_agent_scope_preamble(self, preamble: str) -> None:
+        """Update the scope preamble used for future delegated jobs."""
+        self._brain._bridge.set_scope_preamble(preamble)  # noqa: SLF001
 
     def set_persona(self, persona: Persona) -> None:
         """Switch persona, carrying its model and voice with it.
@@ -252,7 +329,9 @@ class BrainSessionAdapter:
             # that mean nothing to the realtime frontend's Kokoro TTS. Publishing
             # one would swap a working voice for a broken one, so keep the
             # current voice and say why.
-            logger.warning(f"Ignoring {voice!r}: not a Kokoro voice, so the frontend cannot speak it")
+            logger.warning(
+                f"Ignoring {voice!r}: not a Kokoro voice, so the frontend cannot speak it"
+            )
             return
         path = Path(cfg.S2S_VOICE_FILE)
         try:
@@ -264,6 +343,34 @@ class BrainSessionAdapter:
             staged.replace(path)
         except OSError as exc:
             logger.warning(f"Failed to update S2S voice file {path}: {exc}")
+
+    def set_tts(
+        self,
+        *,
+        voice: str,
+        voice_backend: str,
+        model: str | None = None,
+        tts_options: dict | None = None,
+    ) -> None:
+        """Publish the chosen voice; the local-TTS settings have no consumer here.
+
+        The realtime frontend owns synthesis and accepts only a Kokoro voice id
+        over ``S2S_VOICE_FILE``, so the provider, model, and per-backend options
+        the GUI's TTS panel sends alongside it are logged rather than silently
+        dropped -- they describe a TTS stack brain mode never starts.
+
+        Args:
+            voice: Kokoro voice ID to publish for the realtime frontend.
+            voice_backend: Local TTS provider name, logged but not applied.
+            model: Optional local TTS model name, logged but not applied.
+            tts_options: Optional provider settings, logged but not applied.
+        """
+        logger.info(
+            f"Brain mode TTS: publishing voice={voice or '-'}; local backend="
+            f"{voice_backend or '-'} model={model or '-'} options={tts_options or {}} "
+            "do not apply while the frontend speaks"
+        )
+        self.set_voice(voice)
 
     def set_voice_mode(self, mode: str) -> None:
         """Record the externally synchronized input mode."""
@@ -281,7 +388,7 @@ class BrainSessionAdapter:
         """Accept the full-session context hook as an intentional no-op."""
         return None
 
-    def set_manual_prompt_mode(self, value: bool) -> None:
+    def set_manual_prompt_mode(self, enabled: bool) -> None:
         """Accept the local composer-mode hook as an intentional no-op."""
         return None
 
@@ -336,13 +443,32 @@ class BrainSessionAdapter:
         agent = str(event.get("agent") or "an agent")
         status = str(event.get("status") or "finished")
         outcome = str(event.get("result") or event.get("summary") or "").strip()
+        # By the time this is spoken the user has usually asked something else,
+        # so the relay has to say what it is about before saying how it went.
+        task = str(event.get("task") or "").strip()
+        about = f" The job was: {task}." if task else ""
         text = (
-            f"{ANNOUNCE_PREFIX} [Agent job update: {agent} {status}. "
+            f"{ANNOUNCE_PREFIX} [Agent job update: {agent} {status}.{about} "
             f"Outcome: {outcome or 'no details were reported'}. "
-            "Give the user a one-or-two sentence spoken summary of this result.]"
+            "Give the user a one-or-two sentence spoken summary, naming what the "
+            "job was about so they can tell which request it answers.]"
         )
         ident = f"{event.get('job_id', '')}:{status}"
-        payload = {"id": ident, "text": text}
+        self._brain._announcement_sources[ident] = {
+            "source_agent": agent,
+            "job_id": event.get("job_id"),
+            "relation": "summary",
+        }
+        while len(self._brain._announcement_sources) > 120:
+            self._brain._announcement_sources.pop(next(iter(self._brain._announcement_sources)))
+        text = text.replace(ANNOUNCE_PREFIX, f"{ANNOUNCE_PREFIX} [id={ident}]", 1)
+        payload = {
+            "id": ident,
+            "text": text,
+            "source_agent": agent,
+            "job_id": event.get("job_id"),
+            "relation": "summary",
+        }
         path = Path(cfg.S2S_ANNOUNCE_FILE)
         queue_dir = path.with_suffix(f"{path.suffix}.queue")
         safe_id = "".join(char if char.isalnum() or char in "-_" else "_" for char in ident)
@@ -383,4 +509,4 @@ class BrainSessionAdapter:
 
     def _emit(self, event: dict) -> None:
         if self._on_event is not None:
-            self._on_event(event)
+            self._on_event(self._brain._conversation.stamp(event))

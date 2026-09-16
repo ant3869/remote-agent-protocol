@@ -482,7 +482,9 @@ class AgentStatusPhrasingTests(unittest.TestCase):
 
     def test_update_on_a_named_agents_task(self):
         self.assertEqual(
-            self.status("What about an update on the the Hermes task, the the configuration problem?"),
+            self.status(
+                "What about an update on the the Hermes task, the the configuration problem?"
+            ),
             ("hermes",),
         )
 
@@ -497,6 +499,24 @@ class AgentStatusPhrasingTests(unittest.TestCase):
 
     def test_plain_chat_does_not_match(self):
         self.assertIsNone(self.status("tell me a story about progress in medicine"))
+
+    def test_how_many_agents_running_matches_without_an_agent(self):
+        # jess_runtime.log 2026-09-13 19:30:28: this phrasing reached the
+        # classifier, which spawned a duplicate code-puppy job ("Check the
+        # number of active agents") instead of answering from live job state.
+        self.assertEqual(
+            self.status("how many agents are actively running right now?"),
+            (None,),
+        )
+
+    def test_is_anything_still_running_matches_when_agents_are_named(self):
+        self.assertEqual(
+            self.status("is anything still running with the agents?"),
+            (None,),
+        )
+
+    def test_is_anything_still_running_without_agent_wording_does_not_match(self):
+        self.assertIsNone(self.status("is anything still running in the kitchen?"))
 
 
 class RequiresConfirmationTests(unittest.TestCase):
@@ -729,3 +749,45 @@ class TravelDurationTests(unittest.TestCase):
             "how long should i wait for the tests",
         ):
             self.assertIsNone(voice_commands.parse_implicit_task(text), text)
+
+
+class SpokenRollcallPhrasingTests(unittest.TestCase):
+    """Liveness questions asked the way people actually say them out loud.
+
+    On 2026-09-15 "can you check in on openclaw and make sure openclaw still
+    works" was delegated to openclaw itself, which had already failed -- a
+    broken agent cannot report on its own health. The patterns anchor on the
+    verb, so the politeness in front of it hid the question.
+    """
+
+    def test_politeness_in_front_of_the_verb_is_not_a_new_task(self):
+        for text in (
+            "can you check in on code puppy and make sure code puppy still works",
+            "could you please ping hermes",
+            "i want you to check on codex",
+            "all i wanted you to do is tell me if hermes is running",
+            "just check up on claude code",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNotNone(
+                    voice_commands.parse_agent_rollcall(text, ALIASES),
+                    "asked politely, this is still a liveness check RAP answers itself",
+                )
+
+    def test_running_is_a_liveness_word(self):
+        self.assertEqual(
+            voice_commands.parse_agent_rollcall("is hermes running", ALIASES), ("hermes",)
+        )
+        self.assertEqual(
+            voice_commands.parse_agent_rollcall("tell me if codex is running", ALIASES),
+            ("codex",),
+        )
+
+    def test_real_work_for_an_agent_is_still_real_work(self):
+        for text in (
+            "can you have code puppy ping the server and fix the config",
+            "please ask hermes to find my school emails",
+            "i want you to check the disk space on this machine",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(voice_commands.parse_agent_rollcall(text, ALIASES))

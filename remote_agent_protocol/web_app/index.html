@@ -7,6 +7,7 @@
   <title>Remote Agent Protocol</title>
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/layout-v4.css" />
+  <link rel="stylesheet" href="/identity.css" />
   <script>window.__CSRF_TOKEN__ = "__CSRF_TOKEN_PLACEHOLDER__";</script>
 </head>
 <body>
@@ -35,23 +36,23 @@
 
   <aside class="destination-rail" aria-label="Application navigation">
     <nav class="nav-links" aria-label="Application panels">
-      <button class="nav-link active" data-view="control" type="button" aria-current="page"><span aria-hidden="true">C</span><b>Control</b></button>
-      <button class="nav-link" data-view="agents" type="button"><span aria-hidden="true">A</span><b>Agents</b></button>
-      <button class="nav-link" data-view="personas" type="button"><span aria-hidden="true">P</span><b>Personas</b></button>
-      <button class="nav-link" data-view="memory" type="button"><span aria-hidden="true">M</span><b>Memory</b></button>
-      <button class="nav-link" data-view="status" type="button"><span aria-hidden="true">S</span><b>Status</b></button>
-      <button class="nav-link" data-view="settings" type="button"><span aria-hidden="true">G</span><b>Settings</b></button>
-      <button class="nav-link nav-setup" data-view="setup" type="button"><span aria-hidden="true">U</span><b>Setup</b></button>
+      <button class="nav-link active" data-view="control" type="button" aria-current="page"><span data-icon="home" aria-hidden="true"></span><b>Control</b></button>
+      <button class="nav-link" data-view="agents" type="button"><span data-icon="agents" aria-hidden="true"></span><b>Agents</b></button>
+      <button class="nav-link" data-view="personas" type="button"><span data-icon="persona" aria-hidden="true"></span><b>Personas</b></button>
+      <button class="nav-link" data-view="memory" type="button"><span data-icon="memory" aria-hidden="true"></span><b>Memory</b></button>
+      <button class="nav-link" data-view="status" type="button"><span data-icon="activity" aria-hidden="true"></span><b>Status</b></button>
+      <button class="nav-link" data-view="settings" type="button"><span data-icon="settings" aria-hidden="true"></span><b>Settings</b></button>
+      <button class="nav-link nav-setup" data-view="setup" type="button"><span data-icon="terminal" aria-hidden="true"></span><b>Setup</b></button>
     </nav>
     <section class="rail-actions" aria-label="Session actions">
-      <button id="restartChatBtn" class="rail-primary" type="button" title="New chat"><span aria-hidden="true">＋</span><b>New chat</b></button>
+      <button id="restartChatBtn" class="rail-primary" type="button" title="New chat"><span data-icon="plus" aria-hidden="true"></span><b>New chat</b></button>
       <details id="operationsDisclosure" class="operations-disclosure">
-        <summary title="Operations"><span aria-hidden="true">•••</span><b>Operations</b></summary>
+        <summary title="Operations"><span data-icon="more" aria-hidden="true"></span><b>Operations</b></summary>
         <div class="operations-list">
-          <button id="freeVramBtn" class="side-action" type="button">Free VRAM</button>
-          <button id="startOllamaBtn" class="side-action" type="button">Start Ollama</button>
-          <button id="diagnosticsBtn" class="side-action" type="button">Export diagnostics</button>
-          <button id="rebootBtn" class="side-action destructive" type="button">Reboot session</button>
+          <button id="freeVramBtn" class="side-action" type="button"><span data-icon="cpu" aria-hidden="true"></span>Free VRAM</button>
+          <button id="startOllamaBtn" class="side-action" type="button"><span data-icon="power" aria-hidden="true"></span>Start Ollama</button>
+          <button id="diagnosticsBtn" class="side-action" type="button"><span data-icon="download" aria-hidden="true"></span>Export diagnostics</button>
+          <button id="rebootBtn" class="side-action destructive" type="button"><span data-icon="refresh" aria-hidden="true"></span>Reboot session</button>
         </div>
       </details>
     </section>
@@ -106,11 +107,11 @@
     <section class="context-panel" data-context-view="settings">
       <header class="context-heading"><div><p class="section-label">Configuration</p><strong class="context-title">Settings</strong></div></header>
       <nav class="settings-context-nav" aria-label="Settings categories">
-        <button class="active" data-settings-section="general" type="button" aria-current="page"><span>01</span><strong>General</strong><small>Application defaults</small></button>
-        <button data-settings-section="voice" type="button"><span>02</span><strong>Voice and TTS</strong><small>Speech pipeline</small></button>
-        <button data-settings-section="runtime" type="button"><span>03</span><strong>Session operations</strong><small>Runtime controls</small></button>
-        <button data-settings-section="avatar" type="button"><span>04</span><strong>Animated avatar</strong><small>Visual companion</small></button>
-        <button data-settings-section="state" type="button"><span>05</span><strong>Current state</strong><small>Active configuration</small></button>
+        <button class="active" data-settings-section="general" type="button" aria-current="page"><span data-icon="sliders" aria-hidden="true"></span><strong>General</strong><small>Application defaults</small></button>
+        <button data-settings-section="voice" type="button"><span data-icon="speaker" aria-hidden="true"></span><strong>Voice and TTS</strong><small>Speech pipeline</small></button>
+        <button data-settings-section="runtime" type="button"><span data-icon="power" aria-hidden="true"></span><strong>Session operations</strong><small>Runtime controls</small></button>
+        <button data-settings-section="avatar" type="button"><span data-icon="persona" aria-hidden="true"></span><strong>Animated avatar</strong><small>Visual companion</small></button>
+        <button data-settings-section="state" type="button"><span data-icon="activity" aria-hidden="true"></span><strong>Current state</strong><small>Active configuration</small></button>
       </nav>
       <p class="context-note">Runtime overrides are restored on the next application launch.</p>
     </section>
@@ -133,12 +134,12 @@
       <section id="confirmBar" class="confirm-bar hidden"><div><p class="section-label">Confirmation required</p><strong id="confirmTitle">Agent task waiting</strong><p id="confirmText" class="muted"></p></div><div class="confirm-actions"><button id="denyBtn" class="button destructive" type="button">Deny</button><button id="approveBtn" class="button status-success" type="button">Approve</button></div></section>
       <section class="conversation-workbench" aria-labelledby="conversationHeading">
         <header class="transcript-toolbar"><div><p class="section-label">Conversation</p><h3 id="conversationHeading">Transcription chat</h3></div><span class="panel-meta">voice · text · agent events</span></header>
-        <div id="chatLog" class="chat-log" tabindex="0" aria-live="polite"><div class="empty-state"><span class="presence-dot"></span><div><strong>Jess is warming up</strong><p>Speak when the mic is live, or type below.</p></div></div></div>
+        <p id="conversationHistoryNotice" class="conversation-history-notice" hidden>Earlier conversation has reached the session retention limit.</p><div id="conversationLive" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div><button id="newMessagesBtn" class="conversation-new" type="button" hidden>New messages ↓</button><div id="chatLog" class="chat-log" tabindex="0" aria-label="Conversation"><div class="empty-state"><span class="presence-dot"></span><div><strong>Jess is warming up</strong><p>Speak when the mic is live, or type below.</p></div></div></div>
         <section class="composer-card">
           <div class="composer-head"><div><p class="section-label">Message</p><span id="voiceDraftLabel">Voice transcript appears here when context is held.</span></div><button id="contextToggle" class="icon-button" type="button" title="Add context" aria-label="Add context">＋</button></div>
           <label class="visually-hidden" for="messageInput">Message to the assistant</label><textarea id="messageInput" rows="2" aria-describedby="voiceDraftLabel" placeholder="Type a message. Enter sends; Shift+Enter adds a line."></textarea>
           <div id="contextDrawer" class="context-drawer hidden"><textarea id="notesInput" rows="3" placeholder="Optional notes for this send only." aria-label="Context notes"></textarea><div class="context-row"><input id="attachmentRef" type="text" placeholder="Link or file path" aria-label="Attachment link or file path" /><input id="attachmentNote" type="text" placeholder="Short note" aria-label="Attachment note" /><button id="addAttachmentBtn" class="button quiet" type="button">Add</button></div><div id="attachmentList" class="attachment-list"></div></div>
-          <div class="composer-actions"><button id="delegateBtn" class="button accent-delegate" type="button">Delegate</button><button id="sendBtn" class="button primary-action" type="button">Send</button></div>
+          <div class="composer-actions"><button id="stopAllBtn" class="button destructive" type="button" title="Cancel every running agent job and stop the current reply">Stop</button><button id="delegateBtn" class="button accent-delegate" type="button">Delegate</button><button id="sendBtn" class="button primary-action" type="button">Send</button></div>
         </section>
       </section>
       <details class="activity-panel" open><summary class="activity-summary">Live activity</summary><div class="activity-panel-content"><header class="activity-head"><div><p class="section-label">Live activity</p><h3>Agent tape</h3></div><span class="accent-agent-label">research & tasks</span></header><section id="agentStrip" class="agent-strip"></section><div class="telemetry-table"><div class="table-heading"><span>Telemetry</span><span>Latency</span></div><div><span>Speech to text</span><strong id="latStt">--</strong></div><div><span>After STT → response</span><strong id="latLlm">--</strong></div><div><span>Response → first audio</span><strong id="latTts">--</strong></div></div></div></details>
@@ -159,7 +160,7 @@
     </section>
 
     <section id="personasView" class="view" hidden>
-      <header class="persona-masthead"><div class="identity-mark" aria-hidden="true">ID</div><div class="persona-title-fields"><label>Name<input id="personaEditName" type="text" autocomplete="off" /></label><label>Description<input id="personaEditDescription" type="text" /></label></div><div class="persona-preview"><p class="section-label">Runtime preview</p><h4 id="personaPreviewName">--</h4><p id="personaPreviewDescription" class="muted"></p><dl><div><dt>Model</dt><dd id="personaPreviewModel">--</dd></div><div><dt>Voice</dt><dd id="personaPreviewVoice">--</dd></div><div><dt>Tool user</dt><dd id="personaPreviewTool">--</dd></div><div><dt>Memory</dt><dd id="personaPreviewMemory">--</dd></div></dl></div></header>
+      <header class="persona-masthead"><div class="identity-mark" data-icon="persona" aria-hidden="true"></div><div class="persona-title-fields"><label>Name<input id="personaEditName" type="text" autocomplete="off" /></label><label>Description<input id="personaEditDescription" type="text" /></label></div><div class="persona-preview"><p class="section-label">Runtime preview</p><h4 id="personaPreviewName">--</h4><p id="personaPreviewDescription" class="muted"></p><dl><div><dt>Model</dt><dd id="personaPreviewModel">--</dd></div><div><dt>Voice</dt><dd id="personaPreviewVoice">--</dd></div><div><dt>Tool user</dt><dd id="personaPreviewTool">--</dd></div><div><dt>Memory</dt><dd id="personaPreviewMemory">--</dd></div></dl></div></header>
       <section class="persona-document persona-editor-panel">
         <div id="personaNotice" class="persona-notice hidden" role="status"></div>
         <div class="prompt-document"><label>System prompt / role instructions<textarea id="personaEditPrompt" rows="16"></textarea></label><label>Tone and speaking style<input id="personaTone" type="text" disabled /></label></div>
@@ -177,7 +178,7 @@
       <div id="memoryLayout" class="memory-layout"><section id="memoryList" class="memory-list" aria-label="Memory ledger"></section><aside class="memory-detail" aria-label="Selected memory"><p class="section-label">Selected memory</p><h4 id="memoryDetailTitle">Recall reader</h4><p id="memoryDetailText">Select a ledger entry to inspect its full contents.</p></aside></div>
     </section>
 
-    <section id="setupView" class="view" hidden><div class="wizard setup-steps"><header class="wizard-title"><span class="wizard-icon">STT</span><div><h3>MLX Whisper Setup</h3><p>Review local speech recognition options and requirements.</p></div></header>
+    <section id="setupView" class="view" hidden><div class="wizard setup-steps"><header class="wizard-title"><span class="wizard-icon" data-icon="mic" aria-hidden="true"></span><div><h3>MLX Whisper Setup</h3><p>Review local speech recognition options and requirements.</p></div></header>
       <details class="wizard-section wizard-step" data-setup-step="0" open><summary class="section-heading"><span>01</span><span><strong>Language support</strong><small>Choose the model language profile.</small></span></summary><div class="wizard-step-body"><div class="option-row"><button id="setupEnglishBtn" class="option-card selected" type="button">English only</button><button id="setupMultilingualBtn" class="option-card" type="button">Multilingual · 99 languages</button></div></div></details>
       <details class="wizard-section wizard-step" data-setup-step="1"><summary class="section-heading"><span>02</span><span><strong>Model size</strong><small>Balance speed, accuracy, and memory use.</small></span></summary><div class="wizard-step-body"><input id="setupModelRange" class="range" type="range" min="0" max="3" value="0" aria-label="Speech recognition model size" /><div class="range-labels"><span>Tiny</span><span>Base</span><span>Small</span><span>Medium</span></div><div id="setupModelSummary" class="selection-banner">Tiny · ~75MB · ~1GB VRAM · fastest</div></div></details>
       <details class="wizard-section wizard-step" data-setup-step="2"><summary class="section-heading"><span>03</span><span><strong>Requirements</strong><small>Review local runtime dependencies.</small></span></summary><div class="wizard-step-body"><div class="requirement-row"><span>FFmpeg</span><strong class="status-warning">Review</strong></div><div class="requirement-row"><span>MLX Whisper</span><strong class="status-warning">Review</strong></div><div class="requirement-row"><span>Coqui TTS</span><strong id="setupCoquiStatus" class="status-warning">Checking</strong></div><div class="requirement-row"><span>Coqui model</span><strong id="setupCoquiModel">--</strong></div></div></details>
@@ -199,10 +200,10 @@
   <footer class="runtime-statusline"><span id="runtimeFooterState" class="disconnected"><i class="presence-dot"></i> Runtime connecting</span><span>Graphite console</span><span id="inputControlStatus" class="input-control-status" role="status" aria-live="assertive" aria-atomic="true" hidden></span><span class="statusline-shortcuts"><kbd>Ctrl L</kbd> Message <kbd>Ctrl M</kbd> Mic <kbd>Ctrl K</kbd> Commands</span></footer>
 </div>
 
-<section id="commandPalette" class="command-palette hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="commandPaletteTitle"><div class="palette-panel"><header class="palette-header"><div><p class="section-label">Navigate and act</p><h2 id="commandPaletteTitle">Command palette</h2></div><button id="paletteCloseBtn" class="icon-button" type="button" aria-label="Close command palette">Close</button></header><label class="visually-hidden" for="paletteInput">Search commands, agents, personas, and memory</label><input id="paletteInput" class="palette-input" type="text" placeholder="Search commands, agents, personas, memory..." autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="paletteResults" /><div id="paletteResults" class="palette-results" role="listbox" aria-label="Command results"></div></div></section>
+<section id="commandPalette" class="command-palette hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="commandPaletteTitle"><div class="palette-panel"><header class="palette-header"><div><p class="section-label">Navigate and act</p><h2 id="commandPaletteTitle">Command palette</h2></div><button id="paletteCloseBtn" class="icon-button" type="button" aria-label="Close command palette" title="Close command palette"><span data-icon="close" aria-hidden="true"></span></button></header><label class="visually-hidden" for="paletteInput">Search commands, agents, personas, and memory</label><input id="paletteInput" class="palette-input" type="text" placeholder="Search commands, agents, personas, memory..." autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="paletteResults" /><div id="paletteResults" class="palette-results" role="listbox" aria-label="Command results"></div></div></section>
 <script type="importmap">{"imports":{"three":"/vendor/three/three.module.min.js","three/addons/":"/vendor/three/addons/"}}</script>
 <script type="module" src="/avatar/avatar-entry.js"></script>
-<script src="/input-control-state.js"></script><script src="/ui-shell-state.js"></script><script src="/avatar.js"></script><script src="/app.js"></script>
+<script src="/ui-icons.js"></script><script src="/input-control-state.js"></script><script src="/ui-shell-state.js"></script><script src="/avatar.js"></script><script src="/conversation.js"></script><script src="/app.js"></script>
 <script>
   document.querySelectorAll("[data-settings-section]").forEach((button) => button.addEventListener("click", () => {
     document.querySelectorAll("[data-settings-section]").forEach((item) => { const active = item === button; item.classList.toggle("active", active); if (active) item.setAttribute("aria-current", "page"); else item.removeAttribute("aria-current"); });

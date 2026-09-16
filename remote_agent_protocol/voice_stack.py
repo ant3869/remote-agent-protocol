@@ -17,9 +17,11 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -70,8 +72,10 @@ def realtime_ready(websocket_url: str, pool_url: str) -> Callable[[], bool]:
             with urllib.request.urlopen(pool_url, timeout=2.0) as response:
                 pool = json.loads(response.read())
             units = pool.get("units", [])
-            return pool.get("in_use") == 0 and bool(units) and all(
-                unit.get("state") == "idle" for unit in units
+            return (
+                pool.get("in_use") == 0
+                and bool(units)
+                and all(unit.get("state") == "idle" for unit in units)
             )
         except (OSError, TimeoutError, ValueError, json.JSONDecodeError, WebSocketException):
             return False
@@ -488,6 +492,16 @@ def build_stages(
                 # makes the butler feel like he is reading prepared remarks.
                 "--stream_batch_sentences",
                 "1",
+                # End-of-turn patience. The sibling launcher's own values end a
+                # turn on a mid-sentence pause and then give the tail only a
+                # brief window to rejoin it, so a hesitation becomes two turns
+                # and the fragment gets routed on its own.
+                "--min_silence_ms",
+                str(cfg.S2S_VAD_MIN_SILENCE_MS),
+                "--speculative_reopen_ms",
+                str(cfg.S2S_VAD_SPECULATIVE_REOPEN_MS),
+                "--unanswered_reopen_ms",
+                str(cfg.S2S_VAD_UNANSWERED_REOPEN_MS),
             ],
             cwd=s2s_home,
             # A TCP listener may be stale or unrelated. Require the protocol's
@@ -553,8 +567,13 @@ def child_env(
     ws_port: int | None = None,
     bridge_api_key: str | None = None,
 ) -> dict[str, str]:
-    """Environment for children, including launcher-selected dynamic ports."""
+    """Give children dynamic ports and model-extraction space on the data drive."""
     env = dict(os.environ)
+    # STT checkpoints expand to gigabytes; Windows Temp may be on a full system drive.
+    scratch = (cfg.DATA_DIR / "stack-tmp").resolve()
+    scratch.mkdir(parents=True, exist_ok=True)
+    for key in ("TMP", "TEMP", "TMPDIR"):
+        env[key] = str(scratch)
     # Forcing it here means the stack works without hand-editing .env, and a
     # stale RAP_MODE=full cannot silently start a second local audio pipeline.
     env["RAP_MODE"] = "brain"
@@ -577,8 +596,44 @@ def stage_log_path(stage_name: str) -> Path:
     return REPO_ROOT / "logs" / f"{slug}.log"
 
 
+def reap_previous_stage(ready_file: Path) -> int | None:
+    """Stop the process a previous run left behind, returning its pid if any.
+
+    Every run rewrites this handshake file, so a live pid still named in it as
+    a new stack starts belongs to a run whose supervisor is already gone. Left
+    alone it keeps polling the shared mode files and holding the microphone,
+    and the frontend this run is about to start then looks like it stopped
+    transcribing. Orphans accumulate one per start until the machine runs out
+    of memory, because nothing else ever looks for them.
+    """
+    try:
+        payload = json.loads(ready_file.read_text(encoding="utf-8"))
+        pid = int(payload.get("pid", 0))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if pid <= 0 or not process_is_running(pid):
+        return None
+    logger.warning(f"Stopping the stage an earlier run left running (pid {pid})")
+    try:
+        if sys.platform == "win32":
+            # /T: the frontend spawns its own audio child, which outlives it.
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(f"Could not stop leftover process {pid}: {exc}")
+        return None
+    return pid
+
+
 def _spawn(stage: Stage, env: dict[str, str]) -> subprocess.Popen:
     if stage.ready_file is not None:
+        reap_previous_stage(stage.ready_file)
         stage.ready_file.unlink(missing_ok=True)
         stage.ready_file.with_suffix(stage.ready_file.suffix + ".tmp").unlink(missing_ok=True)
     log_path = stage_log_path(stage.name)
@@ -629,7 +684,9 @@ def _await_ready(stage: Stage, process: subprocess.Popen) -> bool:
         if stage.ready():
             if process.poll() is None:
                 return True
-            logger.error(f"{stage.name} exited while publishing readiness\n{log_excerpt(stage.name)}")
+            logger.error(
+                f"{stage.name} exited while publishing readiness\n{log_excerpt(stage.name)}"
+            )
             return False
         time.sleep(0.5)
     logger.error(
@@ -712,34 +769,53 @@ def run_stack() -> int:
         return 2
 
     # Ports cannot answer "is it already running?" now that each launch picks
-    # ephemeral ones -- a fresh port is free by construction. The app's own
-    # single-instance lock can, and it also catches a GUI started on its own.
-    # A held lock is usually a crashed run's process still sitting there, which
-    # the app has always cleaned up on its own next launch; do that here rather
-    # than refusing a launch nobody else is using.
+    # ephemeral ones -- a fresh port is free by construction. The single-
+    # instance mutex can, and Windows releases it when its holder dies, crash
+    # included, so a held lock always means a live instance rather than stale
+    # state left behind. Nothing here can tell an instance somebody is using
+    # from one they walked away from -- both run the same command line -- so
+    # taking the slot means killing a working app. Leave it alone and say so.
     if process_guard.instance_is_running():
-        logger.warning("The single-instance lock is held; closing whatever still holds it")
-        if not process_guard.reclaim_instance_slot():
-            logger.error(
-                "Remote Agent Protocol is already running and could not be closed from here.\n"
-                "Close its windows and try again. Starting a second copy would spend a minute "
-                "loading models before the app refused the duplicate, leaving the audio client "
-                "talking to the first one."
-            )
-            return 2
-        logger.info("Reclaimed the slot from a leftover run; continuing")
+        logger.error(
+            "Remote Agent Protocol is already running, so nothing was started. "
+            "Close the running app (or the voice-stack window supervising it) and try again."
+        )
+        return 2
 
     bridge_port, ws_port = select_stack_ports()
     logger.info(f"Selected dynamic ports: brain/GUI {bridge_port}, Realtime {ws_port}")
 
     input_device, output_device = select_audio_devices(s2s_home)
     bridge_api_key = secrets.token_urlsafe(32)
-    env = child_env(
-        bridge_port=bridge_port,
-        ws_port=ws_port,
-        bridge_api_key=bridge_api_key,
-    )
+    try:
+        env = child_env(
+            bridge_port=bridge_port,
+            ws_port=ws_port,
+            bridge_api_key=bridge_api_key,
+        )
+    except OSError as exc:
+        logger.error(f"Cannot prepare voice-stack temporary storage under {cfg.DATA_DIR}: {exc}")
+        return 2
+    logger.info(f"Voice-stack temporary storage: {env['TEMP']}")
     started: list[tuple[Stage, subprocess.Popen]] = []
+    stop_lock = threading.Lock()
+    stopped = False
+
+    def stop_everything() -> None:
+        """Tear the stages down once, from whichever path reaches here first."""
+        nonlocal stopped
+        with stop_lock:
+            if stopped:
+                return
+            stopped = True
+        _shutdown(started)
+
+    # Closing this window sends CTRL_CLOSE_EVENT, which CPython does not
+    # turn into KeyboardInterrupt. Left unhandled, Windows force-terminates
+    # this process a few seconds later and the finally below never runs, so
+    # every stage stays alive holding the microphone and its loaded models.
+    # That is how seven frontends accumulated by 2026-09-14.
+    process_guard.install_close_handler(stop_everything)
     try:
         for stage in build_stages(
             s2s_home,
@@ -760,14 +836,16 @@ def run_stack() -> int:
         while True:
             for stage, process in started:
                 if process.poll() is not None:
-                    logger.warning(f"{stage.name} exited with code {process.returncode}; shutting down")
+                    logger.warning(
+                        f"{stage.name} exited with code {process.returncode}; shutting down"
+                    )
                     return process.returncode or 0
             time.sleep(1.0)
     except KeyboardInterrupt:
         logger.info("Interrupted; shutting down the voice stack")
         return 0
     finally:
-        _shutdown(started)
+        stop_everything()
 
 
 def main() -> None:

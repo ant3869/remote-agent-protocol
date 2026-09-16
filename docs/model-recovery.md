@@ -8,7 +8,7 @@ Verified 2026-07-05 against the installed CLIs and current upstream docs.
 |---|---|---|
 | CodePuppy 0.0.591 | `/model chatgpt-gpt-5.5` | `code-puppy --model chatgpt-gpt-5.5 -p "<task>"` |
 | Hermes-Agent 0.18.0 | `/model openai-api:gpt-5.5 --global` | `hermes chat --resume <session_id> --provider openai-api --model gpt-5.5 -q "<task>"` |
-| OpenClaw 2026.1.29 | `openclaw models set openai/gpt-5.5` | Not enabled as an app backend |
+| OpenClaw 2026.9.4 | `openclaw models set openai/gpt-5.5` | Not in `AGENT_MODEL_TARGETS` yet |
 
 CodePuppy encodes the provider in its configured model key; it has no separate
 provider-only switch. Hermes uses `openai-api` for an OpenAI API key and
@@ -16,10 +16,15 @@ provider-only switch. Hermes uses `openai-api` for an OpenAI API key and
 `provider/model` references and can verify them with `openclaw models status
 --json` or `openclaw models list --provider openai`.
 
-The installed OpenClaw is substantially older than the current upstream CLI
-and its local `models status` command did not return within 20 seconds. The app
-therefore reports OpenClaw voice switching as unsupported instead of claiming
-success. Update and configure OpenClaw before adding it to `AGENT_BACKENDS`.
+OpenClaw is now current (2026.9.4, previously 2026.1.29) and is configured in
+`AGENT_BACKENDS` as `openclaw agent exec "{task}" --state-dir <persistent
+dir>` -- verified live 2026-09-13 to run a headless turn cleanly (`"ok":
+true`) without an interactive approval prompt. `--state-dir` must point at a
+directory that already exists: OpenClaw does not create it, and its default
+per-run temp directory hit a Windows `EBUSY` error on cleanup that turned an
+otherwise-successful turn into a reported failure. Model-switch support
+(`AGENT_MODEL_TARGETS`) has not been added yet; `openclaw models set` above is
+unverified against the current CLI.
 
 ## Runtime behavior
 

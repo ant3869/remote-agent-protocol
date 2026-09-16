@@ -373,9 +373,7 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         # generous callable when one is supplied.
         serving = FakeClassify(result=verdict(intent="chat", category="none", task=""))
         warming = FakeClassify(result=verdict(intent="chat", category="none", task=""))
-        router = intent_router.IntentRouter(
-            enabled=True, classify=serving, warm_classify=warming
-        )
+        router = intent_router.IntentRouter(enabled=True, classify=serving, warm_classify=warming)
 
         await router.warmup()
 
@@ -582,6 +580,47 @@ class GroundingGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, intent_router.ACTION_NONE)
         self.assertEqual(decision.intent, "chat")
         self.assertEqual(decision.task, "")
+
+
+class SelfDoubtGuardTests(unittest.IsolatedAsyncioTestCase):
+    """A classifier's own "reason" text can admit it doesn't know what was
+    said while still reporting high numeric confidence -- jess_runtime.log
+    2026-09-13 19:35:31 dispatched a stammered fragment verbatim as a task
+    ("To to but you're not going to be able to do") because the reason field
+    ("User is unable to clearly articulate a task or request") was never
+    checked; only the 0.95 confidence number was. The stated doubt must win.
+    """
+
+    async def route(self, classify, text, **kwargs):
+        return await make_router(classify, **kwargs).route(text, "code-puppy")
+
+    async def test_stated_doubt_overrides_high_confidence(self):
+        classify = FakeClassify(
+            result=verdict(
+                task="To to but you're not going to be able to do",
+                conf=0.95,
+                reason="User is unable to clearly articulate a task or request",
+            )
+        )
+        decision = await self.route(classify, "To to but you're not going to be able to do")
+
+        self.assertEqual(decision.action, intent_router.ACTION_NONE)
+        self.assertEqual(decision.intent, "chat")
+        self.assertEqual(decision.task, "")
+
+    async def test_confident_clear_reason_still_dispatches(self):
+        # The guard must not fire on ordinary, clearly-reasoned verdicts.
+        classify = FakeClassify(
+            result=verdict(
+                category="files_or_apps",
+                task="Organize the downloads folder",
+                conf=0.9,
+                reason="User asked for their downloads folder to be cleaned up",
+            )
+        )
+        decision = await self.route(classify, "can you clean up my downloads folder")
+
+        self.assertEqual(decision.action, "dispatch")
 
 
 class RiskClassificationTests(unittest.IsolatedAsyncioTestCase):
@@ -825,9 +864,7 @@ class ClassifierRecoveryTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(5)
             return {}
 
-        router = intent_router.IntentRouter(
-            classify=slow_classify, enabled=True, timeout_secs=0.05
-        )
+        router = intent_router.IntentRouter(classify=slow_classify, enabled=True, timeout_secs=0.05)
         warmups = []
         router.warmup = lambda: warmups.append(1) or asyncio.sleep(0)
 
@@ -875,3 +912,59 @@ class PastReferenceRoutingTests(unittest.IsolatedAsyncioTestCase):
         decision = await router.route("does the printer work", "hermes")
 
         self.assertNotEqual(decision.action, intent_router.ACTION_NONE)
+
+
+class FollowUpTierTests(unittest.TestCase):
+    """The keyword net must not treat a follow-up as a brand-new job.
+
+    jess_runtime.log 2026-09-15T18:38-18:39: during one long working session
+    every turn dispatched, including "wheres the list of davinci resolve tools
+    we were just talking about it" and "no it didnt, wheres the file path to
+    the list". The net matches on nouns that recur all session ("list", "file
+    path"), and shipped the raw utterance as the task -- so the agent had no
+    referent and reported on itself instead.
+    """
+
+    FOLLOW_UPS = (
+        "no it didnt, wheres the file path to the list",
+        "wheres the list of davinci resolve tools we were just talking about it",
+        "that didnt work, try again",
+        "actually, wheres the file",
+        "you just said it was installed",
+    )
+    FRESH = (
+        "install it and then test it, see if it can make an equilizer preset",
+        "what setting do i chnage in davinci resolver",
+        "help me find some kind of connection to davinci resolve for ai agents",
+        "create a file called notes.txt on my desktop",
+    )
+
+    def test_follow_ups_are_recognised(self):
+        for text in self.FOLLOW_UPS:
+            with self.subTest(text=text):
+                self.assertTrue(intent_router._refers_to_prior_turn(text))
+
+    def test_fresh_requests_are_not_mistaken_for_follow_ups(self):
+        for text in self.FRESH:
+            with self.subTest(text=text):
+                self.assertFalse(intent_router._refers_to_prior_turn(text))
+
+    def test_the_keyword_net_defers_a_follow_up_to_the_classifier(self):
+        """Deferring, not discarding: the classifier can still make it a task."""
+        router = intent_router.IntentRouter(enabled=False, auto_delegate=True)
+        decision = router._route_deterministic(
+            "no it didnt, wheres the file path to the list", "code-puppy"
+        )
+        # Falling through leaves no deterministic decision at all, which is what
+        # hands the turn to the classifier rather than dispatching raw speech.
+        self.assertTrue(
+            decision is None or decision.source != "heuristic",
+            f"a follow-up must not dispatch from the keyword net: {decision}",
+        )
+
+    def test_a_fresh_request_still_dispatches_from_the_keyword_net(self):
+        router = intent_router.IntentRouter(enabled=False, auto_delegate=True)
+        decision = router._route_deterministic(
+            "install davinci resolve mcp and test the equalizer preset", "code-puppy"
+        )
+        self.assertEqual(decision.action, intent_router.ACTION_DISPATCH)

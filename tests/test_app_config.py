@@ -39,10 +39,18 @@ class AgentConfigTests(unittest.TestCase):
             config.AGENT_BACKENDS["hermes"],
             ["hermes", "chat", "-q", "{task}"],
         )
-        self.assertEqual(
-            config.AGENT_BACKENDS["hermes-yolo"],
-            ["hermes", "chat", "--yolo", "-q", "{task}"],
-        )
+
+    def test_openclaw_runs_a_headless_isolated_turn_with_a_persistent_state_dir(self):
+        # --state-dir must point at a directory that already exists: OpenClaw
+        # does not create it, and its default per-run temp dir hit a Windows
+        # EBUSY error on cleanup that turned a successful turn into a reported
+        # failure (verified live, 2026-09-13).
+        command = config.AGENT_BACKENDS["openclaw"]
+        self.assertEqual(command[:4], ["openclaw", "agent", "exec", "{task}"])
+        self.assertIn("--state-dir", command)
+        state_dir = config._ROOT / "data" / "openclaw_state"
+        self.assertEqual(command[command.index("--state-dir") + 1], str(state_dir))
+        self.assertTrue(state_dir.is_dir())
 
     def test_installing_new_software_requires_confirmation(self):
         # "install a skill called agent-reach" ran straight to a live pip

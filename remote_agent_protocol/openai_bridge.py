@@ -69,7 +69,7 @@ class BrainBridgeRuntime:
                 return
             if isinstance(piece, Exception):
                 raise piece
-            yield str(piece)
+            yield piece
 
     def submit(self, coro):
         """Schedule a coroutine on the brain loop."""
@@ -88,7 +88,9 @@ class BrainBridgeRuntime:
         config = persona_config.load_config()
         effective = persona_config.effective_personas(personas.PERSONAS, config)
         state = app_state.load_state(cfg.APP_STATE_FILE)
-        name = app_state.resolve_persona_name(state.persona, [p.name for p in effective], cfg.DEFAULT_PERSONA_NAME)
+        name = app_state.resolve_persona_name(
+            state.persona, [p.name for p in effective], cfg.DEFAULT_PERSONA_NAME
+        )
         return next((p for p in effective if p.name == name), effective[0])
 
 
@@ -97,7 +99,9 @@ def run_server() -> None:
     logging_setup.setup_logging(cfg.DEBUG_MODE)
     runtime = BrainBridgeRuntime()
     runtime.start()
-    server = ThreadingHTTPServer((cfg.S2S_BRIDGE_HOST, cfg.S2S_BRIDGE_PORT), _handler_class(runtime))
+    server = ThreadingHTTPServer(
+        (cfg.S2S_BRIDGE_HOST, cfg.S2S_BRIDGE_PORT), _handler_class(runtime)
+    )
     url = f"http://{cfg.S2S_BRIDGE_HOST}:{cfg.S2S_BRIDGE_PORT}/v1"
     logger.info(f"Remote Agent Protocol brain bridge listening at {url}")
     print(f"Remote Agent Protocol brain bridge: {url}")
@@ -122,7 +126,9 @@ def _handler_class(runtime: BrainBridgeRuntime):
                 self._json({"ok": True, "model": cfg.S2S_BRIDGE_MODEL})
                 return
             if path == "/v1/models":
-                self._json({"object": "list", "data": [{"id": cfg.S2S_BRIDGE_MODEL, "object": "model"}]})
+                self._json(
+                    {"object": "list", "data": [{"id": cfg.S2S_BRIDGE_MODEL, "object": "model"}]}
+                )
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -132,13 +138,19 @@ def _handler_class(runtime: BrainBridgeRuntime):
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
             if not self._authorized():
-                self._json({"error": {"message": "unauthorized", "type": "authentication_error"}}, status=401)
+                self._json(
+                    {"error": {"message": "unauthorized", "type": "authentication_error"}},
+                    status=401,
+                )
                 return
             try:
                 payload = self._read_json()
                 user_text = _latest_user_text(payload)
                 if not user_text:
-                    self._json({"error": {"message": "no user message", "type": "invalid_request_error"}}, status=400)
+                    self._json(
+                        {"error": {"message": "no user message", "type": "invalid_request_error"}},
+                        status=400,
+                    )
                     return
                 model = str(payload.get("model") or cfg.S2S_BRIDGE_MODEL)
                 if bool(payload.get("stream")) and cfg.S2S_BRIDGE_STREAMING:
@@ -225,17 +237,31 @@ def _chat_completion(answer: str, model: str) -> dict:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": answer},
+                "finish_reason": "stop",
+            }
+        ],
+        **({"rap": answer.utterance} if hasattr(answer, "utterance") else {}),
     }
 
 
-def _stream_chunk(chunk_id: str, model: str, created: int, delta: dict, *, finish_reason: str | None = None) -> dict:
+def _stream_chunk(
+    chunk_id: str, model: str, created: int, delta: dict, *, finish_reason: str | None = None
+) -> dict:
     return {
         "id": chunk_id,
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        **(
+            {"rap": delta["content"].utterance}
+            if hasattr(delta.get("content"), "utterance")
+            else {}
+        ),
     }
 
 

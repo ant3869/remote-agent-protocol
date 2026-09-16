@@ -358,12 +358,13 @@ CORPUS: list[ProbeCase] = [
     ),
     _C(
         "deleg-unknown-agent",
-        "tell openclaw to search the web for cat memes",
+        "tell autogpt to search the web for cat memes",
         "delegation",
         "brutal",
         OUTCOME_DISPATCH,
         expect_source="heuristic",
-        note="openclaw not a configured backend; falls through to implicit dispatch on default",
+        note="autogpt is not a configured backend, so the named-agent tier cannot "
+        "claim this and it falls through to implicit dispatch on the default",
     ),
     _C(
         "deleg-question",

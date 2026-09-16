@@ -10,6 +10,89 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-09-15
+
+### Added
+
+- Any OpenAI-compatible cloud endpoint can now serve the persona, the intent
+  classifier, and the orchestrator's reasoning, chosen per model and tried
+  before the local one. A cloud failure falls back to the local model rather
+  than to silence, so an expired key costs one slow turn instead of the app.
+  Off by default; set CLOUD_LLM_BASE_URL, a key, and a model to switch on.
+
+### Added
+
+- Shared identity colors for user, persona, and harness names and message borders;
+  graphite SVG navigation/menu icons and accessible icon-only message actions.
+- Speaker-attributed streaming conversation text, task cards with grouped
+  progress and consultations, explicit failure/cancellation outcomes, and full
+  results linked to spoken relays.
+- Conversation snapshots independent of telemetry, reload/gap recovery, and
+  desktop/mobile reading-position preservation with a New messages control.
+- Ordered local speech delivery reporting and an authenticated external
+  playback-report contract; unacknowledged external audio is labeled honestly.
+
+### Fixed
+
+- Voice-stack model extraction uses the application data drive instead of
+  Windows Temp, avoiding a Parakeet/PyTorch startup crash when the system drive
+  is full; temporary-storage setup failures are reported before launch.
+- Harness speech no longer inherits the selected persona's display name, and
+  clearing the conversation rejects late updates from retired source sessions.
+- Agent jobs no longer abort with a false "quota exhausted" when the agent
+  prints content that happens to contain provider-error wording; a line is read
+  as provider status only when it is short enough to be one, or is shaped like
+  an error report rather than prose.
+- A job stopped by the inactivity timeout records that it timed out and names
+  the budget that actually fired, rather than leaving no reason behind and
+  always quoting the default timeout.
+- An agent that stalls on an interactive approval prompt says so, instead of
+  being reported as an unexplained silence; those menus cannot be answered from
+  a headless run, so the wait was never going to end.
+- Provider authentication failures are classified and relayed with the thing to
+  fix, instead of being read out as raw output.
+- Agents are started with a UTF-8 stdout, so one that prints a non-ASCII
+  character no longer dies before it can report anything.
+- A failed job always relays a reason; the spoken update no longer ends at
+  "Last output:" with nothing after it.
+- Starting the voice stack stops a frontend that an earlier run left running,
+  which otherwise kept polling the shared mode files, held the microphone, and
+  accumulated one extra process per start.
+- A state or consult write that fails no longer leaves its staging file behind.
+- Starting the voice stack while Remote Agent Protocol is already running now
+  stops and says so, instead of closing the running instance to take its slot.
+  A held single-instance lock always means a live process -- Windows releases
+  it when its holder dies, crash included -- and nothing can tell an instance
+  someone is using from one they walked away from, so the running app is left
+  alone.
+- Closing the voice-stack window now shuts its stages down. That close sends a
+  console event Python does not raise as an interrupt, so the launcher's own
+  cleanup was skipped and the frontend, audio client, and their loaded models
+  were left running.
+- The persona answers settled questions itself instead of sending them to an
+  agent. The router was told its own knowledge was frozen in the past, so a
+  question with a known answer became an agent job and a long wait.
+- A pause mid-sentence no longer ends the turn. The frontend's own values cut
+  off a hesitating speaker and gave the tail almost no chance to rejoin, so one
+  sentence arrived as two and the fragment was routed on its own.
+- Liveness questions asked the way people speak them ("can you check in on X
+  and make sure it still works") are answered from local state. Politeness in
+  front of the verb hid the question, and the check was delegated to the very
+  agent being asked about, which a broken one cannot answer.
+- An agent that echoes its prompt before answering keeps its answer. The echo
+  latched a skip block that only one backend knew how to end, so every result
+  from the others was discarded and reported as "delivered nothing".
+- A relayed agent result names the request it answers. Results arrive whenever
+  a job finishes, routinely a turn or two later, and without the task the
+  spoken relay had no subject.
+- The keyword net no longer treats a follow-up as new work. It matches on nouns
+  that recur through a working session, so "wheres the list we were just
+  talking about" was shipped verbatim as a fresh task to an agent with no
+  referent; those turns now go to the classifier instead.
+- Finished agent jobs are capped in memory. Job ids never repeat, so every job
+  ever started stayed resident with up to 500 lines of its output.
+
+
 ## [1.14.0] - 2026-09-13
 
 ### Added

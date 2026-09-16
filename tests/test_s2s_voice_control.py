@@ -28,8 +28,7 @@ def _adapter(monkeypatch, voice_file):
 def _queued_announcements(path):
     queue_dir = path.with_suffix(f"{path.suffix}.queue")
     return [
-        json.loads(item.read_text(encoding="utf-8"))
-        for item in sorted(queue_dir.glob("*.json"))
+        json.loads(item.read_text(encoding="utf-8")) for item in sorted(queue_dir.glob("*.json"))
     ]
 
 
@@ -137,14 +136,16 @@ def test_multiple_finished_jobs_queue_without_overwriting_results(monkeypatch, t
 
     jobs = (("job-1", "First substantive answer."), ("job-2", "Second substantive answer."))
     for job_id, result in jobs:
-        adapter._observe_event({
-            "type": "agent_job_summary",
-            "agent": "hermes",
-            "job_id": job_id,
-            "status": "done",
-            "result": result,
-            "summary": "completed",
-        })
+        adapter._observe_event(
+            {
+                "type": "agent_job_summary",
+                "agent": "hermes",
+                "job_id": job_id,
+                "status": "done",
+                "result": result,
+                "summary": "completed",
+            }
+        )
 
     queued = _queued_announcements(announce)
     assert [item["id"] for item in queued] == ["job-1:done", "job-2:done"]
@@ -194,7 +195,10 @@ async def test_brain_adapter_announces_ready_only_after_start_completes(monkeypa
     await asyncio.wait_for(brain_started.wait(), timeout=1)
     await asyncio.sleep(0)
     try:
-        assert events[:2] == [
+        assert [
+            {key: value for key, value in event.items() if key in {"type", "state", "text"}}
+            for event in events[:2]
+        ] == [
             {"type": "session", "state": "ready"},
             {"type": "sys", "text": "Brain mode ready; realtime audio is external."},
         ]
@@ -613,9 +617,7 @@ def test_offline_model_answers_with_a_speakable_reason(envelope_server, monkeypa
     assert "Ollama" in body["choices"][0]["message"]["content"]
 
 
-def test_offline_model_closes_a_started_stream_with_the_same_reason(
-    envelope_server, monkeypatch
-):
+def test_offline_model_closes_a_started_stream_with_the_same_reason(envelope_server, monkeypatch):
     # Headers are already out by then, so the reason has to arrive as content
     # and the stream still has to terminate, or the frontend waits forever.
     app, port = envelope_server
@@ -624,9 +626,9 @@ def test_offline_model_closes_a_started_stream_with_the_same_reason(
 
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/chat/completions",
-        data=json.dumps(
-            {"messages": [{"role": "user", "content": "hi"}], "stream": True}
-        ).encode("utf-8"),
+        data=json.dumps({"messages": [{"role": "user", "content": "hi"}], "stream": True}).encode(
+            "utf-8"
+        ),
         headers={"Content-Type": "application/json", "Authorization": "Bearer test-secret"},
         method="POST",
     )

@@ -19,6 +19,7 @@ Event shape (routed through VoiceSession._emit, same bus as transcripts):
 """
 
 import asyncio
+import hashlib
 import itertools
 import json
 import os
@@ -200,12 +201,40 @@ _QUOTA_RE = re.compile(
     re.IGNORECASE,
 )
 _RATE_LIMIT_RE = re.compile(r"\b429\b|rate.?limit|too many requests", re.IGNORECASE)
+_AUTH_RE = re.compile(
+    r"\bstatus_code:\s*40[13]\b|\b401 unauthorized\b|\binvalid api key\b|"
+    r"\bauthentication (?:failed|error)\b|\bnot authenticated\b",
+    re.IGNORECASE,
+)
 _CAPACITY_RE = re.compile(
     r"provider.*(?:capacity|overloaded)|(?:server|service).*(?:overloaded|at capacity)",
     re.IGNORECASE,
 )
 
+# A live provider banner is short. Agents also echo long content -- task text,
+# memory dumps, file excerpts -- and a long line carrying one of these phrases
+# is that echo, not a provider status. Judging one aborts a healthy job.
+_PROVIDER_FAILURE_MAX_CHARS = 400
+# The exception: a provider can answer with a verbose JSON error body. This
+# tells that apart from echoed prose without leaning on the quota wording,
+# which is exactly what the echoed text contains too.
+_PROVIDER_ERROR_SHAPE_RE = re.compile(
+    r'"error"|\berror\b\s*[:=]|\bstatus_code\b|\bHTTP/\d',
+    re.IGNORECASE,
+)
+# Approval menus and confirmation prompts. Agents run headless with no stdin,
+# so one of these means the agent is waiting for a keypress that never comes.
+_INTERACTIVE_PROMPT_RE = re.compile(
+    r"\besc\b[^\n]*\bcancel\b|\benter\b[^\n]*\bselect\b|\[y/n\]|\(y/n\)|"
+    r"\bpress enter to\b|\bwaiting for (?:your )?(?:approval|confirmation)\b",
+    re.IGNORECASE,
+)
 _MAX_KEPT_LINES = 500  # keep logs bounded; tail is what matters
+# Finished jobs kept in memory. Job ids never repeat and this process runs for
+# days, so without a cap every job ever started stays resident, each holding up
+# to _MAX_KEPT_LINES of its output. What survives here is only what the GUI
+# still asks about by id; the durable record is jess_agent_history.json.
+_MAX_KEPT_JOBS = 200
 # Status text fields are short labels capped tight, except "result", which
 # carries the full substantive answer relayed to the user.
 _MAX_STATUS_TEXT_CHARS = 300
@@ -217,7 +246,7 @@ _QUESTION_MARKER_RE = re.compile(
     r"^\s*(?:follow[-_ ]?up[-_ ]?question|clarifying[-_ ]?question|question)\s*[:\-]\s*(.+)$",
     re.IGNORECASE,
 )
-_HERMES_SESSION_AGENTS = {"hermes", "hermes-yolo"}
+_HERMES_SESSION_AGENTS = {"hermes"}
 _HERMES_SESSION_RE = re.compile(
     r"^(?:session_id:|Session:)\s*(\d{8}_\d{6}_[0-9a-f]{6})$", re.IGNORECASE
 )
@@ -293,13 +322,23 @@ def build_command(
 
 
 def detect_provider_failure(line: str) -> str | None:
-    """Classify provider-side quota, throttling, or capacity failures."""
+    """Classify provider-side quota, throttling, auth, or capacity failures.
+
+    Only short lines are judged. These phrases turn up inside content an agent
+    prints back -- a task description, a memory dump -- and reading that as a
+    live provider status kills a job that was working. A long line still counts
+    when it is shaped like an error report rather than prose.
+    """
+    if len(line) > _PROVIDER_FAILURE_MAX_CHARS and not _PROVIDER_ERROR_SHAPE_RE.search(line):
+        return None
     if _QUOTA_RE.search(line):
         return "quota"
     if _RATE_LIMIT_RE.search(line):
         return "rate_limit"
     if _CAPACITY_RE.search(line):
         return "capacity"
+    if _AUTH_RE.search(line):
+        return "auth"
     return None
 
 
@@ -491,6 +530,19 @@ def error_tail(lines: list[str]) -> str | None:
     return None
 
 
+def interactive_prompt_tail(lines: list[str]) -> str | None:
+    """The interactive prompt an agent stalled on, or None if it did not.
+
+    A CLI that opens an approval menu here waits on a keypress nothing will
+    send, then dies on the inactivity timeout with no other explanation.
+    """
+    tail = [line.strip() for line in lines if line.strip()][-_ERROR_TAIL_WINDOW:]
+    for line in reversed(tail):
+        if _INTERACTIVE_PROMPT_RE.search(line):
+            return line[:300]
+    return None
+
+
 def infer_status(line: str) -> dict | None:
     """Extract useful progress from common CLI output when no marker exists."""
     tool_match = _TOOL_RE.search(line)
@@ -555,14 +607,21 @@ class _LineSkipState:
     injected_message: bool = False
     status_protocol: bool = False
     role_echo: bool = False
+    # Lowercased last line of what the host injects ahead of the task. An agent
+    # that echoes its prompt has finished echoing once this goes past.
+    injected_end: str = ""
 
     def consume(self, stripped: str, lowered: str) -> bool:
         """Advance the active skip block, if any. Returns True if the line is consumed."""
         if self.prompt:
-            # Code Puppy prints the complete multiline prompt before a stable
-            # response heading. Never release echoed conversation/context;
-            # resume only at the explicit boundary between prompt and answer.
-            if lowered == "agent response":
+            # Never release echoed conversation/context; resume only at a
+            # boundary that means the echo is over. Code Puppy prints a response
+            # heading, but a backend that prints no heading of its own left this
+            # latched forever and the answer was discarded along with the echo --
+            # every hermes job from 2026-09-13 stored an empty result that way.
+            # The end of the injected block is a boundary the host can always
+            # recognise, whichever backend is running.
+            if lowered == "agent response" or (self.injected_end and self.injected_end in lowered):
                 self.prompt = False
             return True
         if self.injected_message:
@@ -582,7 +641,11 @@ class _LineSkipState:
 def _user_facing_output_lines(lines: list[str]) -> list[str]:
     """Return stdout lines safe to surface as an answer or spoken summary."""
     kept: list[str] = []
-    skip = _LineSkipState()
+    # Read from the live protocol text, not a copy of it: the status protocol is
+    # editable from the GUI, and a stale literal here would silently stop
+    # releasing answers again.
+    tail = [line.strip() for line in status_protocol().splitlines() if line.strip()]
+    skip = _LineSkipState(injected_end=tail[-1].lower() if tail else "")
     for line in lines:
         stripped = line.strip()
         if not stripped:
@@ -751,6 +814,8 @@ def recovery_hint(job: AgentJob) -> str:
         return f"Say 'switch {job.agent} to OpenAI' and then 'retry'."
     if job.failure_kind in {"rate_limit", "capacity"}:
         return f"You can say 'switch {job.agent} to OpenAI'."
+    if job.failure_kind == "auth":
+        return f"Check {job.agent}'s API key or sign-in, then say 'retry'."
     return ""
 
 
@@ -815,6 +880,18 @@ def announcement(job: AgentJob, *, max_answer_chars: int | None = None) -> str:
             f"Agent '{job.agent}' failed because its provider is rate-limited or at capacity. "
             f"You can say 'switch {job.agent} to OpenAI'.{tamper}"
         )
+    if job.failure_kind == "auth":
+        return (
+            f"Agent '{job.agent}' failed to authenticate with its provider. "
+            f"Its API key or login needs fixing before it can run.{tamper}"
+        )
+    if job.failure_kind == "interactive_prompt":
+        return (
+            f"Agent '{job.agent}' stopped at a prompt asking for approval, which it cannot "
+            f"be given from here, so nothing was done.{tamper}"
+        )
+    if job.failure_kind == "timeout":
+        return f"Agent '{job.agent}' went quiet and was stopped before finishing.{tamper}"
     return f"{job.agent} FAILED {ref}. Last output: {summary}{tamper}"
 
 
@@ -886,10 +963,14 @@ class AgentBridge:
         self._model_overrides: dict[str, list[str]] = {}
         self._model_labels: dict[str, str] = {}
         self._session_ids: dict[str, str] = {}
+        # Turns resumed on the current session per hermes-family agent. See
+        # _maybe_rotate_session: unbounded growth here is what turned an 8s
+        # answer into a 700-1200s one and, eventually, an empty one.
+        self._session_turns: dict[str, int] = {}
         # child job id -> (asker's mailbox token, consult id, who asked, question)
         self._pending_consults: dict[str, tuple[str, str, str, str]] = {}
-        # One lock per session-based agent (hermes/hermes-yolo): only one of
-        # its turns may be in flight at a time, so a later turn always waits
+        # One lock per session-based agent (_HERMES_SESSION_AGENTS): only one
+        # of its turns may be in flight at a time, so a later turn always waits
         # for the earlier one to fully exit before resuming the same on-disk
         # session. See _launch_and_run for why concurrent turns are unsafe.
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -1074,6 +1155,32 @@ class AgentBridge:
         logger.info(f"Agent job {job.job_id} [{job.agent}] started on {job.machine}: {job.task}")
         await self._stream(job, proc)
 
+    def _maybe_rotate_session(self, agent: str, job: AgentJob) -> None:
+        """Drop a hermes-family agent's resumed session once it's old enough.
+
+        Without this, every job resumes the SAME ever-growing on-disk session
+        (see the class docstring in _launch_and_run), and nothing ever starts
+        a fresh one. Live evidence this actually happens (jess_runtime.log /
+        diagnostics 2026-09-14): "hermes" turnaround crept from ~8s early in
+        the day to 700-1200s later that same day on trivially small asks, and
+        several finished jobs came back with no summary/result at all -- a
+        bloated resumed context silently degrading, not a crashed or hung
+        executable (`hermes --version` stayed instant throughout). Rotating
+        keeps latency and answer quality bounded; 0 disables it.
+        """
+        limit = cfg.AGENT_HERMES_SESSION_MAX_TURNS
+        if limit <= 0:
+            return
+        if self._session_turns.get(agent, 0) < limit:
+            return
+        dropped = self._session_ids.pop(agent, None)
+        self._session_turns[agent] = 0
+        if dropped:
+            logger.info(
+                f"Agent '{agent}': rotating off session {dropped} after {limit} resumed "
+                f"turns (job {job.job_id}) -- starting a fresh session to bound latency."
+            )
+
     async def _launch(self, job: AgentJob, task: str, cwd: str | None) -> None:
         """Resolve cwd, build the command, spawn the subprocess, and stream it to completion."""
         agent = job.agent
@@ -1133,6 +1240,8 @@ class AgentBridge:
         command = build_command(
             self._backends[agent], command_task, extra_args=self._model_overrides.get(agent)
         )
+        if agent in _HERMES_SESSION_AGENTS:
+            self._maybe_rotate_session(agent, job)
         if session_id := self._session_ids.get(agent):
             try:
                 chat_index = command.index("chat") + 1
@@ -1140,6 +1249,7 @@ class AgentBridge:
                 pass
             else:
                 command[chat_index:chat_index] = ["--resume", session_id]
+                self._session_turns[agent] = self._session_turns.get(agent, 0) + 1
         # Windows' CreateProcess only auto-appends .EXE to a bare command name,
         # never .CMD/.BAT -- so an npm-installed shim like codex.CMD fails with
         # "WinError 2: The system cannot find the file specified" unless we
@@ -1153,6 +1263,10 @@ class AgentBridge:
                 cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                # Output is decoded as UTF-8, so ask for UTF-8: a Python agent
+                # printing any non-ASCII character otherwise dies on Windows'
+                # cp1252 stdout before it reports anything.
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
         except (OSError, FileNotFoundError) as e:
             await self._fail_fast(job, f"could not launch {command[0]}: {e}")
@@ -1267,6 +1381,9 @@ class AgentBridge:
             {
                 "type": "agent_consult",
                 "event": "refused",
+                "consultation_id": hashlib.sha256(
+                    f"{job.consult_token}:{request['id']}".encode()
+                ).hexdigest()[:24],
                 "job_id": job.job_id,
                 "agent": job.agent,
                 "peer": request["agent"],
@@ -1326,6 +1443,9 @@ class AgentBridge:
             {
                 "type": "agent_consult",
                 "event": "asked",
+                "consultation_id": hashlib.sha256(
+                    f"{job.consult_token}:{request['id']}".encode()
+                ).hexdigest()[:24],
                 "job_id": job.job_id,
                 "agent": job.agent,
                 "peer": peer,
@@ -1368,6 +1488,9 @@ class AgentBridge:
             {
                 "type": "agent_consult",
                 "event": "answered" if ok else "unanswered",
+                "consultation_id": hashlib.sha256(f"{token}:{consult_id}".encode()).hexdigest()[
+                    :24
+                ],
                 "job_id": job.job_id,
                 "agent": job.agent,
                 "peer": asker,
@@ -1503,14 +1626,26 @@ class AgentBridge:
         except TimeoutError:
             timed_out = True
             await self._terminate(proc)
-            job.lines.append(
-                f"[stopped: no output for {self._timeout_secs:.0f}s inactivity timeout]"
-            )
+            # Report the budget that actually fired -- a consult carries its own.
+            budget = job.timeout_secs or self._timeout_secs
+            stalled_on = interactive_prompt_tail(job.lines)
+            if stalled_on:
+                job.failure_kind = "interactive_prompt"
+                job.failure_detail = stalled_on
+                job.summary = (
+                    f"{job.agent} stopped at a prompt it cannot answer from here: {stalled_on}"
+                )
+            else:
+                job.failure_kind = "timeout"
+                job.failure_detail = f"no output for {budget:.0f}s"
+                job.summary = f"{job.agent} went quiet for {budget:.0f}s and was stopped"
+            job.lines.append(f"[stopped: no output for {budget:.0f}s inactivity timeout]")
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
 
         self._procs.pop(job.job_id, None)
+        self._trim_finished_jobs()
         if job.status in {STATUS_CANCELLED, STATUS_DONE, STATUS_FAILED}:
             pass  # cancel() already claimed the status
         elif timed_out:
@@ -1526,6 +1661,17 @@ class AgentBridge:
             job.state = STATE_FAILED if failed else STATE_COMPLETED
             if error_line and not job.summary:
                 job.summary = error_line
+            if failed and not job.failure_kind:
+                # An agent can also redraw its menu forever, keeping the
+                # inactivity timer alive, and then exit on its own -- same
+                # stall, but it never reaches the timeout branch.
+                stalled_on = interactive_prompt_tail(job.lines)
+                if stalled_on:
+                    job.failure_kind = "interactive_prompt"
+                    job.failure_detail = stalled_on
+                    job.summary = job.summary or (
+                        f"{job.agent} stopped at a prompt it cannot answer from here: {stalled_on}"
+                    )
             if failed and job.failure_kind and not job.summary:
                 job.summary = job.failure_detail
             if failed and not job.summary and job.returncode is not None:
@@ -1538,6 +1684,13 @@ class AgentBridge:
         job.secs = round(time.monotonic() - job._t0, 1)
         summary_source = job.result.splitlines() if job.result else job.lines
         summary = job.summary or summarize_output(summary_source)
+        if job.status == STATUS_FAILED and not summary.strip():
+            # Every other branch above has a reason to give. This is the one
+            # that does not: an agent that printed nothing, or printed only
+            # lines that are filtered out before they reach a person. Without
+            # this the relayed sentence stops dead at "Last output: ".
+            summary = f"{job.agent} failed without reporting anything"
+            job.failure_detail = job.failure_detail or summary
         job.summary = summary
         job.finished_at = _now_iso()
         await self._check_host_repo(job)
@@ -1546,6 +1699,21 @@ class AgentBridge:
 
         await self._notify_finished(job)
         self._emit_all_finished_if_idle()
+
+    def _trim_finished_jobs(self) -> None:
+        """Forget the oldest finished jobs once the cap is exceeded.
+
+        Only finished ones: an active job is still needed by cancel, status,
+        and the follow-up paths, however old it is. Insertion order gives the
+        oldest first, which is what a long session should shed.
+        """
+        if len(self._jobs) <= _MAX_KEPT_JOBS:
+            return
+        for job_id, job in list(self._jobs.items()):
+            if len(self._jobs) <= _MAX_KEPT_JOBS:
+                return
+            if job.status not in _ACTIVE_STATUSES:
+                del self._jobs[job_id]
 
     async def _host_snapshot(self) -> str | None:
         """``git status --porcelain`` of the host repo; None when disabled/unavailable."""

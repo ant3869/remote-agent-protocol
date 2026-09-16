@@ -12,8 +12,12 @@ from loguru import logger
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
+    CancelFrame,
+    ErrorFrame,
     Frame,
     InputAudioRawFrame,
+    InterimTranscriptionFrame,
+    InterruptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
@@ -28,6 +32,8 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import dashboard, multimodal_prompt, voice_commands
 from remote_agent_protocol.avatar_audio import compute_pcm16_envelope
+from remote_agent_protocol.conversation import ConversationEvents
+from remote_agent_protocol.speech_events import SpeechBoundaryFrame
 
 EventCallback = Callable[[dict], None]
 
@@ -424,19 +430,32 @@ class TranscriptTap(FrameProcessor):
       TTS service's own -- passes exactly once.
     """
 
-    def __init__(self, on_event: EventCallback | None, role: str = "telemetry", **kwargs):
+    def __init__(
+        self,
+        on_event: EventCallback | None,
+        role: str = "telemetry",
+        conversation: ConversationEvents | None = None,
+        pending_speech: dict | None = None,
+        **kwargs,
+    ):
         """Initialize the tap.
 
         Args:
             on_event: Callback receiving plain event dicts for the GUI.
             role: Which event slice this instance owns -- "user", "assistant",
                 or "telemetry" (see class docstring).
+            conversation: Identity factory enabling streamed, attributable utterances.
+            pending_speech: Shared queued utterances awaiting output completion.
             **kwargs: Additional arguments passed to FrameProcessor.
         """
         super().__init__(**kwargs)
         self._on_event = on_event
         self._role = role
         self._llm_buffer: list[str] = []
+        self._conversation = conversation
+        self._utterance: dict | None = None
+        self._pending_speech = pending_speech if pending_speech is not None else {}
+        self._user_utterance: dict | None = None
 
     def _emit(self, event: dict) -> None:
         if self._on_event is None:
@@ -449,7 +468,26 @@ class TranscriptTap(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         """Emit this role's events for interesting frames; pass everything on."""
         await super().process_frame(frame, direction)
+        if self._role == "assistant" and self._conversation is not None:
+            await self._process_speech(frame, direction)
+            return
         if self._role == "user":
+            if (
+                self._conversation
+                and isinstance(frame, (InterimTranscriptionFrame, TranscriptionFrame))
+                and frame.text.strip()
+            ):
+                self._user_utterance = self._user_utterance or self._conversation.utterance(
+                    role="user",
+                    input_mode="voice",
+                    final=False,
+                )
+                final = isinstance(frame, TranscriptionFrame)
+                self._emit({**self._user_utterance, "text": frame.text.strip(), "final": final})
+                if final:
+                    self._user_utterance = None
+                await self.push_frame(frame, direction)
+                return
             if isinstance(frame, TranscriptionFrame) and frame.text.strip():
                 self._emit({"type": "transcript", "role": "user", "text": frame.text.strip()})
         elif self._role == "assistant":
@@ -475,6 +513,79 @@ class TranscriptTap(FrameProcessor):
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._emit({"type": "speaking", "value": False})
         await self.push_frame(frame, direction)
+
+    async def _process_speech(self, frame: Frame, direction: FrameDirection) -> None:
+        if direction == FrameDirection.UPSTREAM:
+            if isinstance(frame, ErrorFrame):
+                self._emit(
+                    {"type": "sys", "text": "Speech output failed; see runtime diagnostics."}
+                )
+                if len(self._pending_speech) == 1:
+                    utterance = next(iter(self._pending_speech.values()))
+                    utterance["delivery"] = "failed"
+                    self._emit(
+                        {
+                            "type": "transcript",
+                            "message_id": utterance["message_id"],
+                            "playback_update": True,
+                            "delivery": "failed",
+                        }
+                    )
+            await self.push_frame(frame, direction)
+            return
+        if isinstance(frame, (InterruptionFrame, CancelFrame)):
+            if self._utterance:
+                self._update_utterance(final=True, delivery="interrupted")
+            self._utterance = None
+            self._llm_buffer.clear()
+            for utterance in self._pending_speech.values():
+                self._emit(
+                    {
+                        "type": "transcript",
+                        "message_id": utterance["message_id"],
+                        "session_id": utterance.get("session_id"),
+                        "playback_update": True,
+                        "delivery": "interrupted",
+                    }
+                )
+            self._pending_speech.clear()
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            if self._utterance:
+                self._update_utterance(final=True, delivery="interrupted")
+            self._utterance = self._conversation.utterance(final=False)
+            self._llm_buffer.clear()
+            await self.push_frame(SpeechBoundaryFrame(utterance=self._utterance))
+        elif isinstance(frame, LLMTextFrame):
+            if self._utterance is None:
+                self._utterance = self._conversation.utterance(final=False)
+                await self.push_frame(SpeechBoundaryFrame(utterance=self._utterance))
+            self._llm_buffer.append(frame.text)
+            self._update_utterance(final=False)
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            if self._utterance:
+                self._update_utterance(final=True)
+                await self.push_frame(frame, direction)
+                await self.push_frame(SpeechBoundaryFrame(utterance=self._utterance, ending=True))
+                self._utterance = None
+                self._llm_buffer.clear()
+                return
+        elif isinstance(frame, TTSSpeakFrame) and frame.text.strip():
+            utterance = frame.metadata.get("conversation") or self._conversation.utterance()
+            utterance = {**utterance, "text": frame.text.strip(), "final": True}
+            self._pending_speech[utterance["message_id"]] = utterance
+            self._emit(utterance)
+            await self.push_frame(SpeechBoundaryFrame(utterance=utterance))
+            await self.push_frame(frame, direction)
+            await self.push_frame(SpeechBoundaryFrame(utterance=utterance, ending=True))
+            return
+        await self.push_frame(frame, direction)
+
+    def _update_utterance(self, **fields) -> None:
+        self._utterance.update(text="".join(self._llm_buffer), **fields)
+        self._utterance["revision"] += 1
+        if self._utterance["text"].strip():
+            self._pending_speech[self._utterance["message_id"]] = self._utterance
+            self._emit(dict(self._utterance))
 
     def _emit_metrics(self, frame: MetricsFrame) -> None:
         for metric in frame.data:

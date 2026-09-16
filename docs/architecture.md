@@ -12,6 +12,12 @@ are relative to `remote_agent_protocol/`.
 
 ## Runtime flow
 
+The `voice_stack.py` supervisor starts the brain/GUI, speech server, and audio
+client in order. Its child environment sets `TEMP`, `TMP`, and `TMPDIR` to
+`DATA_DIR/stack-tmp` so large model-extraction files use the application data
+drive. This is process-scoped and does not change the user's system environment;
+the launcher reports a directory-creation failure before starting any children.
+
 ```text
 Full mode:
   microphone -> [wake gate] -> STT -> intent router -> transcript/semantic memory
@@ -85,6 +91,20 @@ Brain mode:
   persona overrides.
 - `memory.py`, `memory_manager.py`, and `mem0_setup.py` provide transcript and
   semantic memory.
+
+### Conversation events
+
+`conversation.py` supplies source identity and a bounded normalized replay store.
+`session_processors.TranscriptTap` emits partial/final utterances with speaker
+snapshots; `speech_events.py` carries ordered application speech boundaries
+through TTS/output and reports playback without changing the vendored framework.
+`web_app/conversation.js` renders keyed utterances, task activity, consultations,
+approvals, and outcomes while preserving reading position. The GUI brain's
+authenticated `/api/speech-events` endpoint accepts external playback reports;
+OpenAI-compatible responses carry additive `rap` identity metadata. External
+clients that do not implement this contract show playback as unconfirmed.
+See [conversation events](conversation-events.md) for replay/clear semantics,
+retention limits, and the external integration boundary.
 
 ### Brain mode
 

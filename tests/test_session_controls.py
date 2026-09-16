@@ -50,10 +50,48 @@ class AgentVoiceControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("default agent", current)
         self.assertIn("code-puppy", changed)
         self.assertEqual(voice_session.default_agent_backend(), "code-puppy")
-        self.assertIn(
-            {"type": "default_agent_changed", "agent": "code-puppy"},
-            events,
+        # Events carry a conversation envelope (session_id/event_id/occurred_at),
+        # so match the part this control is responsible for, not the whole row.
+        self.assertTrue(
+            any(
+                event.get("type") == "default_agent_changed" and event.get("agent") == "code-puppy"
+                for event in events
+            ),
+            f"no default_agent_changed event for code-puppy in {events}",
         )
+
+
+class AgentRollcallAndStatusControlTests(unittest.IsolatedAsyncioTestCase):
+    """Local voice mode must answer these from state, never delegate.
+
+    jess_runtime.log 2026-09-13 19:30:28 shows a live session where a status
+    question about running agents reached the classifier instead, which
+    dispatched a brand-new (redundant) code-puppy job to "check the number of
+    active agents" -- brain.py already had this local-answer short-circuit;
+    session.py (local voice mode) did not.
+    """
+
+    async def test_status_question_answers_locally_without_delegating(self):
+        session = session_mod.VoiceSession(personas.DEFAULT_PERSONA)
+
+        content = await session._maybe_handle_model_control(
+            "how many agents are actively running right now?"
+        )
+
+        self.assertIsNotNone(content)
+        self.assertIn("no active agent tasks", content)
+        self.assertTrue(session._agent_ack_turn)
+
+    async def test_rollcall_question_answers_locally_without_delegating(self):
+        with patch.object(
+            config, "AGENT_BACKENDS", {"ghost": ["definitely-not-installed", "{task}"]}
+        ):
+            session = session_mod.VoiceSession(personas.DEFAULT_PERSONA)
+            content = await session._maybe_handle_model_control("are all the agents online")
+
+        self.assertIsNotNone(content)
+        self.assertIn("ghost", content)
+        self.assertIn("not runnable here", content)
 
 
 class MutePersistenceTests(unittest.TestCase):

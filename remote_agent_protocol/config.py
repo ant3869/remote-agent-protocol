@@ -67,6 +67,22 @@ def _parse_string_map(raw: str, name: str) -> dict[str, str]:
     return value
 
 
+def _parse_float_map(raw: str, name: str) -> dict[str, float]:
+    """Parse an optional JSON object whose keys are strings and values are numbers."""
+    if not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be valid JSON") from exc
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) and isinstance(item, (int, float)) and not isinstance(item, bool)
+        for key, item in value.items()
+    ):
+        raise ValueError(f"{name} must be a JSON object of numeric values")
+    return {key: float(item) for key, item in value.items()}
+
+
 def _parse_host_map(raw: str, name: str) -> dict[str, dict[str, str]]:
     """Parse an optional JSON object of remote-host entries.
 
@@ -250,6 +266,30 @@ OLLAMA_HOST = _env("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
 
 # ---------------------------------------------------------------------------
+# Cloud models. A local 12B persona spends seconds composing every reply before
+# the user hears anything; a hosted model answers in a fraction of that and is
+# usually the better reasoner too. Any OpenAI-compatible endpoint works --
+# OpenRouter, Groq, DeepSeek, Together, OpenAI -- so nothing here names a
+# provider. Set the base URL, a key, and at least one model to switch on.
+#
+# All of these are OPTIONAL and default to empty, which leaves this machine
+# behaving exactly as it did. Whatever is configured is tried first and falls
+# back to the local model on any failure (see llm_endpoint.chain), so an
+# expired key or a provider outage costs one slow turn, not a broken app.
+# ---------------------------------------------------------------------------
+CLOUD_LLM_BASE_URL = _env("CLOUD_LLM_BASE_URL", "").rstrip("/")
+CLOUD_LLM_API_KEY = _env("CLOUD_LLM_API_KEY", "")
+# The persona that speaks. This is the one that decides how long the user waits.
+CLOUD_LLM_MODEL = _env("CLOUD_LLM_MODEL", "")
+# The router and the orchestrator's own reasoning. Both run per turn on short
+# prompts, so a small fast model suits them; both default to the persona's.
+CLOUD_INTENT_MODEL = _env("CLOUD_INTENT_MODEL", "")
+CLOUD_ORCHESTRATION_MODEL = _env("CLOUD_ORCHESTRATION_MODEL", "")
+# A cloud call still unanswered by now is slower than the local model it would
+# have fallen back to.
+CLOUD_LLM_TIMEOUT_SECS = float(_env("CLOUD_LLM_TIMEOUT_SECS", "20"))
+
+# ---------------------------------------------------------------------------
 # Personality & voice -- now driven by PERSONAS
 # ---------------------------------------------------------------------------
 # Personalities and voices are no longer hardcoded here. They live as real
@@ -384,8 +424,7 @@ MEM0_SEARCH_THRESHOLD = 0.1
 # AGENT_BACKENDS: name -> command template. Placeholders:
 #   {task}   -> the task text        {python} -> this venv's python
 # Add real agents once installed, e.g.
-#   "hermes":   ["hermes", "-p", "{task}"]
-#   "openclaw": ["openclaw", "run", "{task}"]
+#   "hermes": ["hermes", "-p", "{task}"]
 # (exact flags depend on the installed CLI -- adjust after `hermes --help`).
 #
 # AGENT_ANNOUNCE: when True, a finished/failed job injects an update into the
@@ -404,15 +443,31 @@ MEM0_SEARCH_THRESHOLD = 0.1
 AGENT_MOCK_BACKEND_ENABLED = _env_bool("AGENT_MOCK_BACKEND_ENABLED", False)
 
 AGENT_BACKENDS = {
-    **({"mock": ["{python}", "-u", str(_ROOT / "scripts" / "mock_agent.py"), "{task}"]}
-       if AGENT_MOCK_BACKEND_ENABLED else {}),
+    **(
+        {"mock": ["{python}", "-u", str(_ROOT / "scripts" / "mock_agent.py"), "{task}"]}
+        if AGENT_MOCK_BACKEND_ENABLED
+        else {}
+    ),
     # Hermes Agent (NousResearch) -- installed at %LOCALAPPDATA%\hermes.
     # Single-query mode streams progress and persists a session ID that
     # AgentBridge resumes. --quiet would hide productive activity from the host.
     "hermes": ["hermes", "chat", "-q", "{task}"],
-    # Same, but auto-approves tool calls (file edits, shell, browsing...).
-    # Powerful and DANGEROUS -- pick it knowingly, don't make it the default.
-    "hermes-yolo": ["hermes", "chat", "--yolo", "-q", "{task}"],
+    # OpenClaw -- "agent exec" is a headless, isolated one-shot turn (no
+    # gateway/messaging channel involved). Verified live 2026-09-13: it runs
+    # tool calls without an interactive approval prompt, so like hermes-yolo
+    # before it, nothing gates its file/shell calls -- powerful and DANGEROUS,
+    # pick it knowingly. --state-dir points at a persistent directory instead
+    # of OpenClaw's default per-run temp dir, whose delete-on-cleanup step hit
+    # a Windows EBUSY error and turned an otherwise-successful turn into a
+    # reported failure (same live check); that directory must already exist.
+    "openclaw": [
+        "openclaw",
+        "agent",
+        "exec",
+        "{task}",
+        "--state-dir",
+        str(DATA_DIR / "openclaw_state"),
+    ],
     # Code Puppy -- best for CODING tasks in a repo (pair with a working dir).
     # Deliberately stateless. --quick-resume looks up the newest session for the
     # cwd's git root + branch, which is the same pool the human's own interactive
@@ -436,6 +491,19 @@ AGENT_BACKENDS = {
     ],
     **_parse_command_map(_env("AGENT_BACKENDS_JSON", ""), "AGENT_BACKENDS_JSON"),
 }
+(DATA_DIR / "openclaw_state").mkdir(parents=True, exist_ok=True)
+
+# AGENT_HERMES_SESSION_MAX_TURNS: every "hermes" job resumes the SAME shared
+# on-disk session (agent_bridge.py's _HERMES_SESSION_AGENTS), so its context
+# grows without bound across unrelated tasks all day long. Observed live
+# (jess_runtime.log / diagnostics 2026-09-14): turnaround crept from ~8s early
+# in the day to 700-1200s later that same day on trivially small asks, and
+# several finished jobs came back with no summary/result at all ("no details
+# were reported") -- a bloated resumed context, not a broken executable
+# (`hermes --version` stayed instant and healthy throughout). AgentBridge
+# rotates to a brand-new session after this many resumed turns to keep
+# latency and answer quality bounded. 0 disables rotation (old behavior).
+AGENT_HERMES_SESSION_MAX_TURNS = int(_env("AGENT_HERMES_SESSION_MAX_TURNS", "20"))
 # Deterministic voice targets. Provider names are not guessed at runtime: each
 # maps to the exact model key/flags supported by that agent's one-shot CLI.
 AGENT_MODEL_TARGETS = {
@@ -446,12 +514,6 @@ AGENT_MODEL_TARGETS = {
         }
     },
     "hermes": {
-        "openai": {
-            "label": "OpenAI GPT-5.5",
-            "args": ["--provider", "openai-api", "--model", "gpt-5.5"],
-        }
-    },
-    "hermes-yolo": {
         "openai": {
             "label": "OpenAI GPT-5.5",
             "args": ["--provider", "openai-api", "--model", "gpt-5.5"],
@@ -473,14 +535,12 @@ AGENT_ANNOUNCE = True
 # Kokoro-only (a same-model settings delta -- no extra VRAM, no warmup),
 # unlike Voicebox voices, and deliberately distinct from every built-in
 # persona voice in personas.py so a harness is never mistaken for a persona
-# talking. hermes-yolo intentionally reuses hermes's voice: the spoken text
-# already names the exact backend ("hermes-yolo finished..."), so a second
-# voice slot would add nothing.
+# talking.
 # ---------------------------------------------------------------------------
 HARNESS_VOICES = {
     "mock": "af_nova",
     "hermes": "am_liam",
-    "hermes-yolo": "am_liam",
+    "openclaw": "am_adam",
     "code-puppy": "af_bella",
     "codex": "am_echo",
     "claude-code": "bf_isabella",
@@ -537,6 +597,21 @@ S2S_BRIDGE_PORT = int(_env("S2S_BRIDGE_PORT", "8788"))
 S2S_BRIDGE_API_KEY = _env("S2S_BRIDGE_API_KEY", "local")
 S2S_BRIDGE_MODEL = _env("S2S_BRIDGE_MODEL", "remote-agent-protocol")
 S2S_BRIDGE_STREAMING = _env_bool("S2S_BRIDGE_STREAMING", True)
+# How long the frontend waits before deciding a turn is over. Its own launcher
+# ships 900ms, which ends a turn on the pause inside "what's the capital of,
+# uh, France" -- the tail then arrives as a separate turn, or as a fragment the
+# router tries to act on ("I don't know that." became an agent job on
+# 2026-09-15). This one is spent on every reply, so it buys patience directly
+# and should stay the smallest of these three.
+S2S_VAD_MIN_SILENCE_MS = int(_env("S2S_VAD_MIN_SILENCE_MS", "1200"))
+# How long after a turn ends a resumed sentence may rejoin it rather than
+# starting a new one. Checked only when speech actually arrives, so a longer
+# window costs nothing on turns the user really had finished -- which makes
+# these two the cheap way to stop cutting someone off mid-thought.
+S2S_VAD_SPECULATIVE_REOPEN_MS = int(_env("S2S_VAD_SPECULATIVE_REOPEN_MS", "1000"))
+# The same window for a turn the assistant has not answered yet, which is the
+# one that actually applies while it is still thinking.
+S2S_VAD_UNANSWERED_REOPEN_MS = int(_env("S2S_VAD_UNANSWERED_REOPEN_MS", "4000"))
 S2S_MIC_MUTE_FILE = _env("S2S_MIC_MUTE_FILE", str(DATA_DIR / "s2s_mic_mute.json"))
 S2S_MIC_MUTE_STATUS_FILE = _env(
     "S2S_MIC_MUTE_STATUS_FILE", str(DATA_DIR / "s2s_mic_mute_status.json")
@@ -611,7 +686,7 @@ AGENT_WORKSPACE_DIR = _env("AGENT_WORKSPACE_DIR", str(DATA_DIR / "agent_workspac
 # processes stop rediscovering the same facts. Borrowed notes are always
 # labelled untrusted -- another agent wrote them.
 AGENT_COMMONS_ENABLED = _env_bool("AGENT_COMMONS_ENABLED", True)
-# Backends whose command line disables tool approval -- hermes --yolo,
+# Backends whose command line disables tool approval -- openclaw agent exec,
 # codex --sandbox danger-full-access, claude -p --dangerously-skip-permissions.
 # Nothing gates their file and shell calls, so another agent's notes are never
 # pasted into their prompt (collab.briefing); they are told where the commons
@@ -619,7 +694,7 @@ AGENT_COMMONS_ENABLED = _env_bool("AGENT_COMMONS_ENABLED", True)
 # than words arriving inside their own instructions.
 AGENT_ELEVATED_BACKENDS = frozenset(
     _parse_string_map(_env("AGENT_ELEVATED_BACKENDS_JSON", ""), "AGENT_ELEVATED_BACKENDS_JSON")
-    or {"hermes-yolo": "", "codex": "", "claude-code": ""}
+    or {"openclaw": "", "codex": "", "claude-code": ""}
 )
 # How much of the shared space rides along on each dispatch. Nothing here is
 # spoken, but it is prompt tokens on every job, so it stays small.
@@ -665,7 +740,7 @@ AGENT_HISTORY_MAX = int(_env("AGENT_HISTORY_MAX", "100"))
 # typed chat) can trigger real filesystem/web/shell actions. Before dispatching
 # a *destructive* task, Jess holds the job and asks the user to confirm (spoken
 # "yes"/"confirm", or the GUI Approve button). Picking an elevated backend (e.g.
-# "hermes-yolo") is not itself a trigger -- selecting it already is the risk
+# "openclaw") is not itself a trigger -- selecting it already is the risk
 # acknowledgment. Manual, deliberate dispatch (the Delegate button, the Agents
 # panel) is never gated -- the click already IS the confirmation.
 AGENT_CONFIRM_ENABLED = _env_bool("AGENT_CONFIRM_ENABLED", True)
@@ -709,10 +784,10 @@ AGENT_DESTRUCTIVE_WORDS = (
 # Spoken-name -> backend for VOICE delegation ("Jess, tell Hermes to ...").
 # Deterministic dispatch: parsed from your transcript by voice_commands.py,
 # never left to the LLM's imagination (it WILL claim it delegated. It lied.)
-# Want spoken "hermes" to have real tool powers? Point it at "hermes-yolo".
+# Want spoken "hermes" to have real tool powers? Point it at an elevated
+# backend like "openclaw" instead.
 AGENT_SPOKEN_ALIASES = {
     "hermes": "hermes",
-    "hermes yolo": "hermes-yolo",
     "laptop hermes": "laptop-hermes",
     "openclaw": "openclaw",
     "open claw": "openclaw",
@@ -792,7 +867,16 @@ NARRATION_KEEP_ALIVE = _env("NARRATION_KEEP_ALIVE", "") or INTENT_KEEP_ALIVE
 # the uncertain band: read-only lookups run anyway (a wrong lookup is
 # harmless), state-changing tasks are held for a spoken yes/no. Below the
 # band the utterance stays chat.
-INTENT_DISPATCH_CONFIDENCE = 0.75
+#
+# Raised from 0.75 -> 0.85 after jess_runtime.log 2026-09-13 19:34:21: at 0.80
+# confidence the classifier silently dispatched a joke about snacks as a real
+# mutating task ("Find out where the user's operational snacks are stored and
+# retrieve them"). 0.85 pushes that case into the confirm band (still
+# dispatches instantly if read-only) without raising the bar so high that
+# ordinary, clearly-stated requests start needing a spoken yes. Pair with
+# _self_doubt() above, which catches the separate failure mode of a verdict
+# that is both wrong AND reported at very high (0.9+) confidence.
+INTENT_DISPATCH_CONFIDENCE = 0.85
 INTENT_CONFIRM_CONFIDENCE = 0.5
 
 # Task template for vague capability references ("there's a package that does
@@ -836,7 +920,7 @@ LLM_DELEGATE_STYLE = (
     "never invent an answer and never pretend work is happening: say in one "
     "short sentence that you're sending it to your agent, and include the "
     "marker. If something cannot be done, say so plainly instead of promising."
-    " Do not infer gender from tool-agent names; Hermes/hermes/hermes-yolo is "
+    " Do not infer gender from tool-agent names; Hermes/hermes is "
     "female. For other tool agents, use their name or neutral 'agent' unless "
     "the user has given you a specific preference."
 )
@@ -923,4 +1007,98 @@ EPHEMERAL_PROMPT_PREFIXES = (
     "[The user cancelled the delegation",
     "[Correction --",
     "[Agent model control:",
+    "[Not dispatched --",
 )
+
+# ---------------------------------------------------------------------------
+# Persona orchestration -- Local / Cloud / Local+Cloud (orchestration/).
+# The persona is a dispatcher: this controls whether ORCHESTRATION REASONING
+# itself (which harness to trust, how to interpret an ambiguous result) may
+# escalate to a cloud model, on top of the existing local intent_router/
+# AgentBridge dispatch pipeline above -- it never replaces that pipeline.
+# Modes:
+#   "local"  -- orchestration reasoning never leaves this machine.
+#   "cloud"  -- prefer cloud reasoning (via the official GitHub Copilot SDK)
+#               whenever it's available and authenticated; falls back to
+#               local automatically otherwise.
+#   "hybrid" -- local-first, escalating to cloud only when the risk score
+#               crosses ORCHESTRATION_CLOUD_THRESHOLD or a hard trigger
+#               fires (see orchestration/orchestrator.py). RECOMMENDED
+#               DEFAULT: local stays free/instant for ordinary turns, cloud
+#               only engages when local orchestration is genuinely unsure.
+# ---------------------------------------------------------------------------
+ORCHESTRATION_MODE = _env("ORCHESTRATION_MODE", "hybrid").strip().lower()
+if ORCHESTRATION_MODE not in {"local", "cloud", "hybrid"}:
+    raise ValueError(f"ORCHESTRATION_MODE must be local|cloud|hybrid, got {ORCHESTRATION_MODE!r}")
+# Per-persona override, e.g. {"Jarvis": "hybrid"}. Any persona not listed
+# falls back to ORCHESTRATION_MODE.
+ORCHESTRATION_PERSONA_MODES = _parse_string_map(
+    _env("ORCHESTRATION_PERSONA_MODES_JSON", ""), "ORCHESTRATION_PERSONA_MODES_JSON"
+)
+# TUNABLE HEURISTIC weights, not an authoritative formula -- see
+# orchestration/risk.py. Must sum to ~1.0 (validated when the orchestrator is
+# constructed). Override individual factors via JSON, e.g.
+# {"context_dependency": 0.25}; factors not listed keep their default below.
+# Every factor is measured per turn (see orchestration/risk.py) -- a constant
+# would hold weight while expressing nothing, which is what previously kept
+# scores bunched near the floor.
+_ORCHESTRATION_RISK_WEIGHT_OVERRIDES = _parse_float_map(
+    _env("ORCHESTRATION_RISK_WEIGHTS_JSON", ""), "ORCHESTRATION_RISK_WEIGHTS_JSON"
+)
+ORCHESTRATION_RISK_WEIGHTS = {
+    "context_dependency": 0.22,
+    "constraint_complexity": 0.20,
+    "harness_selection_uncertainty": 0.18,
+    "result_interpretation_need": 0.15,
+    "sequential_coordination": 0.12,
+    "routing_disagreement": 0.08,
+    "multimodal_capability_need": 0.03,
+    "previous_routing_failure": 0.02,
+    **_ORCHESTRATION_RISK_WEIGHT_OVERRIDES,
+}
+# score <= this -> local. score >= ORCHESTRATION_CLOUD_THRESHOLD -> cloud.
+# Between the two (hybrid mode only): local unless a hard trigger fires.
+ORCHESTRATION_LOCAL_THRESHOLD = float(_env("ORCHESTRATION_LOCAL_THRESHOLD", "0.39"))
+ORCHESTRATION_CLOUD_THRESHOLD = float(_env("ORCHESTRATION_CLOUD_THRESHOLD", "0.65"))
+# Below this routing confidence, harness selection is a hard trigger for
+# cloud reasoning in hybrid mode ("harness-selection confidence < .75").
+ORCHESTRATION_HARNESS_CONFIDENCE_FLOOR = float(
+    _env("ORCHESTRATION_HARNESS_CONFIDENCE_FLOOR", "0.75")
+)
+# Concurrency / loop protection -- independent of any one harness's own
+# limits, and independent of what a harness's own output claims.
+ORCHESTRATION_GLOBAL_JOB_CAP = int(_env("ORCHESTRATION_GLOBAL_JOB_CAP", "2"))
+ORCHESTRATION_HARNESS_JOB_CAP = int(_env("ORCHESTRATION_HARNESS_JOB_CAP", "1"))
+# economy | balanced | performance | cloud_preferred -- see orchestration/quota.py.
+# RECOMMENDED DEFAULT (already the default below): "balanced" -- pairs with
+# ORCHESTRATION_MODE=hybrid above for the recommended Hybrid + Balanced setup.
+ORCHESTRATION_QUOTA_STRATEGY = _env("ORCHESTRATION_QUOTA_STRATEGY", "balanced").strip().lower()
+if ORCHESTRATION_QUOTA_STRATEGY not in {"economy", "balanced", "performance", "cloud_preferred"}:
+    raise ValueError(
+        "ORCHESTRATION_QUOTA_STRATEGY must be economy|balanced|performance|cloud_preferred, "
+        f"got {ORCHESTRATION_QUOTA_STRATEGY!r}"
+    )
+# Small local model used for ORCHESTRATION REASONING itself (not the voice
+# chat model) -- defaults to the already-resident intent classifier model to
+# preserve this repo's co-residency VRAM discipline (see INTENT_MODEL above).
+ORCHESTRATION_REASONING_MODEL = _env("ORCHESTRATION_REASONING_MODEL", "") or INTENT_MODEL
+ORCHESTRATION_TELEMETRY_FILE = _env(
+    "ORCHESTRATION_TELEMETRY_FILE", str(DATA_DIR / "orchestration_telemetry.jsonl")
+)
+
+# ---------------------------------------------------------------------------
+# GitHub Copilot -- the cloud reasoning provider, via the OFFICIAL
+# `github-copilot-sdk` package (pip install github-copilot-sdk; GA
+# 2026-06-02). RAP does not implement its own OAuth/device-flow and stores no
+# token itself: authentication is entirely the SDK's own -- by default it
+# reuses "GitHub signed-in user" credentials from `copilot auth login`
+# (stored by the CLI in the OS keychain). Set COPILOT_GITHUB_TOKEN / GH_TOKEN
+# / GITHUB_TOKEN (the SDK's own env vars, auto-detected by the SDK) to
+# override; RAP never reads or forwards a token itself.
+# ---------------------------------------------------------------------------
+# Capability name -> exact model id, overriding the doc-confirmed defaults in
+# orchestration/providers/copilot.py (e.g. {"reasoning": "gpt-5.1"}).
+COPILOT_MODEL_MAP = _parse_string_map(_env("COPILOT_MODEL_MAP_JSON", ""), "COPILOT_MODEL_MAP_JSON")
+# "low" | "medium" | "high" | "xhigh" | "max", only for models that support
+# it (see CopilotProvider.list_models()); empty leaves the SDK's own default.
+COPILOT_REASONING_EFFORT = _env("COPILOT_REASONING_EFFORT", "")

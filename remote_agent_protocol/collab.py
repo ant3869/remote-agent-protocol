@@ -23,6 +23,7 @@ conversation text before handing it to an agent.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -138,9 +139,7 @@ def consults_dir(workspace_dir: str | None, token: str = "") -> Path | None:
     return path
 
 
-def consult_answer_path(
-    workspace_dir: str | None, token: str, consult_id: str
-) -> Path | None:
+def consult_answer_path(workspace_dir: str | None, token: str, consult_id: str) -> Path | None:
     """The file a waiting agent polls for its answer, or None if unusable."""
     if not consult_id_ok(consult_id) or not consult_id_ok(token):
         return None
@@ -208,6 +207,8 @@ def write_consult_answer(
         # Swapped into place so a polling agent never reads a half-written file.
         os.replace(temp, path)
     except OSError as e:
+        with contextlib.suppress(OSError):
+            temp.unlink(missing_ok=True)
         logger.warning(f"Could not answer consult {consult_id}: {e}")
         return False
     return True

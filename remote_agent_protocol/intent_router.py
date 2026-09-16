@@ -50,7 +50,7 @@ import aiohttp
 from loguru import logger
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import voice_commands
+from remote_agent_protocol import llm_endpoint, voice_commands
 
 # Capability taxonomy. Read-only categories dispatch even at middling
 # confidence (a wrong lookup is harmless); mutating ones drop to the
@@ -72,10 +72,14 @@ RISK_DESTRUCTIVE = "destructive"
 RISK_LOW_GROUNDING = "low_grounding"
 RISK_AMBIGUOUS = "ambiguous"
 
-_CLASSIFIER_SYSTEM = """You route utterances for a voice assistant. The assistant persona can only \
-talk: it has NO internet, NO files, NO apps, NO sensors, and its knowledge is \
-frozen in the past. A separate tool agent on the user's computer does \
-real-world work for it.
+_CLASSIFIER_SYSTEM = """You route utterances for a voice assistant. The assistant persona knows \
+a great deal already and answers from that knowledge, but it cannot ACT: it \
+has NO internet, NO files, NO apps, NO sensors, and no knowledge of anything \
+current, local, or personal to this user. A separate tool agent on the user's \
+computer does real-world work for it.
+
+Sending work to that agent costs the user a long wait, so route there only \
+when the persona genuinely cannot answer on its own.
 
 Classify ONE spoken utterance. Judge the user's GOAL, not their wording -- \
 indirect, conversational, or oddly phrased requests count when only the tool \
@@ -83,10 +87,12 @@ agent could satisfy them.
 
 intent:
 - agent_task: the user wants information the persona cannot know (anything \
-current, local, changing, or that must be looked up) or an action performed \
+current, local, changing, or personal to this user) or an action performed \
 on a computer or in the world.
-- chat: conversation, opinions, jokes, stories, timeless general knowledge, \
-questions about the assistant itself, or remarks about work already done.
+- chat: conversation, opinions, jokes, stories, settled general knowledge the \
+persona can answer from memory, questions about the assistant itself, or \
+remarks about work already done. A plain question of fact with a settled \
+answer is chat -- the persona simply answers it.
 
 category (agent_task only, else "none"):
 - live_information: weather, news, prices, scores, events, any current fact
@@ -115,12 +121,16 @@ task/confidence/reason for a different utterance -- if what you're given
 doesn't clearly match one, write your own answer grounded in what was
 actually said. If the utterance is silence, noise, a stray filler word, or
 otherwise unintelligible, that is chat with confidence 0.1 or lower -- never
-invent a task to fill the gap.
+invent a task to fill the gap. An utterance carrying only a reaction, a
+feeling, or uncertainty, with no request in it, is chat for the same reason:
+never turn a remark or an expression of frustration into a task.
 
 Examples:
 "I wonder if I'll need an umbrella tomorrow" -> {"intent":"agent_task","category":"live_information","task":"Get tomorrow's rain forecast for the user's location","confidence":0.9,"reason":"Needs live weather data"}
 "you know how files pile up in downloads... can something be done about that" -> {"intent":"agent_task","category":"files_or_apps","task":"Organize and clean up the user's downloads folder","confidence":0.8,"reason":"Describes a file cleanup goal indirectly"}
 "tell me a story about a dragon" -> {"intent":"chat","category":"none","task":"","confidence":0.95,"reason":"Creative conversation"}
+"what's the capital of France" -> {"intent":"chat","category":"none","task":"","confidence":0.95,"reason":"Settled general knowledge the persona can answer itself"}
+"I don't know that" -> {"intent":"chat","category":"none","task":"","confidence":0.3,"reason":"A remark with no request in it"}
 "did you finish that report thing" -> {"intent":"chat","category":"none","task":"","confidence":0.7,"reason":"Asks about prior work, not a new task"}
 "there's some plugin that transcribes podcasts, no clue what it's called, can you set it up" -> {"intent":"agent_task","category":"system_control","task":"Identify the plugin the user means -- one that transcribes podcasts, exact name unknown to them -- check whether it is installed, and set it up if missing","confidence":0.85,"reason":"Install a capability described but not named"}
 "um, uh, static, static, nothing really" -> {"intent":"chat","category":"none","task":"","confidence":0.1,"reason":"Unintelligible or noise-like audio, no discernible request"}
@@ -353,10 +363,56 @@ def _grounding_gap(task: str, reason: str, text: str) -> str | None:
     return "classifier task/reason shares no word with the transcript"
 
 
+# Phrases the classifier writes into its OWN "reason" field when it doesn't
+# actually know what was asked -- a small model can pair this admission with a
+# confidently high numeric confidence anyway (jess_runtime.log 2026-09-13
+# 19:35:31: reason "User is unable to clearly articulate a task or request",
+# confidence 0.95, dispatched a nonsense stammer verbatim as a task). The
+# model's own stated doubt is a better signal than a number it also produced.
+_SELF_DOUBT_RE = re.compile(
+    r"\b(?:unable to (?:clearly )?articulate|unclear what|not clear what|"
+    r"can'?t tell what|hard to tell what|not sure what|ambiguous(?:ly)?|"
+    r"difficult to (?:determine|understand)|ill[- ]defined|"
+    r"no discernible request|nothing (?:really )?(?:said|discernible)|"
+    r"doesn'?t (?:clearly )?(?:state|specify|indicate) what)\b",
+    re.IGNORECASE,
+)
+
+
+def _self_doubt(reason: str) -> bool:
+    """True when the classifier's own reasoning admits it doesn't know what was asked."""
+    return bool(_SELF_DOUBT_RE.search(reason or ""))
+
+
 # Pronouns whose referent lives in the prior conversation, not the utterance.
 _ANAPHORA_WORDS = frozenset(
     {"it", "its", "it's", "that", "this", "they", "them", "those", "these", "one"}
 )
+
+
+_FOLLOW_UP_RE = re.compile(
+    # Opening a turn by contradicting the last one, or pointing back at it.
+    r"^(?:no|nope|nah|wait|actually|hold on)\b"
+    r"|^(?:that'?s|thats|it|that)\s+(?:not|isn'?t|wasn'?t|didn'?t|doesn'?t)\b"
+    r"|\b(?:we|you)\s+(?:were|was)\s+(?:just\s+)?talking about\b"
+    r"|\byou\s+(?:just\s+)?(?:said|told|showed|gave|mentioned|found)\b"
+    r"|\b(?:like|as)\s+i\s+(?:said|asked)\b"
+    r"|\bthe\s+(?:one|list|file|result|output)\s+(?:you|we)\b"
+    r"|\bsame\s+(?:one|thing|list)\b",
+    re.IGNORECASE,
+)
+
+
+def _refers_to_prior_turn(text: str) -> bool:
+    """True when the utterance is about the conversation rather than new work.
+
+    The keyword net matches on nouns that recur all through a working session,
+    so follow-ups ("wheres the list we were just talking about", "no it didnt")
+    looked exactly like fresh requests and were shipped verbatim as tasks. The
+    words that give a follow-up away are about the *conversation*, not the
+    topic, which is what this looks for.
+    """
+    return bool(_FOLLOW_UP_RE.search(text.strip()))
 
 
 def _is_anaphoric(text: str) -> bool:
@@ -468,6 +524,42 @@ async def classify_with_ollama(
             resp.raise_for_status()
             data = await resp.json()
     return json.loads(data["message"]["content"])
+
+
+async def classify_with_cloud(
+    text: str,
+    *,
+    endpoint: llm_endpoint.Endpoint,
+    timeout_secs: float,
+) -> dict:
+    """One classification call against an OpenAI-compatible endpoint.
+
+    Ollama's request shape does not travel: ``format`` as a JSON schema,
+    ``options``, ``think`` and ``keep_alive`` are its own extensions, and a
+    hosted API rejects unknown fields rather than ignoring them. The schema
+    goes in ``response_format`` instead, and the VRAM-shaped knobs have no
+    meaning off this machine.
+    """
+    payload = {
+        "model": endpoint.model,
+        "messages": [
+            {"role": "system", "content": _CLASSIFIER_SYSTEM},
+            {"role": "user", "content": text},
+        ],
+        "stream": False,
+        "temperature": 0,
+        "max_tokens": 250,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "routing", "schema": _RESPONSE_SCHEMA, "strict": True},
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=timeout_secs)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        async with http.post(endpoint.chat_url, json=payload, headers=endpoint.headers) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+    return json.loads(data["choices"][0]["message"]["content"])
 
 
 def _normalize_verdict(raw: object) -> dict | None:
@@ -606,6 +698,21 @@ class IntentRouter:
 
     @staticmethod
     async def _default_classify(text: str) -> dict:
+        """Classify one utterance, preferring the cloud router when configured.
+
+        The local classifier shares a GPU with the persona and times out under
+        that pressure; a hosted one does not, and routing every turn correctly
+        matters more than where it runs. A failure falls back rather than
+        degrading the turn to chat.
+        """
+        cloud = llm_endpoint.cloud_endpoint(llm_endpoint.INTENT)
+        if cloud is not None:
+            try:
+                return await classify_with_cloud(
+                    text, endpoint=cloud, timeout_secs=cfg.CLOUD_LLM_TIMEOUT_SECS
+                )
+            except Exception as exc:
+                logger.warning(f"{cloud.label} classifier failed ({exc}); using the local one")
         return await classify_with_ollama(
             text,
             host=cfg.OLLAMA_HOST,
@@ -772,6 +879,16 @@ class IntentRouter:
         # Tier 5: the keyword net -- free and high-precision; when it fires,
         # dispatch without spending the classifier budget.
         task = voice_commands.parse_implicit_task(text) if self._auto_delegate else None
+        if task is not None and _refers_to_prior_turn(text):
+            # Except when the turn is about work already done. The net matches
+            # on nouns ("list", "file path", "install") that recur through a
+            # working session, so a follow-up like "no it didnt, wheres the
+            # file path to the list" matched and shipped verbatim as a new job
+            # -- an agent receiving that has no idea which list, and answers
+            # about itself (jess_runtime.log 2026-09-15T18:39). Hand it to the
+            # classifier instead, which writes a real task or calls it chat.
+            logger.info(f"Routing[heuristic] deferring follow-up to the classifier: {text!r}")
+            task = None
         if task is not None:
             category = "web_research" if _PRODUCT_RESEARCH_RE.search(task) else "other_action"
             agent = _select_backend(task, default_backend, category)
@@ -838,6 +955,14 @@ class IntentRouter:
         # Tier 6: semantic classification -- only for utterances the free
         # tiers above could not place.
         verdict, fallback = await self._classify_verdict(text)
+
+        if verdict is not None and _self_doubt(verdict["reason"]):
+            logger.warning(
+                f"Classifier expressed doubt about {text!r} despite confidence "
+                f"{verdict['confidence']:.2f} ({verdict['reason']!r}); treating as chat"
+            )
+            verdict = None
+            fallback = fallback or "classifier expressed doubt about the utterance"
 
         # A question about what the assistant already did describes a real task,
         # so a classifier reading the words alone answers agent_task and spawns

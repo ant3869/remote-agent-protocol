@@ -306,7 +306,7 @@ def parse_delegation(
         return None
     rest = lowered[len(verb) :].lstrip()
 
-    # Longest alias first so "hermes yolo" wins over "hermes".
+    # Longest alias first so "laptop hermes" wins over "hermes".
     for alias in sorted(aliases, key=len, reverse=True):
         if rest == alias or rest.startswith(alias + " "):
             backend = aliases[alias]
@@ -447,9 +447,24 @@ _AGENT_NOUNS = re.compile(r"\b(?:agents?|backends?|bots?|helpers?|machines?)\b")
 # Liveness asked about one named agent: the agent is the *object* of the check,
 # not the one doing it. "Ping code-puppy" is this; "have code-puppy ping the
 # server" is not, and the difference is whether anything follows the name.
+# The wrapping people put in front of a spoken request. Stripped before the
+# liveness patterns run, which anchor on the verb and cannot see past it.
+_POLITE_LEAD = re.compile(
+    r"^(?:(?:hey|ok|okay|so|well|now)\s+)*"
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?"
+    r"|please\s+"
+    r"|i(?:'d like|d like| want| need)(?:\s+you)?\s+to\s+"
+    r"|all\s+i\s+want(?:ed)?(?:\s+you)?\s+to\s+do\s+is\s+"
+    r"|just\s+"
+    r"|go\s+(?:ahead\s+and\s+)?"
+    r")+"
+)
 _LIVENESS_NOUNS = r"(?:availability|status|response|responsiveness|activity|health|state)"
 _LIVENESS_STATES = (
-    r"(?:online|offline|up|alive|awake|available|responding|responsive|working|ready|there|active)"
+    # "running" is how people actually ask this out loud, and its absence sent
+    # "tell me if it was running" to an agent instead of answering it here.
+    r"(?:online|offline|up|alive|awake|available|responding|responsive|working"
+    r"|running|live|ok|okay|ready|there|active)"
 )
 
 
@@ -468,6 +483,11 @@ def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None
     # Spoken aliases are written as words ("code puppy") but the same name is
     # typed as the backend id ("code-puppy"); match either.
     lowered = re.sub(r"[-_]+", " ", lowered)
+    # Nobody says "ping openclaw" out loud; they ask for it. The patterns below
+    # anchor on the verb, so politeness in front of it hid the question, and the
+    # check was delegated to the very agent being asked about -- which a broken
+    # one cannot answer (jess_runtime.log 2026-09-15T06:42).
+    lowered = _POLITE_LEAD.sub("", lowered).strip()
     if not lowered:
         return None
     if _AGENT_NOUNS.search(lowered) and _ROLLCALL_SCOPE.search(lowered):
@@ -479,10 +499,15 @@ def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None
         patterns = (
             # A trailing "and confirm response" is still just the ping asked
             # politely; anything else after the name is real work for it.
-            rf"^(?:ping|check(?: on| in with)?|test|poll|reach|contact)\s+(?:the\s+)?{name}"
+            rf"^(?:ping|check(?: on| in on| in with| up on)?|look in on|test|poll"
+            rf"|reach|contact)\s+(?:the\s+)?{name}"
             rf"(?:'s)?(?:\s+{_LIVENESS_NOUNS})*"
-            rf"(?:\s+and\s+(?:confirm|report|tell me|let me know|see)\b.*)?$",
+            # "and make sure it still works" is the same question restated, not
+            # a second errand -- the usual way people ask for a liveness check.
+            rf"(?:\s+and\s+(?:confirm|report|tell me|let me know|see|make sure)\b.*)?$",
             rf"^(?:is|are)\s+(?:the\s+)?{name}\s+(?:still\s+)?{_LIVENESS_STATES}$",
+            rf"^(?:tell me|let me know)\s+(?:if|whether)\s+(?:the\s+)?{name}\s+"
+            rf"(?:is|was)\s+(?:still\s+)?{_LIVENESS_STATES}\b.*$",
             rf"^{name}(?:'s)?\s+{_LIVENESS_NOUNS}$",
             rf"^check\s+(?:the\s+)?{_LIVENESS_NOUNS}(?:\s+{_LIVENESS_NOUNS})*\s+(?:of|for|on)\s+"
             rf"(?:the\s+)?{name}$",
@@ -493,7 +518,11 @@ def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None
 
 
 _STATUS_PHRASES = re.compile(
-    r"\b(?:update on|status|progress|how far along|any update|how(?:'s| is) (?:it|that) (?:going|coming))\b"
+    r"\b(?:update on|status|progress|how far along|any update"
+    r"|how(?:'s| is) (?:it|that) (?:going|coming)"
+    r"|how many\b[^.?!]{0,30}\b(?:running|active|working|going|left)"
+    r"|(?:is|are)\b[^.?!]{0,20}\b(?:anything|any(?:one)?)\b[^.?!]{0,20}\b(?:still\s+)?"
+    r"(?:running|active|working))\b"
 )
 
 
@@ -871,7 +900,7 @@ def requires_confirmation(
     """Whether an auto-parsed delegation must be confirmed before it runs.
 
     Picking a backend IS the risk acknowledgment -- an elevated backend (e.g.
-    ``hermes-yolo``, which auto-approves its own shell/file writes) no longer
+    ``openclaw``, which auto-approves its own shell/file writes) no longer
     forces confirmation on top of that. The one remaining trigger is a
     *destructive* task: its text names a ``destructive_words`` verb like
     "delete"/"format"/"uninstall", regardless of which backend runs it --

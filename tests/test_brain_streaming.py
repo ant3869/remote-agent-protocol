@@ -60,9 +60,7 @@ async def _collect(brain, text="hello"):
 async def test_marker_delegation_honors_the_agent_named_in_the_request(monkeypatch):
     brain = _brain(monkeypatch, ["On it. "])
     monkeypatch.setattr(cfg, "AGENT_BACKENDS", {"codex": {}, "code-puppy": {}})
-    monkeypatch.setattr(
-        cfg, "AGENT_SPOKEN_ALIASES", {"code puppy": "code-puppy", "codex": "codex"}
-    )
+    monkeypatch.setattr(cfg, "AGENT_SPOKEN_ALIASES", {"code puppy": "code-puppy", "codex": "codex"})
     brain._default_agent_backend = "codex"
     calls = []
     monkeypatch.setattr(
@@ -79,9 +77,7 @@ async def test_marker_delegation_honors_the_agent_named_in_the_request(monkeypat
 async def test_marker_delegation_without_a_named_agent_uses_the_default(monkeypatch):
     brain = _brain(monkeypatch, ["On it. "])
     monkeypatch.setattr(cfg, "AGENT_BACKENDS", {"codex": {}, "code-puppy": {}})
-    monkeypatch.setattr(
-        cfg, "AGENT_SPOKEN_ALIASES", {"code puppy": "code-puppy", "codex": "codex"}
-    )
+    monkeypatch.setattr(cfg, "AGENT_SPOKEN_ALIASES", {"code puppy": "code-puppy", "codex": "codex"})
     brain._default_agent_backend = "codex"
     calls = []
     monkeypatch.setattr(
@@ -150,7 +146,10 @@ async def test_a_resolved_delegation_never_dispatches_a_second_marker(monkeypatc
     # job spawned ~1.6s later from the acknowledgment reply's own marker --
     # the model, asked only to narrate a dispatch that already happened, was
     # still free to invent its own [[delegate:]] for the same task.
-    brain = _brain(monkeypatch, ["I have tasked my agent with pinging. ", "[[delegate: ping each network device]]"])
+    brain = _brain(
+        monkeypatch,
+        ["I have tasked my agent with pinging. ", "[[delegate: ping each network device]]"],
+    )
 
     async def deterministic(_text):
         return ("mock", "ping each network device")
@@ -175,7 +174,12 @@ async def test_an_approved_confirmation_never_dispatches_a_second_marker(monkeyp
     # task must not be free to run a second time from its own acknowledgment.
     brain = _brain(monkeypatch, ["Approved and running. ", "[[delegate: delete the old logs]]"])
     monkeypatch.setattr(cfg, "AGENT_CONFIRM_ENABLED", True)
-    brain._pending_confirmations["confirm-1"] = ("hermes", "delete the old logs", None, "destructive")
+    brain._pending_confirmations["confirm-1"] = (
+        "hermes",
+        "delete the old logs",
+        None,
+        "destructive",
+    )
     started = []
 
     async def fake_start(*args, **kwargs):
@@ -340,10 +344,26 @@ async def test_the_finished_reply_is_recorded_once(monkeypatch):
 
     await _collect(brain)
 
-    assistant = [e for e in events if e.get("role") == "assistant"]
+    assistant = [e for e in events if e.get("role") == "assistant" and e.get("final", True)]
     assert len(assistant) == 1
     assert assistant[0]["text"] == "All done."
     assert brain._messages[-1] == {"role": "assistant", "content": "All done."}
+
+
+@pytest.mark.asyncio
+async def test_text_event_precedes_audio_chunk_and_clear_stops_old_turn(monkeypatch):
+    events = []
+    brain = _brain(monkeypatch, ["First sentence. ", "Second sentence."])
+    brain._on_event = events.append
+    stream = brain.complete_stream("hello")
+    first = await anext(stream)
+    visible = [event for event in events if event.get("role") == "assistant"]
+    assert visible[-1]["text"] == first
+    assert visible[-1]["message_id"] == first.utterance["message_id"]
+    brain._conversation.reset()
+    brain._messages.clear()
+    assert [piece async for piece in stream] == []
+    assert brain._messages == []
 
 
 @pytest.mark.asyncio

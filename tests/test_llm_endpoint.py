@@ -1,0 +1,128 @@
+"""Where each model call goes, and what happens when the first choice fails.
+
+A local 12B persona spent ~7s composing every reply before the user heard
+anything (s2s_turn_timings.jsonl, 2026-09-15). Cloud models answer far faster,
+but the machine has to keep working when the key expires or the provider is
+down, so every caller falls back to the local model rather than to silence.
+"""
+
+import pytest
+
+from remote_agent_protocol import config as cfg
+from remote_agent_protocol import llm_endpoint
+
+KINDS = (llm_endpoint.BRAIN, llm_endpoint.INTENT, llm_endpoint.ORCHESTRATION)
+
+
+@pytest.fixture
+def cloud(monkeypatch):
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "https://example.test/v1")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "sk-test")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL", "fast-cloud-model")
+    monkeypatch.setattr(cfg, "CLOUD_INTENT_MODEL", "")
+    monkeypatch.setattr(cfg, "CLOUD_ORCHESTRATION_MODEL", "")
+
+
+@pytest.fixture
+def no_cloud(monkeypatch):
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL", "")
+
+
+def test_without_cloud_configured_nothing_changes(no_cloud):
+    for kind in KINDS:
+        chain = llm_endpoint.chain(kind)
+        assert len(chain) == 1, "an unconfigured cloud must not add a hop to every turn"
+        assert chain[0].cloud is False
+        assert chain[0].headers == {}, "the local server is not sent a bearer token"
+
+
+def test_cloud_is_tried_first_and_local_is_always_last(cloud):
+    for kind in KINDS:
+        chain = llm_endpoint.chain(kind)
+        assert [e.cloud for e in chain] == [True, False], f"{kind} must fall back locally"
+        assert chain[0].headers == {"Authorization": "Bearer sk-test"}
+
+
+def test_a_half_configured_cloud_is_no_cloud(monkeypatch, cloud):
+    """Falling back on every single turn is slower than never trying."""
+    for missing in ("CLOUD_LLM_BASE_URL", "CLOUD_LLM_API_KEY", "CLOUD_LLM_MODEL"):
+        monkeypatch.setattr(cfg, missing, "")
+        assert llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN) is None
+        monkeypatch.undo()
+        monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "https://example.test/v1")
+        monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "sk-test")
+        monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL", "fast-cloud-model")
+
+
+def test_each_caller_can_use_its_own_cloud_model(monkeypatch, cloud):
+    monkeypatch.setattr(cfg, "CLOUD_INTENT_MODEL", "tiny-router-model")
+
+    assert llm_endpoint.cloud_endpoint(llm_endpoint.INTENT).model == "tiny-router-model"
+    # The others keep following the shared persona model.
+    assert llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN).model == "fast-cloud-model"
+    assert llm_endpoint.cloud_endpoint(llm_endpoint.ORCHESTRATION).model == "fast-cloud-model"
+
+
+def test_the_persona_model_follows_the_selected_persona(no_cloud):
+    chain = llm_endpoint.chain(llm_endpoint.BRAIN, local_model="a-persona-specific-model")
+    assert chain[-1].model == "a-persona-specific-model"
+
+
+def test_chat_url_is_openai_compatible(cloud):
+    assert llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN).chat_url == (
+        "https://example.test/v1/chat/completions"
+    )
+    assert llm_endpoint.local_endpoint(llm_endpoint.BRAIN).chat_url.endswith("/v1/chat/completions")
+
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return "boom"
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise RuntimeError(f"status {self.status}")
+
+
+def test_orchestration_reasoning_falls_back_when_the_cloud_refuses(cloud):
+    """An expired key must cost one slow turn, not the decision."""
+    import asyncio
+
+    from remote_agent_protocol.orchestration.providers.local import LocalProvider
+
+    seen: list[str] = []
+
+    class Http:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def post(self, url, json, headers=None):
+            seen.append(url)
+            if "example.test" in url:
+                return _Resp({}, status=401)
+            return _Resp({"message": {"content": "local answer"}})
+
+    provider = LocalProvider(session_factory=Http)
+    result = asyncio.run(provider.complete("decide something"))
+
+    assert result.text == "local answer"
+    assert any("example.test" in u for u in seen), "the cloud must be tried first"
+    assert any("/api/chat" in u for u in seen), "and the local model must catch it"

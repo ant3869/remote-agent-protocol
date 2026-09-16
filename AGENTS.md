@@ -14,6 +14,10 @@ remote, and do not mix application code into it.
   `python -m remote_agent_protocol.terminal` (terminal mode).
 - App tests: `.venv\Scripts\python -m pytest tests/test_<name>.py` using the
   repo's `.venv` (not `uv run`). Lint with `.venv\Scripts\python -m ruff`.
+- Isolated conversation checks: `docker build -f Dockerfile.conversation --target
+  python-contract -t rap-conversation-python .` then `docker run --rm
+  rap-conversation-python`; use target `javascript` and tag `rap-conversation-js`
+  for the Node reducer checks. Full audio tests still use the repo environment.
 - Mediator test harness: `voice_probe/` probes the routing/delegation/
   confirmation brain with a text-prompt corpus (a stand-in for speech). Run
   `python -m voice_probe run --classifier {stub|live|off}`; see

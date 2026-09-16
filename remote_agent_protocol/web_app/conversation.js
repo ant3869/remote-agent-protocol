@@ -1,0 +1,276 @@
+/* Attributable, keyed conversation rendering. No agent text is interpreted as HTML. */
+(function (root) {
+  "use strict";
+  const terminal = new Set(["done", "failed", "timeout", "cancelled"]);
+  const deliveryLabels = {
+    text_only: "Text only", queued: "Queued", playing: "Speaking", played: "Spoken",
+    interrupted: "Interrupted", failed: "Speech failed", playback_unconfirmed: "Playback unconfirmed",
+  };
+  const statusLabels = {
+    running: "Working", waiting: "Waiting", blocked: "Blocked", done: "Completed",
+    failed: "Failed", timeout: "Timed out", cancelled: "Cancelled",
+  };
+
+  function createStore() {
+    const rows = new Map();
+    let epoch = null;
+    let truncated = false;
+    return {
+      rows, get epoch() { return epoch; }, get truncated() { return truncated; },
+      clear(nextEpoch = null) { rows.clear(); epoch = nextEpoch; truncated = false; },
+      restore(snapshot) {
+        rows.clear(); epoch = snapshot.epoch; truncated = Boolean(snapshot.truncated);
+        for (const row of snapshot.rows || []) rows.set(row.key, row);
+      },
+      apply(row) {
+        if (!row?.key) return false;
+        const old = rows.get(row.key);
+        if (old && (row.id || 0) <= (old.id || 0)) return false;
+        if (old?.type === "agent_job" && terminal.has(old.status) && !terminal.has(row.status)) return false;
+        if (old?.type === "transcript" && old.final && row.final === false) return false;
+        rows.set(row.key, { ...old, ...row });
+        while (rows.size > 1200) { rows.delete(rows.keys().next().value); truncated = true; }
+        return true;
+      },
+    };
+  }
+
+  function outcome(row) {
+    const status = statusLabels[row.status] || row.state || "Working";
+    const result = row.result || row.summary || "";
+    if (row.status === "done" && !result) return { status: "Completed without an answer", text: "The agent finished but returned no answer." };
+    if (["failed", "timeout", "cancelled"].includes(row.status)) {
+      return { status, text: row.failure_detail || result || `${status}. No additional details were reported.` };
+    }
+    return { status, text: result };
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = String(text);
+    return node;
+  }
+
+  function inline(parent, text) {
+    // Deliberately small Markdown subset: safe links, code, and emphasis.
+    const pattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*/g;
+    let offset = 0;
+    for (const match of text.matchAll(pattern)) {
+      parent.append(document.createTextNode(text.slice(offset, match.index)));
+      if (match[1]) {
+        const link = el("a", "", match[1]);
+        link.href = match[2]; link.target = "_blank"; link.rel = "noopener noreferrer";
+        parent.append(link);
+      } else parent.append(el(match[3] ? "code" : "strong", "", match[3] || match[4]));
+      offset = match.index + match[0].length;
+    }
+    parent.append(document.createTextNode(text.slice(offset)));
+  }
+
+  function formatted(text) {
+    const body = el("div", "conversation-body");
+    let code = null;
+    let list = null;
+    for (const line of String(text || "").split("\n")) {
+      if (/^\s*```/.test(line)) {
+        if (code) code = null;
+        else { code = el("code"); const pre = el("pre"); pre.append(code); body.append(pre); }
+        list = null; continue;
+      }
+      if (code) { code.append(document.createTextNode(line + "\n")); continue; }
+      const item = line.match(/^\s*(?:[-*]|\d+\.)\s+(.+)/);
+      if (item) {
+        if (!list) { list = el(/^\s*\d/.test(line) ? "ol" : "ul"); body.append(list); }
+        const li = el("li"); inline(li, item[1]); list.append(li);
+      } else {
+        list = null;
+        const paragraph = el("p"); inline(paragraph, line || "\u00a0"); body.append(paragraph);
+      }
+    }
+    return body;
+  }
+
+  function createView({ store, log, newMessages, live, inspect, decide, cancel }) {
+    const nodes = new Map();
+    const announced = new Map();
+    let wasAtBottom = true;
+    function scrollHost() {
+      let node = log;
+      while (node.parentElement && (node.scrollHeight <= node.clientHeight + 2 || !/auto|scroll/.test(getComputedStyle(node).overflowY))) node = node.parentElement;
+      return node;
+    }
+    function bottom() { const host = scrollHost(); return host.scrollHeight - host.scrollTop - host.clientHeight < 64; }
+    document.addEventListener("scroll", () => {
+      wasAtBottom = bottom();
+      if (wasAtBottom) newMessages.hidden = true;
+    }, true);
+    newMessages.addEventListener("click", () => {
+      const host = scrollHost(); host.scrollTop = host.scrollHeight; wasAtBottom = true; newMessages.hidden = true;
+    });
+    function button(label, action, key = label, icon = null) {
+      const node = el("button", `conversation-action${icon ? " icon-only" : ""}`, icon ? null : label);
+      node.type = "button"; node.dataset.action = key;
+      if (icon) {
+        node.append(root.RapIcons.node(icon));
+        node.setAttribute("aria-label", label);
+        node.title = label;
+      }
+      node.addEventListener("click", action); return node;
+    }
+    function copy(text) {
+      return button("Copy text", async () => {
+        try { await navigator.clipboard.writeText(text); live.textContent = "Text copied."; }
+        catch { live.textContent = "Copy unavailable. Select the text to copy it."; }
+      }, "copy", "copy");
+    }
+    function exchange(row) {
+      const body = el("div", "conversation-exchange");
+      for (const event of Object.values(row.exchanges || { update: row })) {
+        const label = { asked: "asks", answered: "answers", refused: "request declined", unanswered: "could not answer" }[event.event] || "update";
+        body.append(el("strong", "", `${event.agent || "Agent"} → ${event.peer || "Agent"} · ${label}`));
+        body.append(formatted(event.answer || event.reason || event.question || "No details reported."));
+      }
+      return body;
+    }
+    function build(row, consultations) {
+      const article = el("article", "conversation-row");
+      article.dataset.key = row.key;
+      if (row.type === "transcript") article.dataset.actor = row.role === "user" ? "user" : row.role === "agent" ? "harness" : "persona";
+      else if (row.type === "agent_job" || row.type === "agent_consult" || row.type.startsWith("agent_confirm") || row.type === "routing") article.dataset.actor = "harness";
+      const header = el("header", "conversation-header");
+      let name = row.speaker_name || (row.role === "user" ? "You" : "Assistant (unknown)");
+      let label = "";
+      if (row.type === "agent_job") {
+        name = row.agent || "Agent"; label = outcome(row).status;
+        article.classList.add("conversation-task"); article.dataset.status = row.status || "running";
+      } else if (row.type === "transcript") {
+        label = row.role === "user" ? (row.input_mode === "voice" ? "Voice" : "Message") : deliveryLabels[row.delivery] || "Playback unconfirmed";
+        article.classList.add(row.role === "user" ? "conversation-user" : row.role === "agent" ? "conversation-agent" : "conversation-persona");
+      } else if (row.type.startsWith("agent_confirm")) {
+        name = row.agent || "Agent";
+        label = row.type === "agent_confirm" ? "Needs your approval" : ({ approve: "Approved", deny: "Denied" }[row.decision] || row.reason || "Resolved");
+        article.classList.add("conversation-approval");
+      } else if (row.type === "agent_consult") { name = "Agent exchange"; }
+      else if (row.type === "routing") { name = "Routing"; label = row.action === "confirm" ? "Awaiting approval" : `Selected ${row.agent || "agent"}`; }
+      else name = "System";
+      header.append(el("strong", "conversation-name", name));
+      if (row.type === "transcript" && row.source_agent && row.speaker_id !== row.source_agent) {
+        header.append(el("span", "conversation-state", row.relation === "summary" ? "summarizing" : "relaying"));
+        const source = el("strong", "actor-name", row.source_agent);
+        source.dataset.actor = "harness"; header.append(source);
+      }
+      header.append(el("span", "conversation-state", label));
+      if (row.occurred_at) {
+        const time = el("time", "conversation-time", new Date(row.occurred_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+        time.dateTime = row.occurred_at; header.append(time);
+      }
+      article.append(header);
+      if (row.type === "agent_job") {
+        article.append(el("h3", "conversation-task-title", row.task || "Agent task"));
+        article.append(el("p", "conversation-meta", [row.machine, row.job_id].filter(Boolean).join(" · ")));
+        if (!terminal.has(row.status)) article.append(el("p", "conversation-current", row.action || row.state || "Waiting for agent output."));
+        if (row.tool || row.step) article.append(el("p", "conversation-meta", [row.tool, row.step ? `Step ${row.step}${row.step_total ? `/${row.step_total}` : ""}` : ""].filter(Boolean).join(" · ")));
+        for (const consult of consultations) article.append(exchange(consult));
+        if (row.activity?.length) {
+          const activity = el("details", "conversation-activity"); activity.dataset.detail = "activity";
+          activity.append(el("summary", "", `Activity (${row.activity.length})`));
+          const list = el("ol");
+          for (const entry of row.activity) {
+            const item = el("li");
+            item.append(el("span", "conversation-meta", entry.at ? new Date(entry.at).toLocaleTimeString() + " · " : ""));
+            item.append(document.createTextNode(entry.text)); list.append(item);
+          }
+          activity.append(list); article.append(activity);
+        }
+        const result = outcome(row);
+        if (terminal.has(row.status)) {
+          const details = el("details", "conversation-result"); details.dataset.detail = "result";
+          details.open = result.text.length < 600;
+          details.append(el("summary", "", "Full result"), formatted(result.text));
+          const partial = row.result && row.failure_detail && row.result !== row.failure_detail;
+          if (partial) details.append(el("strong", "", "Partial result"), formatted(row.result));
+          details.append(copy(partial ? `${result.text}\n\nPartial result\n${row.result}` : result.text));
+          article.append(details);
+        }
+        if (!terminal.has(row.status) && cancel) {
+          article.append(button("Cancel this job", () => cancel(row.job_id), "cancel", "close"));
+        }
+        article.append(button("Inspect technical output", () => inspect(row.job_id), "inspect", "terminal"));
+      } else if (row.type === "agent_consult") article.append(exchange(row));
+      else if (row.type.startsWith("agent_confirm")) {
+        article.append(formatted(row.task || ""), el("p", "conversation-meta", row.reason || ""));
+        if (row.type === "agent_confirm") {
+          article.append(button("Approve", () => decide("approve", row.token)), button("Deny", () => decide("deny", row.token)));
+        }
+      } else if (row.type === "routing") {
+        article.append(formatted(row.task || ""), el("p", "conversation-meta", row.reason || `Routing source: ${row.source || "not reported"}`));
+      } else {
+        article.append(formatted(row.text || ""));
+        if (row.spoken_text != null && row.spoken_text !== row.text) {
+          const spoken = el("details"); spoken.dataset.detail = "spoken";
+          spoken.append(el("summary", "", "Reported spoken text"), formatted(row.spoken_text)); article.append(spoken);
+        }
+        if (row.type === "transcript") {
+          article.append(copy(row.text || ""));
+          if (row.job_id) article.append(button(`Open task ${row.job_id}`, () => inspect(row.job_id), "task", "link"));
+        }
+      }
+      return article;
+    }
+    return {
+      render({ announce = true } = {}) {
+        const follow = wasAtBottom;
+        const host = scrollHost();
+        const top = host.scrollTop;
+        const anchor = [...log.children].find(node => node.dataset.key && node.getBoundingClientRect().bottom > host.getBoundingClientRect().top);
+        const anchorKey = anchor?.dataset.key;
+        const anchorTop = anchor?.getBoundingClientRect().top;
+        const all = [...store.rows.values()];
+        const seen = new Set();
+        const jobs = new Set(all.filter(row => row.type === "agent_job").map(row => row.job_id));
+        let changed = false;
+        for (const row of all) {
+          if (row.type === "agent_consult" && jobs.has(row.parent_job_id || row.job_id)) continue;
+          const consultations = row.type === "agent_job" ? all.filter(other => other.type === "agent_consult" && (other.parent_job_id || other.job_id) === row.job_id) : [];
+          seen.add(row.key);
+          const fingerprint = JSON.stringify([row, consultations]);
+          const old = nodes.get(row.key);
+          if (old?.fingerprint === fingerprint) continue;
+          const node = build(row, consultations);
+          if (old) {
+            const opens = new Map([...old.node.querySelectorAll("details")].map(d => [d.dataset.detail, d.open]));
+            for (const d of node.querySelectorAll("details")) if (opens.has(d.dataset.detail)) d.open = opens.get(d.dataset.detail);
+            const focused = old.node.contains(document.activeElement) ? document.activeElement.dataset.action : null;
+            const focusedDetail = old.node.contains(document.activeElement) && document.activeElement.tagName === "SUMMARY" ? document.activeElement.parentElement.dataset.detail : null;
+            old.node.replaceWith(node);
+            if (focused) [...node.querySelectorAll("button")].find(b => b.dataset.action === focused)?.focus({ preventScroll: true });
+            if (focusedDetail) [...node.querySelectorAll("details")].find(d => d.dataset.detail === focusedDetail)?.querySelector("summary")?.focus({ preventScroll: true });
+          } else log.append(node);
+          nodes.set(row.key, { node, fingerprint }); changed = true;
+          const announcement = `${row.speaker_name || row.agent || "Update"}: ${row.type === "agent_job" ? `${outcome(row).status}. ${row.action || ""}` : row.text || row.reason || row.action || ""}`;
+          if (announce && announced.get(row.key) !== announcement && (row.type !== "transcript" || row.final || /[.!?]\s*$/.test(row.text || ""))) {
+            live.textContent = announcement;
+            announced.set(row.key, announcement);
+          }
+        }
+        for (const [key, entry] of nodes) if (!seen.has(key)) { entry.node.remove(); nodes.delete(key); announced.delete(key); }
+        log.querySelector(".empty-state")?.remove();
+        if (!all.length) {
+          log.append(el("div", "empty-state", "Conversation is ready. Speak or type a message."));
+          wasAtBottom = true; newMessages.hidden = true; return;
+        }
+        if (follow) { const currentHost = scrollHost(); currentHost.scrollTop = currentHost.scrollHeight; newMessages.hidden = true; }
+        else {
+          host.scrollTop = top;
+          const retained = nodes.get(anchorKey)?.node;
+          if (retained) host.scrollTop += retained.getBoundingClientRect().top - anchorTop;
+          if (changed) newMessages.hidden = false;
+        }
+      },
+    };
+  }
+  const api = { createStore, createView, outcome, deliveryLabels };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  else root.RapConversation = api;
+})(typeof window === "undefined" ? globalThis : window);
