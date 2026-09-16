@@ -14,6 +14,23 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Local / Cloud / Hybrid persona orchestration. Each routed turn is scored on
+  measurable signals -- how much it depends on earlier turns, how many distinct
+  constraints it carries, how much of a choice the harness pick was, whether a
+  prior result must be interpreted -- and either resolved locally or escalated
+  to a cloud reasoner. Multimodal need, a previous routing failure, or a
+  low-confidence harness pick escalate regardless of score. Cloud reasoning uses
+  the official github-copilot-sdk and this repo stores no token of its own.
+- Dispatch admission independent of any harness's own limits: global and
+  per-harness concurrency caps and duplicate-task rejection, applied immediately
+  before every real dispatch and beneath the existing acknowledgement, dedup,
+  and destructive-confirmation safeguards.
+- Orchestration telemetry in data/orchestration_telemetry.jsonl, separate from
+  persona memory, recording why each turn stayed local or escalated, which
+  harness ran, and how the two reasoning paths compared.
+- A "Persona orchestration" panel in the Status view: mode and quota-strategy
+  controls, Copilot connect state, cloud and local provider health, and the
+  recent routing decisions.
 - Any OpenAI-compatible cloud endpoint can now serve the persona, the intent
   classifier, and the orchestrator's reasoning, chosen per model and tried
   before the local one. A cloud failure falls back to the local model rather

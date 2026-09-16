@@ -23,6 +23,13 @@ real-time audio pipeline.
   locally or against any OpenAI-compatible cloud endpoint, chosen per model. A
   cloud failure falls back to the local model, so the machine keeps working
   offline; see the `CLOUD_LLM_*` settings in `env.example`.
+- Local / Cloud / Hybrid persona orchestration scores each routed turn and either
+  resolves it locally or escalates the reasoning to a cloud model, with global
+  and per-harness concurrency caps, duplicate-task rejection, JSONL telemetry,
+  and a Status-view panel showing recent routing decisions.
+- Conversation text is speaker-attributed and streamed, with task cards that
+  group an agent's progress and consultations, explicit failure and cancellation
+  outcomes, and snapshots that survive a reload.
 - The composer can bundle held voice, typed notes, links, images, and files into
   one reviewed prompt before the assistant or a delegated agent sees it.
 - Voice modes cover Free Talk, Wake Word, and Push To Talk, with the selected
@@ -228,6 +235,7 @@ unless launched with an explicit `--host`.
 | Path | Purpose |
 | --- | --- |
 | `remote_agent_protocol/` | The application package: web UI (`web_gui.py` + `web_app/`, including the avatar), voice session, agent bridge, memory, personas, config |
+| `remote_agent_protocol/orchestration/` | Local / Cloud / Hybrid routing: risk scoring, dispatch admission, quota strategy, telemetry, model providers |
 | `remote_agent_protocol/wake_word/` | Optional repo-local wake models and training helpers for openwakeword |
 | `remote_agent_protocol/models/` | Ollama Modelfiles for local GGUFs |
 | `remote_agent_protocol/config_examples/` | `persona_overrides.example.json` -- template for `data/persona_overrides.json` |

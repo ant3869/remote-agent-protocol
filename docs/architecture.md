@@ -157,6 +157,70 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
   require the full local session and are explicitly unavailable in brain mode;
   the GUI does not silently claim otherwise.
 
+## Persona orchestration (Local / Cloud / Hybrid)
+
+`remote_agent_protocol/orchestration/` sits **on top of** the existing
+`intent_router` -> `agent_bridge` path; it never replaces it. What it decides is
+whether the *orchestration reasoning itself* should escalate to a cloud model --
+not what the harness then goes and does.
+
+| Module | Responsibility |
+| --- | --- |
+| `models.py` | `RiskFactors`, `StructuredDecision`, `Route` -- data only |
+| `risk.py` | Per-turn signal extraction and weighted scoring; pure functions |
+| `concurrency.py` | Global (2) and per-harness (1) job caps, plus duplicate admission |
+| `quota.py` | Economy / Balanced / Performance / Cloud-preferred strategies |
+| `telemetry.py` | JSONL records, kept separate from persona memory |
+| `orchestrator.py` | `PersonaOrchestrator`: evaluate, admit, record outcome |
+| `providers/` | `ModelProvider` ABC, `LocalProvider` (Ollama), `CopilotProvider` |
+
+Both session types construct one: `VoiceSession` in full mode and `BrainSession`
+in brain mode. Each calls `evaluate()` while resolving a delegation, passes every
+real dispatch through `_gate_dispatch()`, and calls `record_outcome()` when the
+job finishes. `web_gui.py` talks to whichever is active through one shared
+surface, so `BrainSessionAdapter` has to keep pace with `VoiceSession` --
+`tests/test_brain_adapter_orchestration.py` fails when it drifts.
+
+Every risk factor is measured from something that varies per turn: how much of
+the utterance depends on earlier ones, how many distinct constraints it carries,
+how much of a choice the harness pick was, whether a previous result must be
+interpreted, whether several ordered actions are needed, and how unsure the local
+tiers themselves are. An earlier factor set held four constants and could not
+reach the cloud band at all; the weights live in
+`config.ORCHESTRATION_RISK_WEIGHTS` and sum to 1.0.
+
+Scores map to bands (`ORCHESTRATION_LOCAL_THRESHOLD` /
+`ORCHESTRATION_CLOUD_THRESHOLD`). Between them, hybrid stays local unless a
+**hard trigger** fires -- a multimodal requirement, a previous routing failure,
+or a harness pick under the confidence floor -- which also overrides the quota
+strategy. Decisions land in `data/orchestration_telemetry.jsonl` and in the
+Status view's "Persona orchestration" panel: mode and strategy controls, Copilot
+auth state, provider health, and the recent routing decisions.
+
+Cloud reasoning uses the official `github-copilot-sdk`; authentication is the
+SDK's own (`copilot auth login`, or its `GH_TOKEN`-family env vars) and this repo
+stores no token. Unauthenticated is a valid configuration: escalations fall back
+to local and are recorded as fallbacks.
+
+## Model endpoints (local and cloud)
+
+`llm_endpoint.py` decides where each of the three model calls goes. The persona
+(`BRAIN`), the intent classifier (`INTENT`), and the orchestrator's own reasoning
+(`ORCHESTRATION`) each resolve their own chain: the configured cloud endpoint
+first, then the local Ollama one, which is always last.
+
+A cloud endpoint counts as configured only when base URL, key, and model are all
+present -- a half-configured one would fall back on every turn, which is slower
+than never trying. Nothing is provider-specific: any endpoint that speaks
+`/chat/completions` works.
+
+The request shapes are not interchangeable, so each caller rebuilds rather than
+forwards. Ollama's `keep_alive`, `options`, `think`, and `format`-as-JSON-schema
+are its own extensions and a hosted API rejects unknown fields; the classifier's
+schema travels as `response_format` instead. The persona falls back only *before*
+its first token -- once the user is hearing a reply, switching models mid-sentence
+would talk over itself.
+
 ## What is solid
 
 - Voice and typed input use the same session and routing path.
