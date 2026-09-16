@@ -165,3 +165,32 @@ def test_an_explicit_endpoint_still_wins_over_openrouter(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(cfg)
+
+
+def test_a_cloud_request_always_caps_its_own_cost(monkeypatch, cloud):
+    """Uncapped replies are refused outright, not merely billed generously.
+
+    Providers reserve a request's maximum possible cost before running it, so
+    omitting max_tokens asks the balance to cover the model running to its full
+    output length. OpenRouter answers "This request requires more credits, or
+    fewer max_tokens" and the turn silently falls back to the local model --
+    losing the speed the cloud was configured for.
+    """
+    from remote_agent_protocol.brain import BrainSession
+    from remote_agent_protocol.personas import PERSONAS
+
+    session = BrainSession.__new__(BrainSession)
+    session._persona = PERSONAS[0]
+    session._messages = []
+    session._system_instruction = lambda: "system"
+
+    cloud_ep = llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN)
+    payload = session._ollama_payload(stream=True, endpoint=cloud_ep)
+    assert payload["max_tokens"] == cfg.CLOUD_LLM_MAX_TOKENS
+    # Ollama's own extensions must not travel to a hosted API.
+    assert "keep_alive" not in payload
+
+    local_ep = llm_endpoint.local_endpoint(llm_endpoint.BRAIN)
+    local_payload = session._ollama_payload(stream=True, endpoint=local_ep)
+    assert "max_tokens" not in local_payload, "the local model is not billed per token"
+    assert local_payload["keep_alive"] == cfg.LLM_KEEP_ALIVE

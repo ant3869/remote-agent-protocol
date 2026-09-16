@@ -304,6 +304,14 @@ CLOUD_ORCHESTRATION_MODEL = _env("CLOUD_ORCHESTRATION_MODEL", "")
 # A cloud call still unanswered by now is slower than the local model it would
 # have fallen back to.
 CLOUD_LLM_TIMEOUT_SECS = float(_env("CLOUD_LLM_TIMEOUT_SECS", "20"))
+# Hosted providers reserve the *maximum possible* cost of a request before
+# running it, so an uncapped reply is charged against the balance as though it
+# would run to the model's full output length. On OpenRouter that comes back as
+# "This request requires more credits, or fewer max_tokens" and the turn falls
+# back to the local model -- the opposite of why the cloud is here. A spoken
+# reply is a sentence or two, so this is generous for the persona while keeping
+# every reservation small.
+CLOUD_LLM_MAX_TOKENS = int(_env("CLOUD_LLM_MAX_TOKENS", "512"))
 
 # ---------------------------------------------------------------------------
 # Personality & voice -- now driven by PERSONAS

@@ -645,6 +645,11 @@ class BrainSession:
         if endpoint.cloud:
             # keep_alive and reasoning_effort are Ollama's own extensions; a
             # hosted API rejects unknown fields rather than ignoring them.
+            # max_tokens is not a style choice here: providers reserve a
+            # request's maximum possible cost up front, so an uncapped reply is
+            # refused outright unless the balance could cover the model running
+            # to its full output length.
+            payload["max_tokens"] = cfg.CLOUD_LLM_MAX_TOKENS
             return payload
         payload["keep_alive"] = cfg.LLM_KEEP_ALIVE
         if cfg.LLM_REASONING_EFFORT is not None:
