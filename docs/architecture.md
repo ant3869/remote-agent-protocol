@@ -60,6 +60,10 @@ Brain mode:
   local classifier only for otherwise-ambiguous requests. Vague references to
   a named-but-forgotten package/skill/tool are caught deterministically and
   sent verbatim as identify-then-install tasks, held for confirmation.
+  Corrections and references to earlier conversation bypass the stateless
+  classifier and reach the persona with history. Diagnosis routing distinguishes
+  the named subject of a fault from an explicitly chosen executor, including
+  delegation markers in both full and brain modes.
 - `session_processors.py` contains the microphone gate, manual composer STT
   draft tap, role-scoped transcript observers, delegation processor, and guard
   against replies that claim agent work without actually dispatching it.
@@ -83,6 +87,9 @@ Brain mode:
   task carries a scope preamble, and the host repo's working tree is diffed
   before/after each run so an unexpected edit to Jess's own source is flagged
   and announced.
+  Immediate provider-failure detection requires an error banner or a top-level
+  JSON error; narrative and progress text mentioning quota failures do not abort
+  an investigation.
 - `lifecycle_ws.py` projects the existing normalized `agent_job` events into a
   versioned, allowlisted JSON stream at `ws://127.0.0.1:8765/events`. Each
   client has a bounded queue; slow clients are disconnected instead of
@@ -120,7 +127,8 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
 
 - `brain.py` is the text-only coordinator: routing, short-term memory, the
   confirmation gate, the agent bridge, and Ollama generation, with no mic, STT,
-  TTS, or speakers.
+  TTS, or speakers. Control turns retain original user wording alongside the
+  application's dispatch/status context for future follow-ups.
 - `brain_adapter.py` presents that coordinator through the `VoiceSession`
   control surface the GUI expects, so the same web control center drives both
   modes. Controls with no local audio path degrade explicitly rather than

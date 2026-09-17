@@ -11,8 +11,10 @@ paths, not a toll on every turn:
 
 1. **explicit** -- "tell code puppy to X" (``voice_commands.parse_delegation``).
    Deterministic, free, always wins.
-2. **gate** -- pure acknowledgments ("thank you", "okay cool") are chat by
-   construction (``voice_commands.is_smalltalk``); no classifier call.
+2. **gate** -- pure acknowledgments ("thank you", "okay cool") and questions
+   about the host clock are chat by construction; no classifier call.
+   Corrections and references to prior results use a **context** gate to reach
+   the persona with history, which can answer or request a contextual delegation.
 3. **noise** -- likely STT/VAD hallucination: a known stock phrase these
    models recite out of silence or room noise, or filler-stripping leaving no
    words at all (``voice_commands.looks_like_stt_noise``). Never a real
@@ -393,6 +395,7 @@ _ANAPHORA_WORDS = frozenset(
 _FOLLOW_UP_RE = re.compile(
     # Opening a turn by contradicting the last one, or pointing back at it.
     r"^(?:no|nope|nah|wait|actually|hold on)\b"
+    r"|^(?:i'?m saying|i mean|what i meant)\b"
     r"|^(?:that'?s|thats|it|that)\s+(?:not|isn'?t|wasn'?t|didn'?t|doesn'?t)\b"
     r"|\b(?:we|you)\s+(?:were|was)\s+(?:just\s+)?talking about\b"
     r"|\byou\s+(?:just\s+)?(?:said|told|showed|gave|mentioned|found)\b"
@@ -623,6 +626,7 @@ def _is_about_repairing(text: str, agent: str, aliases: dict[str, str] | None = 
             rf"\bwhy\b[^.]{{0,40}}\b{name}\b[^.]{{0,40}}\b(?:not|isn't|is not|won't|{_BROKEN_STATE})\b",
             rf"\b{name}\s+(?:is|isn't|is not|keeps|kept|won't)\s+(?:not\s+)?{_BROKEN_STATE}\b",
             rf"\bfind out why\b[^.]{{0,40}}\b{name}\b",
+            rf"\bwhat(?:'s| is)\s+(?:wrong|the (?:problem|issue))\s+with\s+{name}\b",
         )
         if any(re.search(pattern, lowered) for pattern in patterns):
             return True
@@ -634,6 +638,19 @@ def _healthy_alternative(exclude: str, default_backend: str) -> str | None:
     if default_backend and default_backend != exclude and default_backend in cfg.AGENT_BACKENDS:
         return default_backend
     return next((name for name in cfg.AGENT_BACKENDS if name != exclude), None)
+
+
+def select_marker_backend(text: str, task: str, default_backend: str) -> str:
+    """Resolve the executor of a context-aware delegation without selecting its patient."""
+    explicit = voice_commands.parse_delegation(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)
+    if explicit is not None:
+        return explicit[0]
+    named = voice_commands.named_backend(
+        f"{text} {task}", cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
+    )
+    if named and _is_about_repairing(f"{text} {task}", named):
+        return _healthy_alternative(named, default_backend) or default_backend
+    return named or default_backend
 
 
 def _select_backend(task: str, default_backend: str, category: str) -> str:
@@ -719,6 +736,10 @@ class IntentRouter:
                     text, endpoint=cloud, timeout_secs=cfg.CLOUD_LLM_TIMEOUT_SECS
                 )
             except Exception as exc:
+                if llm_endpoint.cloud_only_enabled(llm_endpoint.INTENT):
+                    raise RuntimeError(
+                        f"{cloud.label} classifier failed in cloud-only mode"
+                    ) from exc
                 logger.warning(f"{cloud.label} classifier failed ({exc}); using the local one")
         return await classify_with_ollama(
             text,
@@ -729,6 +750,12 @@ class IntentRouter:
 
     @staticmethod
     async def _default_warm_classify(text: str) -> dict:
+        if llm_endpoint.cloud_only_enabled(llm_endpoint.INTENT):
+            cloud = llm_endpoint.cloud_endpoint(llm_endpoint.INTENT)
+            assert cloud is not None
+            return await classify_with_cloud(
+                text, endpoint=cloud, timeout_secs=cfg.CLOUD_LLM_TIMEOUT_SECS
+            )
         return await classify_with_ollama(
             text,
             host=cfg.OLLAMA_HOST,
@@ -817,7 +844,17 @@ class IntentRouter:
                 risk=_classify_risk(backend, task, grounded=True, confident=True),
             )
 
-        # Tier 2: pure acknowledgments are chat by construction -- the most
+        # Tier 2: host-only replies never require a tool agent or classifier.
+        # The persona receives the local clock in its runtime context.
+        if voice_commands.is_local_runtime_time_query(text):
+            return RoutingDecision(
+                text=text,
+                confidence=1.0,
+                reason="host can answer the current local time or date",
+                source="gate",
+            )
+
+        # Pure acknowledgments are also chat by construction -- the most
         # common voice turns ("thank you", "okay") never pay for a classifier.
         if voice_commands.is_smalltalk(text):
             return RoutingDecision(
@@ -833,6 +870,14 @@ class IntentRouter:
                 confidence=1.0,
                 reason="asks the persona to respond in a particular style",
                 source="gate",
+            )
+
+        if _refers_to_prior_turn(text):
+            return RoutingDecision(
+                text=text,
+                confidence=1.0,
+                reason="follow-up needs conversation context and existing results",
+                source="context",
             )
 
         # Tier 3: likely STT/VAD noise -- a stock hallucinated phrase these
@@ -886,16 +931,6 @@ class IntentRouter:
         # Tier 5: the keyword net -- free and high-precision; when it fires,
         # dispatch without spending the classifier budget.
         task = voice_commands.parse_implicit_task(text) if self._auto_delegate else None
-        if task is not None and _refers_to_prior_turn(text):
-            # Except when the turn is about work already done. The net matches
-            # on nouns ("list", "file path", "install") that recur through a
-            # working session, so a follow-up like "no it didnt, wheres the
-            # file path to the list" matched and shipped verbatim as a new job
-            # -- an agent receiving that has no idea which list, and answers
-            # about itself (jess_runtime.log 2026-09-15T18:39). Hand it to the
-            # classifier instead, which writes a real task or calls it chat.
-            logger.info(f"Routing[heuristic] deferring follow-up to the classifier: {text!r}")
-            task = None
         if task is not None:
             category = "web_research" if _PRODUCT_RESEARCH_RE.search(task) else "other_action"
             agent = _select_backend(task, default_backend, category)

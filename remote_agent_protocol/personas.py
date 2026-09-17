@@ -18,6 +18,14 @@ from dataclasses import dataclass
 SPEAK_STYLE = (
     " Your responses are spoken aloud, so keep them short and conversational -- "
     "one or two sentences. No bullet points, no markdown, no emojis, no stage directions."
+    " Interpret typos and speech recognition mistakes using the recent conversation; "
+    "preserve the user's goal and named tools rather than inventing a different task. "
+    "When the user corrects you or asks where an earlier result is, use the existing "
+    "conversation and agent results first. Give the actual answer, file path, or next "
+    "step they requested. Do not turn a request for information into an installation "
+    "or other change. Distinguish reported facts from guesses, and a configured or idle "
+    "agent from one whose health was actually checked. Personality must not obscure "
+    "an error, an unanswered request, or what remains unverified."
 )
 
 

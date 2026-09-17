@@ -13,7 +13,10 @@ that speaks ``/chat/completions`` and supply a key.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from remote_agent_protocol import config as cfg
 
@@ -63,7 +66,7 @@ def _cloud_model(kind: str) -> str:
     return (per_kind.get(kind) or cfg.CLOUD_LLM_MODEL or "").strip()
 
 
-def cloud_endpoint(kind: str) -> Endpoint | None:
+def cloud_endpoint(kind: str, model: str | None = None) -> Endpoint | None:
     """The cloud endpoint for one caller, or None when it is not configured.
 
     Base URL, key, and model must all be present. A half-configured cloud is
@@ -72,10 +75,10 @@ def cloud_endpoint(kind: str) -> Endpoint | None:
     """
     base = (cfg.CLOUD_LLM_BASE_URL or "").strip()
     key = (cfg.CLOUD_LLM_API_KEY or "").strip()
-    model = _cloud_model(kind)
-    if not (base and key and model):
+    selected_model = (model or _cloud_model(kind)).strip()
+    if not (base and key and selected_model):
         return None
-    return Endpoint(base_url=base, model=model, api_key=key, cloud=True)
+    return Endpoint(base_url=base, model=selected_model, api_key=key, cloud=True)
 
 
 def local_endpoint(kind: str, model: str | None = None) -> Endpoint:
@@ -96,18 +99,57 @@ def local_endpoint(kind: str, model: str | None = None) -> Endpoint:
     )
 
 
-def chain(kind: str, *, local_model: str | None = None) -> tuple[Endpoint, ...]:
-    """Endpoints to try in order: cloud first when configured, then local.
+def chain(
+    kind: str, *, local_model: str | None = None, cloud_model: str | None = None
+) -> tuple[Endpoint, ...]:
+    """Endpoints to try in order, honoring an explicit cloud-only policy.
 
     The local endpoint is always last, so an unreachable cloud, a rejected key,
     or a provider outage degrades to the machine's own model instead of to
     silence.
     """
-    cloud = cloud_endpoint(kind)
+    cloud = cloud_endpoint(kind, cloud_model)
     local = local_endpoint(kind, local_model)
-    return (cloud, local) if cloud is not None else (local,)
+    if cloud is None:
+        return (local,)
+    return (cloud, local) if cfg.CLOUD_LLM_LOCAL_FALLBACK else (cloud,)
 
 
 def cloud_is_configured() -> bool:
     """Whether any caller would reach a cloud endpoint at all."""
     return any(cloud_endpoint(kind) is not None for kind in (BRAIN, INTENT, ORCHESTRATION))
+
+
+def cloud_only_enabled(kind: str = BRAIN) -> bool:
+    """Whether ``kind`` is configured to run without a local model fallback."""
+    return not cfg.CLOUD_LLM_LOCAL_FALLBACK and cloud_endpoint(kind) is not None
+
+
+def configured_cloud_models() -> list[str]:
+    """Configured cloud model ids, in display order and without duplicates."""
+    values = [cfg.CLOUD_LLM_MODEL, *cfg.CLOUD_LLM_MODEL_CHOICES]
+    values.extend([cfg.CLOUD_INTENT_MODEL, cfg.CLOUD_ORCHESTRATION_MODEL])
+    return list(dict.fromkeys(value.strip() for value in values if value and value.strip()))
+
+
+def fetch_cloud_models(timeout_secs: float = 5.0) -> list[str]:
+    """Read the active OpenAI-compatible provider's public model catalog.
+
+    The call is read-only and deliberately best-effort. A configured model is
+    retained by the UI when a provider omits ``/models`` or is temporarily
+    unreachable.
+    """
+    endpoint = cloud_endpoint(BRAIN)
+    if endpoint is None:
+        return []
+    request = Request(
+        f"{endpoint.base_url.rstrip('/')}/models", headers=endpoint.headers, method="GET"
+    )
+    try:
+        with urlopen(request, timeout=timeout_secs) as response:  # noqa: S310 - configured endpoint
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, ValueError):
+        return []
+    rows = payload.get("data", []) if isinstance(payload, dict) else []
+    ids = [row.get("id", "").strip() for row in rows if isinstance(row, dict)]
+    return sorted({model for model in ids if model})

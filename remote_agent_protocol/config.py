@@ -273,9 +273,9 @@ OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
 # provider. Set the base URL, a key, and at least one model to switch on.
 #
 # All of these are OPTIONAL and default to empty, which leaves this machine
-# behaving exactly as it did. Whatever is configured is tried first and falls
-# back to the local model on any failure (see llm_endpoint.chain), so an
-# expired key or a provider outage costs one slow turn, not a broken app.
+# behaving exactly as it did. Cloud-first with a local fallback remains the
+# compatibility default. Set CLOUD_LLM_LOCAL_FALLBACK=false for a genuinely
+# cloud-only assistant: no local chat or router model is preloaded or used.
 # ---------------------------------------------------------------------------
 # OpenRouter is the path of least resistance -- one key reaches every provider --
 # so setting OPENROUTER_API_KEY alone is enough and the rest default around it.
@@ -301,6 +301,16 @@ CLOUD_LLM_MODEL = _env("CLOUD_LLM_MODEL", "") or (
 # prompts, so a small fast model suits them; both default to the persona's.
 CLOUD_INTENT_MODEL = _env("CLOUD_INTENT_MODEL", "")
 CLOUD_ORCHESTRATION_MODEL = _env("CLOUD_ORCHESTRATION_MODEL", "")
+# Cloud-first is resilient by default. Operators who have intentionally moved
+# this machine off local inference can opt out of the fallback completely;
+# llm_endpoint then exposes only cloud endpoints and startup skips Ollama
+# warmups, avoiding a silent multi-GB VRAM reservation.
+CLOUD_LLM_LOCAL_FALLBACK = _env_bool("CLOUD_LLM_LOCAL_FALLBACK", True)
+# Optional comma-separated model ids to show before the provider catalog has
+# finished loading. The active model is always included automatically.
+CLOUD_LLM_MODEL_CHOICES = tuple(
+    item.strip() for item in _env("CLOUD_LLM_MODEL_CHOICES", "").split(",") if item.strip()
+)
 # A cloud call still unanswered by now is slower than the local model it would
 # have fallen back to.
 CLOUD_LLM_TIMEOUT_SECS = float(_env("CLOUD_LLM_TIMEOUT_SECS", "20"))
@@ -621,6 +631,11 @@ S2S_BRIDGE_PORT = int(_env("S2S_BRIDGE_PORT", "8788"))
 S2S_BRIDGE_API_KEY = _env("S2S_BRIDGE_API_KEY", "local")
 S2S_BRIDGE_MODEL = _env("S2S_BRIDGE_MODEL", "remote-agent-protocol")
 S2S_BRIDGE_STREAMING = _env_bool("S2S_BRIDGE_STREAMING", True)
+# The external RAP launcher used to require 450 ms of active speech to start a
+# turn. A real post-wake command with 448 ms active speech was dropped, so keep
+# the frontend's recommended 384/192 ms new-turn/continuation thresholds.
+S2S_VAD_MIN_SPEECH_MS = int(_env("S2S_VAD_MIN_SPEECH_MS", "384"))
+S2S_VAD_MIN_SPEECH_CONTINUATION_MS = int(_env("S2S_VAD_MIN_SPEECH_CONTINUATION_MS", "192"))
 # How long the frontend waits before deciding a turn is over. Its own launcher
 # ships 900ms, which ends a turn on the pause inside "what's the capital of,
 # uh, France" -- the tail then arrives as a separate turn, or as a fragment the

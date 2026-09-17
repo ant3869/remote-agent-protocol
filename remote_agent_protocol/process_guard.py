@@ -28,11 +28,14 @@ app currently ships on. A no-op elsewhere rather than a half-working guess.
 """
 
 import ctypes
+import json
 import os
 import subprocess
 import sys
 import time
+import urllib.request
 from collections.abc import Callable
+from ctypes import wintypes
 from pathlib import Path
 
 from loguru import logger
@@ -40,6 +43,7 @@ from loguru import logger
 from remote_agent_protocol import config as cfg
 
 _LOCK_FILE = cfg.DATA_DIR / "jess.pid"
+_ENDPOINT_FILE = cfg.DATA_DIR / "jess.endpoint.json"
 # Substring that must appear in a candidate PID's command line before we kill
 # it -- guards against PID reuse handing us an unrelated process to murder.
 _IDENTITY_MARKER = "remote_agent_protocol"
@@ -53,6 +57,19 @@ _SYNCHRONIZE = 0x00100000
 # The mutex handle must outlive this function or Windows releases it
 # immediately; kept here so exactly one module-global owns it per process.
 _mutex_handle: int | None = None
+
+if sys.platform == "win32":
+    # HANDLE is pointer-sized; ctypes otherwise assumes a 32-bit integer result.
+    ctypes.windll.kernel32.CreateMutexW.argtypes = [
+        ctypes.c_void_p,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    ]
+    ctypes.windll.kernel32.CreateMutexW.restype = wintypes.HANDLE
+    ctypes.windll.kernel32.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    ctypes.windll.kernel32.OpenMutexW.restype = wintypes.HANDLE
+    ctypes.windll.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    ctypes.windll.kernel32.CloseHandle.restype = wintypes.BOOL
 
 
 def acquire_single_instance_lock(name: str = _MUTEX_NAME) -> bool:
@@ -290,6 +307,40 @@ def write_lock(lock_file: Path = _LOCK_FILE) -> None:
     lock_file.write_text(str(os.getpid()))
 
 
+def write_endpoint(port: int, instance_id: str, path: Path = _ENDPOINT_FILE) -> None:
+    """Publish just enough local state for a second launch to reopen the UI."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"pid": os.getpid(), "port": port, "instance_id": instance_id}),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def existing_instance_url(path: Path = _ENDPOINT_FILE) -> str | None:
+    """Verify the saved endpoint belongs to this launch, even after port/PID reuse."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        port = record["port"]
+        if type(port) is not int or not 0 < port < 65536:
+            return None
+        url = f"http://127.0.0.1:{port}"
+        # Never route a local ownership check through a configured HTTP proxy.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"{url}/api/instance", timeout=2) as response:
+            identity = json.load(response)
+        if (
+            record.get("instance_id")
+            and identity.get("instance_id") == record["instance_id"]
+            and identity.get("pid") == record["pid"]
+        ):
+            return url
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
+
+
 def release_lock(lock_file: Path = _LOCK_FILE) -> None:
     """Clear the lock on a clean shutdown, so the next launch has nothing to close."""
     pid = _read_lock(lock_file)
@@ -299,3 +350,13 @@ def release_lock(lock_file: Path = _LOCK_FILE) -> None:
         lock_file.unlink()
     except FileNotFoundError:
         pass
+    try:
+        record = json.loads(_ENDPOINT_FILE.read_text(encoding="utf-8"))
+        if record.get("pid") == os.getpid():
+            _ENDPOINT_FILE.unlink(missing_ok=True)
+    except (OSError, ValueError, AttributeError):
+        pass
+    global _mutex_handle
+    if _mutex_handle is not None and sys.platform == "win32":
+        ctypes.windll.kernel32.CloseHandle(_mutex_handle)
+        _mutex_handle = None

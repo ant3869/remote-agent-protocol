@@ -204,6 +204,28 @@ class WakeWordGateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([e["state"] for e in events], ["armed", "awake", "armed"])
 
+    async def test_window_expiry_rearms_without_waiting_for_more_audio(self):
+        events: list[dict] = []
+        settings = wake_word.WakeWordSettings(
+            enabled=True, model="hey_jarvis", threshold=0.5, active_window_secs=0.2
+        )
+        gate = wake_word.WakeWordGate(
+            settings,
+            detector_factory=lambda _s: FakeDetector(scores=[0.9]),
+            on_event=events.append,
+        )
+
+        await run_test(
+            gate,
+            frames_to_send=[
+                audio_frame(),  # wake trigger (dropped)
+                SleepFrame(0.5),  # timer should re-arm even without more audio
+            ],
+            expected_down_frames=[],
+        )
+
+        self.assertEqual([e["state"] for e in events], ["armed", "awake", "armed"])
+
     async def test_window_never_lapses_mid_utterance(self):
         settings = wake_word.WakeWordSettings(
             enabled=True, model="hey_jarvis", threshold=0.5, active_window_secs=0.5

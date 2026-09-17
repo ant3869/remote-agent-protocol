@@ -297,6 +297,7 @@ class WakeWordGate(FrameProcessor):
         # Whichever window is currently in effect, so the UI counts down against
         # the one that was actually granted.
         self._window_secs = settings.active_window_secs
+        self._rearm_task: asyncio.Task | None = None
 
     @property
     def awake(self) -> bool:
@@ -357,7 +358,7 @@ class WakeWordGate(FrameProcessor):
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotStoppedSpeakingFrame):
             if self.enabled and not self._bypass:
-                self._open_window()
+                await self._open_window()
             await self.push_frame(frame, direction)
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._user_speaking = False  # safety valve if a VAD stop went missing
@@ -368,7 +369,7 @@ class WakeWordGate(FrameProcessor):
         elif isinstance(frame, UserStoppedSpeakingFrame):
             self._user_speaking = False
             if self.enabled and not self._bypass and self._awake_until:
-                self._open_window()  # each finished turn earns a fresh window
+                await self._open_window()  # each finished turn earns a fresh window
             await self.push_frame(frame, direction)
         elif isinstance(frame, InputAudioRawFrame):
             await self._gate_audio(frame, direction)
@@ -406,6 +407,9 @@ class WakeWordGate(FrameProcessor):
         self.enabled = enabled
         self._awake_until = 0.0
         self._buffer.clear()
+        if self._rearm_task is not None:
+            self._rearm_task.cancel()
+            self._rearm_task = None
         self._emit("armed" if enabled else "inactive")
 
     async def _setup_detector(self) -> None:
@@ -444,10 +448,10 @@ class WakeWordGate(FrameProcessor):
             self._emit("switch_failed", target, score=score, error=str(exc))
             return False
         self._active_target = target
-        self._open_window(target, score=score)
+        await self._open_window(target, score=score)
         return True
 
-    def _open_window(
+    async def _open_window(
         self, target: WakeWordTarget | None = None, *, score: float | None = None
     ) -> None:
         was_awake = self.awake
@@ -465,6 +469,7 @@ class WakeWordGate(FrameProcessor):
         if deadline > self._awake_until:
             self._awake_until = deadline
             self._window_secs = granted
+            await self._schedule_rearm(deadline)
         if not was_awake:
             self._emit(
                 "awake",
@@ -473,12 +478,32 @@ class WakeWordGate(FrameProcessor):
                 score=score,
             )
 
+    async def _schedule_rearm(self, deadline: float) -> None:
+        if self._rearm_task is not None:
+            await self.cancel_task(self._rearm_task)
+        self._rearm_task = self.create_task(self._rearm_after(deadline), "wake-rearm")
+
+    async def _rearm_after(self, deadline: float) -> None:
+        await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+        if not self.enabled or self._bypass or self._user_speaking:
+            return
+        if self._awake_until == deadline and not self.awake:
+            self._awake_until = 0.0
+            self._rearm()
+
     def _rearm(self) -> None:
         self._buffer.clear()
         reset = getattr(self._detector, "reset", None)
         if callable(reset):
             reset()
         self._emit("armed")
+
+    async def cleanup(self):
+        """Cancel the wake-window timer before processor shutdown."""
+        if self._rearm_task is not None:
+            await self.cancel_task(self._rearm_task)
+            self._rearm_task = None
+        await super().cleanup()
 
     def _listen(self, audio: bytes) -> tuple[WakeWordTarget, float] | None:
         """Feed dropped audio to the detector in its native 80 ms chunks."""

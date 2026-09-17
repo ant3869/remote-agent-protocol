@@ -38,6 +38,17 @@ _VERBS = ("ask", "tell", "have", "get", "use", "run", "send", "dispatch")
 
 _TRAILING_PUNCTUATION = ".!?,;: "
 
+# The host supplies its local clock in the persona context on every turn, so
+# asking for it does not require a slow or failure-prone tool-agent round trip.
+# Keep this deliberately anchored: "what time does the store open?" is a
+# lookup, while "what time is it?" is a question about the host clock.
+_LOCAL_RUNTIME_TIME_QUERY_RE = re.compile(
+    r"(?:what(?:'s| is)?|tell me|(?:can|could|would|will) you tell me|do you know|give me)\s+"
+    r"(?:(?:what\s+)?(?:the\s+)?)?"
+    r"(?:(?:current|local|today'?s)\s+)?(?:time|date|day)"
+    r"(?:\s+(?:is\s+it|it\s+is))?(?:\s+right\s+now|\s+today)?"
+)
+
 # Implicit delegation: no agent named, but the request is clearly "go DO a
 # thing in the real world", not chat. Two tiers keep false positives out:
 #   * standalone verbs -- inherently imply web/system action, no keyword needed
@@ -248,6 +259,17 @@ def _strip_fillers(lowered: str) -> str:
             lowered = stripped.lstrip(", ")
             changed = True
     return lowered
+
+
+def is_local_runtime_time_query(text: str) -> bool:
+    """True when the user asks for the host's current time, date, or day.
+
+    The pattern is intentionally a full utterance match, so questions about a
+    shop's hours, travel time, or an event date continue to use live lookup.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    lowered = re.sub(r"^please\s+", "", lowered)
+    return _LOCAL_RUNTIME_TIME_QUERY_RE.fullmatch(lowered) is not None
 
 
 def named_backend(text: str, backends: dict, aliases: dict[str, str]) -> str | None:
@@ -534,6 +556,20 @@ def parse_agent_status(text: str, aliases: dict[str, str]) -> tuple[str | None] 
     being treated as brand-new tasks, spawning a job per polite follow-up.
     """
     lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    # A direct question about a named agent's work is a local status read, not
+    # a request to send that agent more work. Keep it outside the broader
+    # status phrase gate so natural wording such as "What is Hermes working
+    # on?" cannot fall through to semantic delegation.
+    for alias in sorted(aliases, key=len, reverse=True):
+        name = re.escape(alias)
+        if re.fullmatch(
+            rf"(?:what(?:'s| is)?|tell me)\s+(?:the\s+)?{name}\s+"
+            rf"(?:currently\s+)?working\s+on",
+            lowered,
+        ):
+            return (aliases[alias],)
+    if re.fullmatch(r"how\s+far\s+along\s+is\s+it", lowered):
+        return (None,)
     if not _STATUS_PHRASES.search(lowered):
         return None
     agent = next(
@@ -547,6 +583,20 @@ def parse_agent_status(text: str, aliases: dict[str, str]) -> tuple[str | None] 
     if agent is None and not re.search(r"\b(?:agent|job|task)s?\b", lowered):
         return None
     return (agent,)
+
+
+def parse_agent_redirect(text: str, aliases: dict[str, str]) -> str | None:
+    """Return the destination agent for a request to move the active RAP job."""
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    for alias in sorted(aliases, key=len, reverse=True):
+        name = re.escape(alias)
+        if re.fullmatch(
+            rf"(?:redirect|move|transfer)\s+(?:(?:that|this|the\s+current)\s+"
+            rf"(?:task|job|work)|it)\s+(?:over\s+)?to\s+(?:the\s+)?{name}",
+            lowered,
+        ):
+            return aliases[alias]
+    return None
 
 
 def parse_task_correction(text: str) -> str | None:

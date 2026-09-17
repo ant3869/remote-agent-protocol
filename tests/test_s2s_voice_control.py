@@ -22,6 +22,7 @@ from remote_agent_protocol.web_gui import WebVoiceApp
 
 def _adapter(monkeypatch, voice_file):
     monkeypatch.setattr(cfg, "S2S_VOICE_FILE", str(voice_file))
+    monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", True)
     return BrainSessionAdapter(PERSONAS[0])
 
 

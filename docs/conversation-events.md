@@ -6,15 +6,25 @@ updates the same row when generation finishes or playback changes. A persona
 switch does not rename an existing utterance. Harness speech carries its own
 speaker and task; persona relays carry a separate `source_agent` and relationship.
 
-Task cards group progress, tool/step information, agent consultations, and the
-full result. Failed, cancelled, timed-out, and empty successful jobs receive
-distinct labels. Raw output remains in the Agents inspector. Approval cards keep
-the proposed task and resolve in place. Text supports safe links, lists, inline
+Each active harness has a compact, persistent progress row above the composer.
+Its current action updates in place while the most recent explanatory update
+remains visible beneath tool activity. Concurrent jobs retain separate rows;
+each offers inspection and cancellation. Completed jobs show the result directly
+in the transcript, with activity history available on demand. Related persona
+summaries collapse after generation, while active speech remains visible.
+Failed, cancelled, timed-out, and empty successful jobs receive distinct labels.
+Consultation failures retain their actual provider/error cause in both the peer
+mailbox and visible exchange. Raw output remains in the Agents inspector.
+Approval cards keep the proposed task and resolve in place. Text supports safe links, lists, inline
 code, emphasis, fenced code, and copying; it is never inserted as HTML.
 
 Shared `web_app/identity.css` defines user ice blue, persona coral, and harness
 purple across conversation, persona controls, agent rosters, settings, and search.
-Names are bold and message borders reinforce identity; state labels retain their
+`web_app/transcript.css` follows the shared shell styles and supplies explicit
+grid areas, compact rows, restrained identity borders, and header actions.
+User messages are right-aligned compact bubbles; persona and harness output
+remain on the left. Live harness progress stays above the composer.
+Names and message borders reinforce identity; state labels retain their
 separate success/warning/error meaning. `ui-icons.js` supplies local SVG icons for
 navigation and menus using the existing graphite theme. Copy and inspection
 actions show icons with tooltips and accessible names; approval choices remain
@@ -134,6 +144,22 @@ brain text remains visible as **Playback unconfirmed**; RAP does not claim it wa
 spoken. Independent external speech requires the explicit reporting contract
 above. The headless bridge carries `rap` metadata but has no GUI conversation or
 speech-event endpoint.
+
+## Conversation continuity and results
+
+Brain control turns retain the user's original wording alongside clearly labeled
+application context, so later corrections refer to the actual request rather than
+only a rewritten dispatch instruction. Existing saved history is not rewritten.
+Conversational corrections and references to earlier results go to the persona
+with conversation history before a stateless classifier can invent a fresh task.
+Explicit delegation still takes precedence, and the persona may dispatch a
+contextual follow-up through the existing guarded marker path.
+
+Completion narration receives the reported failure detail ahead of partial
+results. An empty successful process exit is described as an unverified outcome,
+not proof that the requested work succeeded. Narration instructions request the
+actual file path or concrete finding when provided, and prohibit invented causes.
+These instructions guide model replies; they do not constitute live model validation.
 
 ## Verification
 

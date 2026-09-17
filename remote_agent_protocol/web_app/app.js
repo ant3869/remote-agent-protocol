@@ -31,7 +31,7 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const conversation = window.RapConversation.createStore();
 const conversationView = window.RapConversation.createView({
-  store: conversation, log: $("chatLog"), newMessages: $("newMessagesBtn"), live: $("conversationLive"),
+  store: conversation, log: $("chatLog"), newMessages: $("newMessagesBtn"), live: $("conversationLive"), activity: $("workingNow"),
   inspect: (jobId) => {
     state.selectedAgentJobId = jobId;
     document.querySelector('[data-view="agents"]')?.click();
@@ -269,7 +269,7 @@ function handleEvent(event) {
     renderChat();
   }
   if (!event.replayed_snapshot && event.conversation_row && conversation.apply(event.conversation_row)) renderChat();
-  if (["transcript", "draft_voice", "turn", "speaking", "wake", "agent_job", "agent_confirm"].includes(event.type)) {
+  if (["transcript", "draft_voice", "turn", "speaking", "wake", "agent_job", "agent_confirm", "agent_control"].includes(event.type)) {
     state.avatar.lastActivityAt = Date.now();
   }
   if (event.type === "transcript" && event.role !== "user") state.avatar.latestAssistantText = event.text || "";
@@ -290,6 +290,8 @@ function handleEvent(event) {
   } else if (event.type === "agent_job") {
     storeAgentEvent(event);
     renderAgentEvent(event);
+  } else if (event.type === "agent_control") {
+    renderAgentControlEvent(event);
   } else if (event.type === "memory") {
     state.memories[event.scope === "semantic" ? "semantic" : "short"] = (event.rows || []).map((row) => normalizeMemoryRow(row, event.scope));
     renderMemory();
@@ -570,7 +572,9 @@ function renderWakeStatus() {
   if (!wake || !$("settingsWake")) return;
   const remaining = wakeRemaining(wake);
   let phase = state.status?.voiceMode === "wake_word" ? wake.phase : "idle";
-  if (phase === "follow_up_window" && remaining <= 0) phase = "returning_to_passive";
+  if (["wake_word_detected", "listening_for_command", "follow_up_window"].includes(phase) && remaining <= 0) {
+    phase = "returning_to_passive";
+  }
   const model = wake.model || "none";
   const path = wake.model_path || "built-in/cache";
   $("settingsWake").textContent = state.status?.voiceMode === "wake_word" ? wakeLabel(phase) : "Disabled";
@@ -686,7 +690,11 @@ function loadPersonaEditor(persona, options = {}) {
   $("personaEditDescription").value = persona.description || "";
   $("personaEditPrompt").value = persona.systemPrompt || "";
   $("personaTone").value = persona.toneStyle || "";
-  fillSelect($("personaEditModel"), [["", "App default"], ...(state.status?.models || []).map((m) => [m, m])], persona.model || "");
+  const localModelRows = (state.status?.localModels || []).map((m) => [m, m]);
+  fillSelect($("personaEditModel"), [["", "App default"], ...localModelRows], persona.model || "");
+  const cloudGroup = $("personaCloudModelGroup");
+  if (cloudGroup) cloudGroup.hidden = !persona.cloudOnly;
+  if ($("personaCloudModel")) $("personaCloudModel").textContent = persona.cloudModel || persona.effectiveModel || "--";
   fillSelect($("personaEditVoice"), (state.status?.voices || []).map((v) => [v.value, v.label]), persona.voice);
   fillSelect($("personaEditVoiceBackend"), (state.status?.tts?.providers || []).map((p) => [p.id, p.label]), persona.voiceBackend || "kokoro");
   fillSelect($("personaEditVoiceModel"), [["", "Provider default"], ...coquiModelRows()], persona.voiceModel || "");
@@ -730,7 +738,9 @@ function renderPersonaPreview() {
   });
   $("personaPreviewName").textContent = payload.name || "--";
   $("personaPreviewDescription").textContent = payload.description || "No description set.";
-  $("personaPreviewModel").textContent = payload.model || state.status?.model || "App default";
+  $("personaPreviewModel").textContent = state.status?.modelRuntime?.cloudOnly
+    ? (state.status?.model || "Cloud default")
+    : (payload.model || state.status?.model || "App default");
   $("personaPreviewVoice").textContent = payload.voiceBackend === "coqui"
     ? `Coqui · ${payload.coquiSpeaker || "auto"}`
     : (payload.voice || "--");
@@ -799,8 +809,9 @@ function renderAgents(s) {
   strip.innerHTML = "";
   s.agentBackends.forEach((backend) => {
     const job = s.agentStates?.[backend];
+    const control = s.agentControl?.[backend]?.snapshot?.observation;
     const active = agentIsActive(job);
-    const detail = active ? (job.action || job.state || job.status) : "idle";
+    const detail = active ? (job.action || job.state || job.status) : (control ? `${control.presence} / ${control.health}` : "unknown");
     const chip = document.createElement("article");
     chip.className = `agent-chip${active ? " active" : ""}`;
     chip.innerHTML = `<strong>${escapeHtml(backend)}</strong><span>${escapeHtml(s.agentMachines[backend] || "local")} / ${escapeHtml(detail)}</span>`;
@@ -816,6 +827,16 @@ function renderAgentEvent(event) {
     const result = event.result || event.summary || "No answer returned.";
     addMessage("agent", event.agent || "Agent", result);
   }
+}
+
+function renderAgentControlEvent(event) {
+  const action = event.event || "status update";
+  const detail = event.detail || action.replaceAll("_", " ");
+  if (["control_probe_started", "control_probe_succeeded", "control_probe_failed"].includes(action)) {
+    addMessage("agent", event.agent || "Agent control", detail);
+  }
+  renderAgents(state.status || { agentBackends: [], agentStates: {} });
+  renderAgentsPage();
 }
 
 function storeAgentEvent(event) {
@@ -926,8 +947,13 @@ function renderAgentRoster() {
   roster.innerHTML = "";
   state.status.agentBackends.forEach((backend) => {
     const live = Object.values(state.agentJobs).find((job) => job.agent === backend && agentIsActive(job));
-    const status = live?.status || "idle";
-    const detail = live ? compactText(live.action || live.state || live.task, "Working") : (state.status.agentMachines?.[backend] || "local");
+    const control = state.status.agentControl?.[backend]?.snapshot?.observation;
+    const status = live?.status || control?.activity || "unknown";
+    const detail = live
+      ? compactText(live.action || live.state || live.task, "Working")
+      : (control
+        ? `${control.presence} · ${control.health} · ${control.machine || "local"}`
+        : (state.status.agentMachines?.[backend] || "local"));
     const row = document.createElement("article");
     row.className = `agent-roster-row ${status}`;
     const label = backend === state.status.toolUser ? `${backend} · Default` : backend;
@@ -1086,10 +1112,14 @@ function renderConfirm() {
 }
 
 function renderStatusDashboard(s) {
+  const cloudOnly = Boolean(s.modelRuntime?.cloudOnly);
+  const inferenceService = cloudOnly
+    ? ["Cloud LLM", `${s.model || "--"} · cloud-only`, "success", "Hosted conversation model"]
+    : ["Ollama", s.health?.label || "checking", s.health?.ok ? "success" : "error", "Local inference"];
   const coreServices = [
     ["Session", s.session, s.session === "ready" ? "success" : "warning", "Runtime entry point"],
     ["Voice input", labelMode(s.voiceMode), "info", "Capture and wake routing"],
-    ["Ollama", s.health?.label || "checking", s.health?.ok ? "success" : "error", "Local inference"],
+    inferenceService,
     ["TTS", s.ttsHealth?.label || "checking", s.ttsHealth?.ok ? "success" : "error", "Speech synthesis"],
     ["Memory", s.semanticMemoryEnabled ? "Semantic enabled" : "Short term only", s.memoryEnabled ? "success" : "warning", "Recall and persistence"],
   ];
@@ -1106,7 +1136,7 @@ function renderStatusDashboard(s) {
   }
   const incidents = coreServices.filter(([, , tone]) => tone === "error" || tone === "warning");
   const serviceNodes = coreServices.map(([label, value, tone, role]) => (
-    `<article class="status-service-node"><span class="status-icon">${window.RapIcons.svg(({ Session: "power", "Voice input": "mic", Ollama: "cpu", TTS: "speaker", Memory: "memory" })[label])}</span><div><small>${escapeHtml(role)}</small><strong>${escapeHtml(label)}</strong><p>${escapeHtml(value)}</p></div><b class="status-${tone}">${tone}</b></article>`
+    `<article class="status-service-node"><span class="status-icon">${window.RapIcons.svg(({ Session: "power", "Voice input": "mic", Ollama: "cpu", "Cloud LLM": "cloud", TTS: "speaker", Memory: "memory" })[label])}</span><div><small>${escapeHtml(role)}</small><strong>${escapeHtml(label)}</strong><p>${escapeHtml(value)}</p></div><b class="status-${tone}">${tone}</b></article>`
   )).join("");
   const resourceCards = resources.map(([label, value, tone]) => (
     `<article${label === "Default agent" ? ' data-actor="harness"' : ""}><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "--")}</strong><i class="status-${tone}">${tone}</i></article>`
@@ -1136,11 +1166,11 @@ const QUOTA_STRATEGIES = ["economy", "balanced", "performance", "cloud_preferred
 
 function orchestrationPanelHtml(o) {
   if (!o) {
-    return '<section class="status-resource-stack" id="orchestrationPanel"><header>Persona orchestration</header><p class="muted">Loading...</p></section>';
+    return '<section class="status-resource-stack" id="orchestrationPanel"><header>Delegation orchestration</header><p class="muted">Loading...</p></section>';
   }
   if (o.unavailable) {
     return `<section class="status-resource-stack" id="orchestrationPanel">
-      <header>Persona orchestration</header>
+      <header>Delegation orchestration</header>
       <article>
         <span>Orchestration status</span>
         <strong class="status-error">unavailable</strong>
@@ -1185,16 +1215,17 @@ function orchestrationPanelHtml(o) {
   );
   return `
     <section class="status-resource-stack" id="orchestrationPanel">
-      <header>Persona orchestration</header>
+      <header>Delegation orchestration</header>
       <article>
-        <span>Mode</span>
+        <span>Delegation route</span>
         <strong>${escapeHtml(o.mode || "--")}</strong>
       </article>
       <div class="orchestration-modes">${modeButtons}</div>
       <article>
-        <span>Strategy</span>
+        <span>Quota strategy</span>
         <select id="orchQuotaSelect">${quotaOptions}</select>
       </article>
+      <p class="muted">These controls route background harness decisions through Copilot. They do not select the assistant's OpenRouter conversation model.</p>
       <article>
         <span>Copilot (${escapeHtml(o.cloud_provider || "copilot")})</span>
         <strong>${escapeHtml(authLabel)}</strong>
@@ -1462,7 +1493,6 @@ async function sendMessage() {
 function delegateMessage() {
   const payload = sendPayload();
   if (!payload.prompt.trim() && !payload.notes.trim() && !payload.voiceDraft.trim() && !payload.attachments.length) return;
-  addMessage("user", `You -> ${state.status?.toolUser || "agent"}`, payload.prompt || "Shared context");
   post("delegate", payload);
   clearComposer();
 }

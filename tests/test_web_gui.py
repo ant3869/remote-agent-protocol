@@ -29,6 +29,7 @@ def default_full_mode(monkeypatch):
     override this with their own monkeypatch.
     """
     monkeypatch.setattr(cfg, "RAP_MODE", "full")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", True)
 
 
 def test_web_shell_uses_operational_graphite_design_tokens():
@@ -42,6 +43,17 @@ def test_web_shell_uses_operational_graphite_design_tokens():
     assert "--accent-agent: #a78bfa" in css
     assert "--accent-action: #60a5fa" in css
     assert "--accent-delegate: #fb923c" in css
+
+
+def test_status_and_persona_copy_distinguish_cloud_chat_from_delegation_routing():
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+
+    assert "Active cloud model" in html
+    assert "Local fallback model" in html
+    assert "Delegation orchestration" in script
+    assert "Quota strategy" in script
+    assert "do not select the assistant's OpenRouter conversation model" in script
 
 
 def test_web_shell_restores_chat_and_subtle_context_drawer():
@@ -216,14 +228,20 @@ def test_direct_web_launcher_releases_lock_after_failure(monkeypatch):
     assert calls == ["lock", "close", "write", "run", "release"]
 
 
-def test_direct_web_launcher_refuses_a_second_instance(monkeypatch):
+def test_direct_web_launcher_reopens_a_healthy_existing_instance(monkeypatch):
     calls = []
 
     monkeypatch.setattr(web_gui.process_guard, "acquire_single_instance_lock", lambda: False)
     monkeypatch.setattr(
+        web_gui.process_guard,
+        "existing_instance_url",
+        lambda: "http://127.0.0.1:12345",
+    )
+    monkeypatch.setattr(
         web_gui.process_guard, "close_previous_instance", lambda: calls.append("close")
     )
     monkeypatch.setattr(web_gui.process_guard, "write_lock", lambda: calls.append("write"))
+    monkeypatch.setattr(web_gui.webbrowser, "open", lambda url: calls.append(("open", url)))
 
     class FakeApp:
         def run(self):
@@ -231,15 +249,10 @@ def test_direct_web_launcher_refuses_a_second_instance(monkeypatch):
 
     monkeypatch.setattr(web_gui, "WebVoiceApp", FakeApp)
 
-    try:
-        web_gui.run()
-    except SystemExit as exc:
-        assert exc.code == 1
-    else:
-        raise AssertionError("expected SystemExit")
+    web_gui.run()
 
-    # A live sibling's PID must be left alone -- close/write/run never happen.
-    assert calls == []
+    # A live sibling's PID must be left alone; reopen its authenticated UI instead.
+    assert calls == [("open", "http://127.0.0.1:12345")]
 
 
 def _post_action(port, action, token=None, payload=None):
@@ -436,6 +449,21 @@ def test_web_shell_uses_backend_transcript_as_single_message_source():
 
     assert 'addMessage("user"' not in send_body
     assert "if (state.sending) return" in send_body
+    delegate_body = script.split("function delegateMessage()", 1)[1].split(
+        "function ttsSettingsPayload", 1
+    )[0]
+    assert 'addMessage("user"' not in delegate_body
+
+
+def test_web_shell_reserves_a_persistent_live_harness_area():
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+    script = (WEB_APP / "conversation.js").read_text(encoding="utf-8")
+
+    assert 'id="workingNow"' in html
+    assert 'aria-label="Live harness activity"' in html
+    assert "/transcript.css" in html
+    assert "renderActivity(activeJobs)" in script
+    assert "return terminal.has(row.status);" in script
 
 
 def test_agent_lifecycle_is_exposed_in_status_payload():
@@ -922,6 +950,26 @@ def test_model_and_voice_actions_persist_app_defaults(monkeypatch, tmp_path):
     assert voice_result["ok"] is True
     assert loaded.model == "gemma-test"
     assert loaded.voice == "af_sky"
+
+
+def test_cloud_only_catalog_exposes_cloud_models_and_hides_them_from_local_fallbacks(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(cfg, "APP_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "https://example.test/v1")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "sk-test")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL", "provider/chat-model")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL_CHOICES", ("provider/fast-model",))
+    monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", False)
+
+    app = WebVoiceApp()
+    catalogs = app._catalogs_payload()
+    persona = app._persona_payload(app._persona)
+
+    assert catalogs["models"] == ["provider/chat-model", "provider/fast-model"]
+    assert "provider/chat-model" not in catalogs["localModels"]
+    assert persona["cloudOnly"] is True
+    assert persona["cloudModel"] == "provider/chat-model"
 
 
 def test_tts_action_persists_coqui_defaults(monkeypatch, tmp_path):

@@ -908,12 +908,14 @@ def test_the_launcher_tears_the_stack_down_when_its_window_closes(monkeypatch, t
     assert shutdowns == [1], f"expected exactly one teardown, got {shutdowns}"
 
 
-def test_rap_owns_the_end_of_turn_patience(monkeypatch, tmp_path):
-    """A pause mid-sentence used to end the turn and route the fragment.
+def test_rap_owns_the_voice_turn_vad_thresholds(monkeypatch, tmp_path):
+    """RAP overrides the frontend's VAD defaults for responsive voice turns.
 
-    The frontend launcher ships values that cut a hesitating speaker off; RAP
-    forwards its own after them, and that launcher keeps the last duplicate.
+    Its launcher keeps the last duplicate, so RAP must forward every setting
+    that protects brief post-wake commands and pauses inside longer requests.
     """
+    monkeypatch.setattr(cfg, "S2S_VAD_MIN_SPEECH_MS", 384)
+    monkeypatch.setattr(cfg, "S2S_VAD_MIN_SPEECH_CONTINUATION_MS", 192)
     monkeypatch.setattr(cfg, "S2S_VAD_MIN_SILENCE_MS", 1234)
     monkeypatch.setattr(cfg, "S2S_VAD_SPECULATIVE_REOPEN_MS", 999)
     monkeypatch.setattr(cfg, "S2S_VAD_UNANSWERED_REOPEN_MS", 4321)
@@ -928,6 +930,8 @@ def test_rap_owns_the_end_of_turn_patience(monkeypatch, tmp_path):
     )
     args = next(s for s in stages if "server" in s.name).args
     for flag, expected in (
+        ("--min_speech_ms", "384"),
+        ("--min_speech_continuation_ms", "192"),
         ("--min_silence_ms", "1234"),
         ("--speculative_reopen_ms", "999"),
         ("--unanswered_reopen_ms", "4321"),

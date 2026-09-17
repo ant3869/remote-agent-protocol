@@ -274,6 +274,20 @@ class ConsultRunTests(ConsultTestCase):
 
         self.assertEqual(self.events, [])
 
+    def test_failed_consult_preserves_provider_cause_in_mailbox_and_event(self):
+        self._consult(self._job("code-puppy"), agent="hermes")
+        child = agent_bridge.AgentJob(job_id="child-1", agent="hermes", task="status ping")
+        child.status = agent_bridge.STATUS_FAILED
+        child.failure_detail = "HTTP 429: quota exceeded"
+        child.summary = "Current model/provider usage or quota is exhausted."
+
+        asyncio.run(self.bridge._answer_consult(child))
+
+        self.assertFalse(self._answer()["ok"])
+        self.assertEqual(self._answer()["reason"], child.failure_detail)
+        self.assertEqual(self.events[-1]["reason"], child.failure_detail)
+        self.assertEqual(self.events[-1]["event"], "unanswered")
+
 
 class ConsultProtocolTests(unittest.TestCase):
     def test_no_peers_means_the_offer_is_not_made(self):

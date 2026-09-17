@@ -38,3 +38,22 @@ test("snapshot recovery and clear replace the prior conversation", () => {
   assert.equal(store.rows.size, 0);
   assert.equal(store.epoch, "clear-epoch");
 });
+
+test("tool updates retain the most recent explanatory progress", () => {
+  const detail = conversation.progress({action: "Running shell command", activity: [
+    {text: "Still working"}, {text: "Checking the latest logs for errors."},
+    {text: "Running cp_read_tool_result"}, {text: "Running shell command"},
+  ]});
+  assert.equal(detail.action, "Running shell command");
+  assert.equal(detail.thought, "Checking the latest logs for errors.");
+});
+
+test("transcript omits narration telemetry and routing duplicates but retains errors and consultations", () => {
+  const rows = [
+    {type: "routing"}, {type: "sys", text: "Voicing an agent job summary."},
+    {type: "agent_job", status: "running"}, {type: "agent_job", status: "failed"},
+    {type: "sys", text: "Connection lost"}, {type: "agent_consult", reason: "Quota exceeded"},
+    {type: "transcript", role: "user", text: "Ping the agents"},
+  ];
+  assert.deepEqual(conversation.visibleRows(rows), rows.slice(3));
+});

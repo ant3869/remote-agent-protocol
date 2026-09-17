@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import mimetypes
+import os
 import queue
 import secrets
 import sys
@@ -30,6 +31,7 @@ from remote_agent_protocol import (
     coqui_tts,
     dashboard,
     diagnostics,
+    llm_endpoint,
     logging_setup,
     multimodal_prompt,
     ollama_models,
@@ -57,6 +59,7 @@ from remote_agent_protocol.conversation import (
     SpeechText,
 )
 from remote_agent_protocol.session import VoiceSession
+from remote_agent_protocol.ui_lifecycle import UITabs
 
 logging_setup.setup_logging(cfg.DEBUG_MODE)
 
@@ -140,6 +143,8 @@ class WebVoiceApp:
         self._conversation_events = ConversationEvents(lambda: "Assistant (unknown)")
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._ui_tabs = UITabs()
+        self._instance_id = secrets.token_hex(16)
         # Bound to this process, not persisted: the server has no other auth,
         # so a foreign webpage open in the same browser could otherwise POST
         # /api/action directly (a "simple request" with Content-Type: text/
@@ -156,7 +161,16 @@ class WebVoiceApp:
             self._app_state.persona, self._persona_names(), cfg.DEFAULT_PERSONA_NAME
         )
         self._persona = self._persona_by_name(boot_name)
-        self._model = self._app_state.model or self._persona.model_name(cfg.LLM_MODEL)
+        self._cloud_models = llm_endpoint.configured_cloud_models()
+        self._cloud_catalog_next = 0.0
+        default_model = self._default_model_for_persona(self._persona)
+        saved_model = self._app_state.model
+        self._model = (
+            saved_model
+            if saved_model
+            and (not llm_endpoint.cloud_only_enabled() or saved_model in self._model_choices())
+            else default_model
+        )
         self._coqui_model = self._app_state.coqui_model or cfg.COQUI_TTS_MODEL
         self._coqui_speaker = self._app_state.coqui_speaker or cfg.COQUI_TTS_SPEAKER
         self._coqui_language = self._app_state.coqui_language or cfg.COQUI_TTS_LANGUAGE
@@ -199,6 +213,7 @@ class WebVoiceApp:
         # jobs live on in the persisted history, so only the recent ones need to
         # stay here; active jobs are never evicted, whatever their age.
         self._agent_jobs: dict[str, dict] = {}
+        self._agent_control: dict[str, dict] = {}
         # Bumped by any action that edits a catalog the browser caches.
         self._catalog_version = 1
         self._avatar_audio = AvatarAudioEnvelopeHub()
@@ -233,6 +248,7 @@ class WebVoiceApp:
             "agent_confirm": self._fold_agent_confirm,
             "agent_confirm_resolved": self._fold_agent_confirm_resolved,
             "agent_job": self._fold_agent_job,
+            "agent_control": self._fold_agent_control,
             "default_agent_changed": self._fold_default_agent_changed,
             "wake": self._fold_wake,
         }
@@ -279,11 +295,7 @@ class WebVoiceApp:
 
     def run(self) -> None:
         """Start the voice session, web server, and browser shell."""
-        self._start_session_thread()
-        self._event_thread = threading.Thread(target=self._event_pump, daemon=True)
-        self._health_thread = threading.Thread(target=self._health_poller, daemon=True)
-        self._event_thread.start()
-        self._health_thread.start()
+        app = self
 
         server_port = cfg.S2S_BRIDGE_PORT if cfg.RAP_MODE == "brain" else 0
         try:
@@ -300,6 +312,14 @@ class WebVoiceApp:
                 f"S2S_BRIDGE_PORT to a free port.\n"
                 f"Original error: {exc}"
             ) from exc
+        original_service_actions = server.service_actions
+
+        def service_actions() -> None:
+            original_service_actions()
+            if app._ui_tabs.should_stop():
+                threading.Thread(target=server.shutdown, daemon=True).start()
+
+        server.service_actions = service_actions
         cleanup_done = threading.Event()
 
         def _on_console_close() -> None:
@@ -313,17 +333,29 @@ class WebVoiceApp:
 
         process_guard.install_close_handler(_on_console_close)
 
-        url = f"http://127.0.0.1:{server.server_address[1]}"
-        print(f"Remote Agent Protocol web UI: {url}")
-        webbrowser.open(url)
         try:
+            self._start_session_thread()
+            self._event_thread = threading.Thread(target=self._event_pump, daemon=True)
+            self._health_thread = threading.Thread(target=self._health_poller, daemon=True)
+            self._event_thread.start()
+            self._health_thread.start()
+            port = server.server_address[1]
+            process_guard.write_endpoint(port, self._instance_id)
+            url = f"http://127.0.0.1:{port}"
+            print(f"Remote Agent Protocol web UI: {url}")
+            try:
+                webbrowser.open(url)
+            except Exception as exc:
+                logger.warning(f"Could not open the browser; open {url} manually: {exc}")
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
-            self._stop_app()
-            server.server_close()
-            cleanup_done.set()
+            try:
+                self._stop_app()
+            finally:
+                server.server_close()
+                cleanup_done.set()
 
     def _start_session_thread(self) -> None:
         self._thread = threading.Thread(target=self._boot_thread, daemon=True)
@@ -345,9 +377,11 @@ class WebVoiceApp:
             self._unload_ollama_models(announce=announce)
 
     def _stop_app(self) -> None:
+        if self._stop.is_set():
+            return
         self._stop.set()
         self._avatar_audio.close()
-        self._stop_session(unload_models=True)
+        self._stop_session(unload_models=not llm_endpoint.cloud_only_enabled())
         self._join_thread(self._event_thread, timeout=1.0)
         self._join_thread(self._health_thread, timeout=1.0)
         self._event_thread = None
@@ -492,6 +526,23 @@ class WebVoiceApp:
         self._agent_jobs[job_id] = {**old, **evt, "lines": lines}
         self._evict_old_agent_jobs()
 
+    def _fold_agent_control(self, evt: dict) -> None:
+        """Keep the latest evidence-backed status projection for each harness."""
+        agent = str(evt.get("agent", ""))
+        if not agent:
+            return
+        previous = self._agent_control.get(agent, {})
+        snapshot = (
+            evt.get("data", {}).get("snapshot") if isinstance(evt.get("data"), dict) else None
+        )
+        self._agent_control[agent] = {
+            **previous,
+            "event": evt.get("event", ""),
+            "detail": evt.get("detail", ""),
+            "at": evt.get("at", ""),
+            **({"snapshot": snapshot} if isinstance(snapshot, dict) else {}),
+        }
+
     def _evict_old_agent_jobs(self) -> None:
         """Drop the oldest finished jobs once the map outgrows its cap."""
         for job_id in list(self._agent_jobs):
@@ -529,6 +580,7 @@ class WebVoiceApp:
                     "gpu_util_percent": vram.gpu_util_percent,
                 }
             )
+            self._refresh_cloud_model_catalog()
             self._stop.wait(4)
 
     def _persona_names(self) -> list[str]:
@@ -542,15 +594,45 @@ class WebVoiceApp:
     def _builtin_persona_names(self) -> set[str]:
         return {persona.name for persona in personas.PERSONAS}
 
-    def _model_choices(self) -> list[str]:
+    def _default_model_for_persona(self, persona: personas.Persona) -> str:
+        """Return the model that actually serves this persona's next turn."""
+        if llm_endpoint.cloud_only_enabled():
+            endpoint = llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN)
+            return endpoint.model if endpoint is not None else ""
+        return persona.model_name(cfg.LLM_MODEL)
+
+    def _local_model_choices(self) -> list[str]:
         extra = [
             cfg.LLM_MODEL,
-            getattr(self, "_model", ""),
             *[persona.model for persona in self._personas if persona.model],
         ]
         return sorted(
             set(ollama_models.available(cfg.OLLAMA_HOST)) | {model for model in extra if model}
         )
+
+    def _model_choices(self) -> list[str]:
+        if llm_endpoint.cloud_only_enabled():
+            return list(
+                dict.fromkeys(
+                    [*llm_endpoint.configured_cloud_models(), *getattr(self, "_cloud_models", [])]
+                )
+            )
+        return self._local_model_choices()
+
+    def _refresh_cloud_model_catalog(self) -> None:
+        """Refresh the provider's read-only model list outside the request path."""
+        if not llm_endpoint.cloud_only_enabled() or time.monotonic() < self._cloud_catalog_next:
+            return
+        self._cloud_catalog_next = time.monotonic() + 300
+        fetched = llm_endpoint.fetch_cloud_models()
+        if not fetched:
+            return
+        merged = list(dict.fromkeys([*llm_endpoint.configured_cloud_models(), *fetched]))
+        if merged == self._cloud_models:
+            return
+        self._cloud_models = merged
+        self._models = self._model_choices()
+        self._bump_catalogs()
 
     def _tts_providers(self) -> list[dict]:
         return [
@@ -629,7 +711,9 @@ class WebVoiceApp:
             "systemPrompt": persona.personality,
             "toneStyle": "Short conversational spoken replies",
             "model": persona.model or "",
-            "effectiveModel": persona.model_name(cfg.LLM_MODEL),
+            "effectiveModel": self._default_model_for_persona(persona),
+            "cloudOnly": llm_endpoint.cloud_only_enabled(),
+            "cloudModel": self._model if llm_endpoint.cloud_only_enabled() else "",
             "voice": persona.voice,
             "voiceBackend": persona.voice_backend,
             "voiceModel": persona.voice_model or "",
@@ -845,6 +929,13 @@ class WebVoiceApp:
             "persona": self._persona.name,
             "personaBlurb": self._persona.blurb,
             "model": self._model,
+            "modelRuntime": {
+                "provider": "OpenAI-compatible cloud"
+                if llm_endpoint.cloud_only_enabled()
+                else "Ollama",
+                "cloudOnly": llm_endpoint.cloud_only_enabled(),
+                "localFallback": cfg.CLOUD_LLM_LOCAL_FALLBACK,
+            },
             "voice": self._voice,
             "toolUser": self._session.default_agent_backend(),
             "avatar": app_state.avatar_settings_payload(self._app_state),
@@ -860,6 +951,7 @@ class WebVoiceApp:
             "catalogVersion": self._catalog_version,
             "activeAgentCount": len(active_jobs),
             "agentStates": agent_states,
+            "agentControl": self._agent_control,
             "health": self._health,
             "ttsHealth": self._tts_health,
             "latency": self._latency.values,
@@ -880,6 +972,7 @@ class WebVoiceApp:
             "version": self._catalog_version,
             "personas": self._personas_payload(),
             "models": self._models,
+            "localModels": self._local_model_choices(),
             "voices": [
                 {"label": label, "value": value} for label, value in self._voice_map.items()
             ],
@@ -1346,13 +1439,16 @@ class WebVoiceApp:
 
     def _action_persona(self, payload: dict) -> None:
         self._persona = self._persona_by_name(str(payload.get("name", "")))
-        self._model = self._persona.model_name(cfg.LLM_MODEL)
+        self._model = self._default_model_for_persona(self._persona)
         self._use_persona_tts_defaults(self._persona)
         self._session.set_persona(self._persona)
         self._save_state()
 
     def _action_model(self, payload: dict) -> None:
-        self._model = str(payload.get("model", ""))
+        model = str(payload.get("model", "")).strip()
+        if llm_endpoint.cloud_only_enabled() and model not in self._model_choices():
+            return {"ok": False, "error": "Unknown model selection."}
+        self._model = model
         self._session.set_model(self._model)
         self._save_state()
 
@@ -1686,7 +1782,7 @@ class WebVoiceApp:
 
     def _activate_persona(self, name: str) -> None:
         self._persona = self._persona_by_name(name)
-        self._model = self._persona.model_name(cfg.LLM_MODEL)
+        self._model = self._default_model_for_persona(self._persona)
         self._use_persona_tts_defaults(self._persona)
         self._session.set_persona(self._persona)
         self._save_state()
@@ -1797,6 +1893,9 @@ class WebVoiceApp:
 
             def _dispatch_get(self) -> None:
                 parsed = urlparse(self.path)
+                if parsed.path == "/api/instance":
+                    self._send_json({"pid": os.getpid(), "instance_id": app._instance_id})
+                    return
                 if parsed.path == "/api/avatar-audio":
                     app._stream_avatar_audio(self)
                     return
@@ -1893,6 +1992,31 @@ class WebVoiceApp:
 
             def _dispatch_post(self) -> None:
                 parsed = urlparse(self.path)
+                if parsed.path == "/api/ui-lifecycle":
+                    if not secrets.compare_digest(
+                        self.headers.get("X-Session-Token", ""), app._csrf_token
+                    ):
+                        self.send_error(HTTPStatus.FORBIDDEN)
+                        return
+                    payload = self._read_json()
+                    event = payload.get("event")
+                    tab = payload.get("tab")
+                    sequence = payload.get("sequence")
+                    if (
+                        event not in {"open", "close", "quit"}
+                        or not isinstance(tab, str)
+                        or not 0 < len(tab) <= 80
+                        or type(sequence) is not int
+                        or sequence < 0
+                    ):
+                        self.send_error(HTTPStatus.BAD_REQUEST)
+                        return
+                    if event != "quit":
+                        app._ui_tabs.update(tab, sequence, event == "open")
+                    self._send_json({"ok": True})
+                    if event == "quit":
+                        threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    return
                 if parsed.path == "/v1/chat/completions":
                     if not self._authorized_s2s():
                         self._send_json(
@@ -2173,7 +2297,15 @@ def _json_safe(value):
 def run() -> None:
     """Launch the web UI. The sole entry point -- __main__.py just calls this."""
     if not process_guard.acquire_single_instance_lock():
-        print("Remote Agent Protocol is already running.")
+        url = process_guard.existing_instance_url()
+        if url:
+            print(f"Reopening Remote Agent Protocol: {url}")
+            webbrowser.open(url)
+            return
+        print(
+            "Remote Agent Protocol is running but its window could not be reopened. "
+            "It may still be starting, or may need closing from its original launcher."
+        )
         sys.exit(1)
     process_guard.close_previous_instance()
     process_guard.write_lock()

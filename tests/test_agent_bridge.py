@@ -80,6 +80,23 @@ class PureHelperTests(unittest.TestCase):
         )
         self.assertIsNone(agent_bridge.detect_provider_failure("finished normally"))
 
+    def test_diagnostic_prose_is_not_a_live_provider_failure(self):
+        for line in (
+            " THINKING  The voice assistant asked me to figure out what's wrong with Hermes, "
+            'who previously failed with a "quota exhausted" error — so I\'m digging into it.',
+            "The log says Error: HTTP 429: quota exceeded.",
+            "I will investigate the usage_limit_reached error.",
+            '@@JESS_STATUS {"state":"in_progress","action":"Diagnosing quota exhausted"}',
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(agent_bridge.detect_provider_failure(line))
+
+    def test_decorated_live_provider_errors_are_detected(self):
+        self.assertEqual(
+            agent_bridge.detect_provider_failure("   📝 Error: HTTP 429: quota exceeded"),
+            "quota",
+        )
+
     def test_provider_failure_ignores_phrases_inside_echoed_content(self):
         """A codex job was killed mid-run for "quota" because it printed a log.
 
@@ -95,7 +112,7 @@ class PureHelperTests(unittest.TestCase):
             "well past the length any provider status line ever reaches, because it "
             "is a prose note rather than a status at all, as the log shows it was."
         )
-        self.assertGreater(len(echoed), agent_bridge._PROVIDER_FAILURE_MAX_CHARS)
+        self.assertGreater(len(echoed), 400)
         self.assertIsNone(agent_bridge.detect_provider_failure(echoed))
         # The same phrase, shaped like an actual banner, still counts.
         self.assertEqual(
@@ -121,7 +138,7 @@ class PureHelperTests(unittest.TestCase):
                 }
             }
         )
-        self.assertGreater(len(body), agent_bridge._PROVIDER_FAILURE_MAX_CHARS)
+        self.assertGreater(len(body), 400)
         self.assertEqual(agent_bridge.detect_provider_failure(body), "quota")
 
     def test_auth_failure_is_classified_and_explained(self):
@@ -1060,6 +1077,35 @@ class BridgeLifecycleTests(unittest.TestCase):
         job = self._run(scenario())
         self.assertEqual(job.status, agent_bridge.STATUS_CANCELLED)
 
+    @unittest.skipUnless(os.name == "nt", "Windows process-tree behavior")
+    def test_cancel_kills_a_wrapper_tree_that_holds_stdout_open(self):
+        """A wrapper's child must not prevent the job's finished event."""
+        events: list[dict] = []
+        script = (
+            "import subprocess, sys, time; "
+            "subprocess.Popen([sys.executable, '-u', '-c', 'import time; time.sleep(30)']); "
+            "print('wrapper ready', flush=True); time.sleep(30)"
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": [sys.executable, "-u", "-c", script]},
+                events.append,
+                kill_grace_secs=0.5,
+            )
+            job_id = await bridge.start("mock", "wait")
+            await asyncio.sleep(0.3)
+            await bridge.cancel(job_id)
+            for _ in range(100):
+                if any(event["event"] == "finished" for event in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_CANCELLED)
+        self.assertIn("finished", [event["event"] for event in events])
+
     def test_shutdown_reaps_live_jobs_before_loop_close(self):
         """Regression: a job still running at exit must be stopped and reaped.
 
@@ -1164,6 +1210,32 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
         self.assertIn("usage", agent_bridge.announcement(job).lower())
         self.assertIn("switch", agent_bridge.announcement(job).lower())
+
+    def test_investigating_another_agents_quota_error_can_finish(self):
+        events: list[dict] = []
+        script = (
+            "print('THINKING Hermes previously failed with quota exhausted; investigating.', flush=True);"
+            'print(\'@@JESS_STATUS {"state":"completed","result":"Checked the provider configuration."}\', flush=True)'
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]},
+                events.append,
+                timeout_secs=3,
+                kill_grace_secs=0.2,
+            )
+            job_id = await bridge.start("mock", "Diagnose Hermes")
+            for _ in range(100):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_DONE)
+        self.assertEqual(job.failure_kind, "")
+        self.assertEqual(job.result, "Checked the provider configuration.")
 
     def test_nonzero_exit_without_output_has_useful_failure_summary(self):
         events: list[dict] = []

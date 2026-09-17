@@ -57,6 +57,15 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.task, "open steam")
         self.assertEqual(classify.calls, [])  # tier 1 never pays for tier 2
 
+    async def test_current_time_stays_with_the_host_without_classifier(self):
+        classify = FakeClassify(result=verdict(task="Get the current time"))
+
+        decision = await self.route(classify, "Can you tell me what time it is right now?")
+
+        self.assertEqual(decision.action, "none")
+        self.assertEqual(decision.source, "gate")
+        self.assertEqual(classify.calls, [])
+
     async def test_a_named_agent_overrides_the_default_backend(self):
         # "on codex, asking for code puppy still used codex" -- the classifier
         # tier extracted the task but threw away the agent the user named.
@@ -361,7 +370,10 @@ class IntentRouterPolicyTests(unittest.IsolatedAsyncioTestCase):
         # enabled= is pinned so a .env with INTENT_ROUTER_ENABLED=false cannot
         # skip the warmup call and make this assertion vacuous.
         classify = AsyncMock(return_value=verdict(intent="chat", category="none", task=""))
-        with patch.object(intent_router, "classify_with_ollama", classify):
+        with (
+            patch.object(intent_router, "classify_with_ollama", classify),
+            patch.object(intent_router.llm_endpoint, "cloud_only_enabled", return_value=False),
+        ):
             await intent_router.IntentRouter(enabled=True, timeout_secs=0.05).warmup()
 
         # Nobody waits on a warmup; giving up on it means paying the load later.
@@ -825,6 +837,48 @@ class RepairSubjectTests(unittest.IsolatedAsyncioTestCase):
             decision = await router.route("have code puppy fix the tests", "hermes")
 
         self.assertEqual(decision.agent, "code-puppy")
+
+
+class ConversationRepairRegressionTests(unittest.IsolatedAsyncioTestCase):
+    def test_contextual_markers_preserve_executor_subject_distinction(self):
+        with patch.object(intent_router.cfg, "AGENT_BACKENDS", {"hermes": [], "code-puppy": []}):
+            self.assertEqual(
+                intent_router.select_marker_backend(
+                    "no, figure out what's wrong with hermes", "Diagnose Hermes", "code-puppy"
+                ),
+                "code-puppy",
+            )
+            self.assertEqual(
+                intent_router.select_marker_backend(
+                    "have hermes diagnose itself", "Diagnose Hermes", "code-puppy"
+                ),
+                "hermes",
+            )
+
+    async def test_diagnosis_subject_is_not_the_executor(self):
+        for text in (
+            "figure out what's wrong with hermes",
+            "can you see what is wrong with Hermes",
+        ):
+            classify = FakeClassify(result=verdict(task=text, conf=0.95))
+            with patch.object(
+                intent_router.cfg, "AGENT_BACKENDS", {"hermes": [], "code-puppy": []}
+            ):
+                decision = await make_router(classify).route(text, "code-puppy")
+            self.assertEqual(decision.agent, "code-puppy")
+
+    async def test_clarifications_use_conversation_context_before_stateless_classification(self):
+        for text in (
+            "no it didnt, wheres the file path to the list",
+            "wheres the list of davinci resolve tools we were just talking about it",
+            "im saying overall,m not just active",
+        ):
+            classify = FakeClassify(
+                result=verdict(task="Create a list in a note-taking app", conf=0.95)
+            )
+            decision = await make_router(classify).route(text, "code-puppy")
+            self.assertEqual(decision.action, intent_router.ACTION_NONE)
+            self.assertEqual(classify.calls, [])
 
 
 class GroundingStemTests(unittest.TestCase):

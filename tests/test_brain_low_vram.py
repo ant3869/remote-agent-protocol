@@ -1,6 +1,6 @@
 import pytest
 
-from remote_agent_protocol import brain, personas
+from remote_agent_protocol import brain, llm_endpoint, personas
 from remote_agent_protocol import config as cfg
 
 
@@ -51,6 +51,34 @@ async def test_brain_chat_request_includes_configured_keep_alive(monkeypatch):
         "stream": False,
         "keep_alive": "5m",
     }
+
+
+@pytest.mark.asyncio
+async def test_cloud_only_brain_start_never_schedules_local_model_warmups(monkeypatch):
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "https://example.test/v1")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "sk-test")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL", "cloud-model")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", False)
+    session = brain.BrainSession(personas.DEFAULT_PERSONA)
+    session._lifecycle_ws = None
+    session._remotes.start = lambda: None
+    scheduled = []
+
+    async def refresh_provider_status():
+        return {}
+
+    def capture(coro, name):
+        scheduled.append(name)
+        coro.close()
+
+    session._orchestrator.refresh_provider_status = refresh_provider_status
+    session._spawn = capture
+
+    await session.start()
+    await session._http.close()
+
+    assert llm_endpoint.cloud_only_enabled()
+    assert scheduled == ["brain-provider-probe"]
 
 
 @pytest.mark.asyncio

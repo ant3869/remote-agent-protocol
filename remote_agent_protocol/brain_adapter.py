@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import Future
@@ -20,7 +21,7 @@ from typing import Any
 from loguru import logger
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import job_store, memory_manager, voices
+from remote_agent_protocol import job_store, llm_endpoint, memory_manager, voices
 from remote_agent_protocol.brain import ANNOUNCE_PREFIX, BrainSession
 from remote_agent_protocol.multimodal_prompt import MultimodalPromptBundle
 from remote_agent_protocol.personas import Persona
@@ -35,9 +36,15 @@ class BrainSessionAdapter:
         self._brain = BrainSession(persona, on_event=self._observe_event)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop: asyncio.Event | None = None
+        self._shutdown_requested = threading.Event()
         self._muted = True
         self._voice_mode = "manual"
-        self._model_override = persona.model_name(cfg.LLM_MODEL)
+        endpoint = llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN)
+        self._model_override = (
+            endpoint.model
+            if llm_endpoint.cloud_only_enabled() and endpoint is not None
+            else persona.model_name(cfg.LLM_MODEL)
+        )
 
     def build(self) -> None:
         """VoiceSession compatibility hook; brain mode has no audio graph."""
@@ -46,22 +53,32 @@ class BrainSessionAdapter:
         """Start brain services and wait until ``shutdown`` is called."""
         self._loop = asyncio.get_running_loop()
         self._stop = asyncio.Event()
-        self._discard_stale_announcements()
-        await self._brain.start()
-        self._emit({"type": "session", "state": "ready"})
-        self._emit({"type": "sys", "text": "Brain mode ready; realtime audio is external."})
         try:
+            if self._shutdown_requested.is_set():
+                return
+            self._discard_stale_announcements()
+            await self._brain.start()
+            if self._shutdown_requested.is_set():
+                return
+            self._emit({"type": "session", "state": "ready"})
+            self._emit({"type": "sys", "text": "Brain mode ready; realtime audio is external."})
             await self._stop.wait()
         finally:
-            await self._brain.stop()
-            self._loop = None
-            self._stop = None
+            try:
+                await self._brain.stop()
+            finally:
+                self._loop = None
+                self._stop = None
 
     def shutdown(self) -> None:
         """Stop the brain loop from any GUI/server thread."""
+        self._shutdown_requested.set()
         if self._loop is None or self._stop is None:
             return
-        self._loop.call_soon_threadsafe(self._stop.set)
+        try:
+            self._loop.call_soon_threadsafe(self._stop.set)
+        except RuntimeError:
+            pass  # The loop finished between the check and the callback submission.
 
     def complete_text(self, text: str, timeout: float = 180.0) -> str:
         """Run one user text turn and return assistant text for realtime frontends."""
@@ -311,13 +328,21 @@ class BrainSessionAdapter:
         paths the GUI's own dropdowns use.
         """
         self._brain._persona = persona  # noqa: SLF001
-        self.set_model(persona.model_name(cfg.LLM_MODEL))
+        endpoint = llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN)
+        self.set_model(
+            endpoint.model
+            if llm_endpoint.cloud_only_enabled() and endpoint is not None
+            else persona.model_name(cfg.LLM_MODEL)
+        )
         self.set_voice(persona.voice)
 
     def set_model(self, model: str) -> None:
-        """Select the Ollama model used by subsequent brain turns."""
+        """Select the active cloud or local model used by subsequent brain turns."""
         self._model_override = model.strip() or self._model_override
-        self._brain._model_override = self._model_override  # type: ignore[attr-defined]  # noqa: SLF001
+        if llm_endpoint.cloud_only_enabled():
+            self._brain._cloud_model_override = self._model_override  # type: ignore[attr-defined]  # noqa: SLF001
+        else:
+            self._brain._model_override = self._model_override  # type: ignore[attr-defined]  # noqa: SLF001
 
     def set_voice(self, voice: str) -> None:
         """Publish the chosen voice for the external realtime frontend to pick up."""
@@ -443,6 +468,12 @@ class BrainSessionAdapter:
         agent = str(event.get("agent") or "an agent")
         status = str(event.get("status") or "finished")
         outcome = str(event.get("result") or event.get("summary") or "").strip()
+        if status in {"failed", "timeout", "cancelled"}:
+            outcome = str(event.get("failure_detail") or event.get("summary") or outcome).strip()
+        elif status == "done" and not outcome:
+            outcome = (
+                "The process ended with no substantive answer; the requested outcome is unverified"
+            )
         # By the time this is spoken the user has usually asked something else,
         # so the relay has to say what it is about before saying how it went.
         task = str(event.get("task") or "").strip()
@@ -451,7 +482,10 @@ class BrainSessionAdapter:
             f"{ANNOUNCE_PREFIX} [Agent job update: {agent} {status}.{about} "
             f"Outcome: {outcome or 'no details were reported'}. "
             "Give the user a one-or-two sentence spoken summary, naming what the "
-            "job was about so they can tell which request it answers.]"
+            "job was about so they can tell which request it answers. Preserve the reported "
+            "failure cause; do not invent a diagnosis or treat missing output as success. "
+            "Include a requested file path, location, or concrete finding when the result "
+            "provides one, rather than merely saying it was found.]"
         )
         ident = f"{event.get('job_id', '')}:{status}"
         self._brain._announcement_sources[ident] = {

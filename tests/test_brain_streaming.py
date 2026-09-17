@@ -5,12 +5,24 @@ sentence boundaries. Delegation markers must never reach the speakers.
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import aiohttp
 import pytest
 
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol.brain import BrainSession, LLMUnavailable, _split_sentences
+from remote_agent_protocol.control_plane.models import (
+    Activity,
+    AgentObservation,
+    AgentSnapshot,
+    Evidence,
+    Health,
+    JobHandle,
+    ObservedWork,
+    Presence,
+    WorkOwnership,
+)
 from remote_agent_protocol.personas import PERSONAS
 
 
@@ -52,8 +64,51 @@ def _brain(monkeypatch, deltas):
     return brain
 
 
+def _control_snapshot(*, activity=Activity.IDLE, current_work=None):
+    now = datetime.now(UTC)
+    return AgentSnapshot(
+        AgentObservation(
+            agent_id="hermes",
+            display_name="Hermes",
+            harness="hermes",
+            machine="Main PC",
+            presence=Presence.REACHABLE,
+            activity=activity,
+            health=Health.HEALTHY,
+            capabilities=frozenset(),
+            evidence=(Evidence(source="test", observed_at=now, detail="current test evidence"),),
+            observed_at=now,
+            expires_at=now + timedelta(minutes=1),
+            current_work=current_work,
+        )
+    )
+
+
 async def _collect(brain, text="hello"):
     return [piece async for piece in brain.complete_stream(text)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_control_turn_retains_the_users_actual_words(monkeypatch, streaming):
+    brain = _brain(monkeypatch, ["Checking now."])
+    request = "can you figure out whats wrong with hermes, use another agent"
+
+    async def resolve(_text):
+        return "code-puppy", "Diagnose Hermes"
+
+    async def respond():
+        return "Checking now."
+
+    monkeypatch.setattr(brain, "_resolve_delegation", resolve)
+    monkeypatch.setattr(brain, "_delegate_ack", lambda *args: "[Task dispatched to code-puppy]")
+    monkeypatch.setattr(brain, "_call_ollama", respond)
+    if streaming:
+        await _collect(brain, request)
+    else:
+        await brain.complete(request)
+    assert request in brain._messages[0]["content"]
+    assert "[Task dispatched to code-puppy]" in brain._messages[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -245,16 +300,21 @@ async def test_status_questions_report_jobs_instead_of_spawning_new_ones(monkeyp
     brain = _brain(monkeypatch, ["Here is the state of play, sir."])
     monkeypatch.setattr(cfg, "AGENT_SPOKEN_ALIASES", {"hermes": "hermes"})
 
-    class Job:
-        agent = "hermes"
-        task = "fix the configuration problem"
-        status = "running"
+    class ControlPlane:
+        async def get_agent_status(self, agent, *, refresh):
+            assert agent == "hermes"
+            assert not refresh
+            return _control_snapshot(
+                activity=Activity.WORKING,
+                current_work=ObservedWork(
+                    job_id="job-1",
+                    ownership=WorkOwnership.RAP,
+                    summary="fix the configuration problem",
+                    state=Activity.WORKING,
+                ),
+            )
 
-    class Bridge:
-        def active_jobs(self, agent=None):
-            return [Job()]
-
-    monkeypatch.setattr(brain, "_bridge", Bridge())
+    monkeypatch.setattr(brain, "_control_plane", ControlPlane())
 
     async def routing_must_not_run(_text):
         raise AssertionError("status questions must never reach delegation routing")
@@ -265,7 +325,81 @@ async def test_status_questions_report_jobs_instead_of_spawning_new_ones(monkeyp
 
     content = brain._messages[0]["content"]
     assert "hermes" in content
-    assert "running" in content
+    assert "working" in content
+
+
+@pytest.mark.asyncio
+async def test_named_agent_work_question_uses_the_local_control_plane(monkeypatch):
+    brain = _brain(monkeypatch, ["Hermes is idle, sir."])
+    monkeypatch.setattr(cfg, "AGENT_SPOKEN_ALIASES", {"hermes": "hermes"})
+
+    class ControlPlane:
+        async def get_agent_status(self, agent, *, refresh):
+            assert agent == "hermes"
+            assert not refresh
+            return _control_snapshot()
+
+    monkeypatch.setattr(brain, "_control_plane", ControlPlane())
+
+    async def routing_must_not_run(_text):
+        raise AssertionError("agent work status must never reach delegation routing")
+
+    monkeypatch.setattr(brain, "_resolve_delegation", routing_must_not_run)
+
+    pieces = await _collect(brain, "What is Hermes working on?")
+
+    assert "Agent status: Hermes" in brain._messages[0]["content"]
+    assert "idle" in "".join(pieces)
+    assert "Hermes is idle, sir." not in "".join(pieces)
+
+
+@pytest.mark.asyncio
+async def test_current_time_is_replied_by_the_host_without_routing(monkeypatch):
+    brain = _brain(monkeypatch, ["This must not be used."])
+
+    async def routing_must_not_run(_text):
+        raise AssertionError("current time must stay with the host")
+
+    monkeypatch.setattr(brain, "_resolve_delegation", routing_must_not_run)
+
+    pieces = await _collect(brain, "What time is it right now?")
+
+    assert "It is" in "".join(pieces)
+    assert "Current local time" in brain._messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_redirect_moves_the_active_rap_job_without_delegation(monkeypatch):
+    brain = _brain(monkeypatch, ["This must not be used."])
+    monkeypatch.setattr(cfg, "AGENT_SPOKEN_ALIASES", {"codex": "codex"})
+
+    class Job:
+        job_id = "job-1"
+        agent = "hermes"
+        task = "wait safely"
+        cwd = ""
+        announce_start = False
+
+    class Bridge:
+        def latest_active(self):
+            return Job()
+
+    class ControlPlane:
+        async def redirect_job(self, job_id, new_agent, task):
+            assert (job_id, new_agent, task.text) == ("job-1", "codex", "wait safely")
+            return JobHandle("job-2", "codex")
+
+    monkeypatch.setattr(brain, "_bridge", Bridge())
+    monkeypatch.setattr(brain, "_control_plane", ControlPlane())
+
+    async def routing_must_not_run(_text):
+        raise AssertionError("redirection must not reach delegation routing")
+
+    monkeypatch.setattr(brain, "_resolve_delegation", routing_must_not_run)
+
+    pieces = await _collect(brain, "Redirect that task to Codex")
+
+    assert "redirected the task from hermes to codex" in "".join(pieces).lower()
 
 
 @pytest.mark.asyncio

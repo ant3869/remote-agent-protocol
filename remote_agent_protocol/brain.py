@@ -29,11 +29,19 @@ from remote_agent_protocol import (
     memory,
     ollama_models,
     remote_client,
-    remote_protocol,
     voice_commands,
 )
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import personas as persona_catalog
+from remote_agent_protocol.control_plane import AgentControlPlane, AgentRegistry
+from remote_agent_protocol.control_plane.adapters.base import AgentTask
+from remote_agent_protocol.control_plane.adapters.factory import build_adapters
+from remote_agent_protocol.control_plane.models import (
+    AgentSnapshot,
+    ControlError,
+    ControlResult,
+    JobHandle,
+)
 from remote_agent_protocol.conversation import ConversationEvents, SpeechText
 from remote_agent_protocol.orchestration import telemetry as orchestration_telemetry
 from remote_agent_protocol.orchestration.orchestrator import (
@@ -44,6 +52,19 @@ from remote_agent_protocol.orchestration.providers.copilot import CopilotProvide
 from remote_agent_protocol.orchestration.providers.local import LocalProvider
 from remote_agent_protocol.personas import Persona
 from remote_agent_protocol.session_processors import _MARKER_RE, is_placeholder_task
+
+
+def _control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str:
+    """Turn a control-plane result into concise, evidence-bound narration input."""
+    if isinstance(result, ControlError):
+        return f"{agent_id} could not be verified ({result.code})"
+    observation = result.observation
+    freshness = "stale" if result.is_stale() else "current"
+    work = f", {observation.current_work.summary}" if observation.current_work else ""
+    return (
+        f"{observation.display_name} on {observation.machine}: {observation.presence.value}, "
+        f"{observation.activity.value}, {observation.health.value} ({freshness}{work})"
+    )
 
 
 class LLMUnavailable(RuntimeError):
@@ -79,6 +100,7 @@ class BrainSession:
         self._force_confirm_reason = ""
         self._last_user_text = ""
         self._control_turn = False
+        self._direct_reply: str | None = None
         self._cancel_wait_s = 5.0
         self._recently_denied: deque[tuple[str, str]] = deque(maxlen=5)
         self._recent_delegations: deque[tuple[float, str]] = deque(maxlen=20)
@@ -104,6 +126,11 @@ class BrainSession:
             scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
             host_repo=cfg.AGENT_HOST_REPO,
             remotes=self._remotes,
+        )
+        self._control_plane = AgentControlPlane(
+            build_adapters(self._bridge, cfg.AGENT_BACKENDS, cfg.AGENT_MACHINES),
+            registry=AgentRegistry(cfg.DATA_DIR / "agent_registry.json"),
+            on_event=self._on_agent_event,
         )
         # Same Local/Cloud/Hybrid orchestration layer the full voice session
         # uses -- brain mode routes delegations through its own copy of the
@@ -141,8 +168,11 @@ class BrainSession:
         if self._lifecycle_ws is not None:
             await self._lifecycle_ws.start()
         self._remotes.start()
-        self._spawn(self._router.warmup(), "brain-intent-router-warmup")
-        self._spawn(self._warm_chat_model(), "brain-chat-model-warmup")
+        if llm_endpoint.cloud_only_enabled():
+            logger.info("Cloud-only model policy active; skipping local LLM warmups")
+        else:
+            self._spawn(self._router.warmup(), "brain-intent-router-warmup")
+            self._spawn(self._warm_chat_model(), "brain-chat-model-warmup")
         # Probe providers once so the orchestration panel shows real status on
         # first view instead of "not checked yet" until someone clicks Check now.
         self._spawn(self._orchestrator.refresh_provider_status(), "brain-provider-probe")
@@ -170,13 +200,27 @@ class BrainSession:
 
     async def stop(self) -> None:
         """Stop background services and persist short-term memory."""
+        tasks = [task for task in self._tasks if task is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        cleanup = [
+            ("remote connections", self._remotes.stop),
+            ("agent jobs", self._bridge.shutdown),
+        ]
         if self._lifecycle_ws is not None:
-            await self._lifecycle_ws.stop()
-        await self._remotes.stop()
-        await self._bridge.shutdown()
+            cleanup.insert(0, ("lifecycle server", self._lifecycle_ws.stop))
+        for label, stop in cleanup:
+            try:
+                await stop()
+            except Exception as exc:
+                logger.warning(f"Could not stop {label}: {exc}")
         if self._http is not None:
-            await self._http.close()
-            self._http = None
+            try:
+                await self._http.close()
+            finally:
+                self._http = None
         if cfg.MEMORY_ENABLED:
             memory.save_memory(cfg.MEMORY_FILE, self._messages[-cfg.MEMORY_MAX_MSGS :])
 
@@ -211,8 +255,10 @@ class BrainSession:
         if utterance["session_id"] != self._conversation.session_id:
             return ""
 
-        self._messages.append({"role": "user", "content": content})
-        assistant = await self._call_ollama()
+        self._record_user_turn(text, content)
+        assistant = self._take_direct_reply()
+        if assistant is None:
+            assistant = await self._call_ollama()
         if utterance["session_id"] != self._conversation.session_id:
             return ""
         assistant = self._handle_delegate_markers(assistant)
@@ -223,6 +269,12 @@ class BrainSession:
         match = re.match(r"\[\[announce\]\]\s*\[id=([\w:-]+)\]", text)
         source = self._announcement_sources.pop(match[1], {}) if match else {}
         return self._conversation.utterance(delivery=delivery, **source)
+
+    def _record_user_turn(self, text: str, content: str) -> None:
+        """Keep the user's wording alongside the outcome of local control actions."""
+        if self._control_turn and not text.startswith(ANNOUNCE_PREFIX):
+            content = f"User request: {text}\n\nApplication context (not a new request):\n{content}"
+        self._messages.append({"role": "user", "content": content})
 
     def _finish_turn(self, assistant: str, utterance: dict | None = None) -> None:
         """Record one completed assistant turn in history, memory, and the UI."""
@@ -260,7 +312,15 @@ class BrainSession:
         content = await self._turn_content(text, llm_content)
         if utterance["session_id"] != self._conversation.session_id:
             return
-        self._messages.append({"role": "user", "content": content})
+        self._record_user_turn(text, content)
+
+        direct_reply = self._take_direct_reply()
+        if direct_reply is not None:
+            utterance.update(text=direct_reply, final=False, revision=utterance["revision"] + 1)
+            self._emit(dict(utterance))
+            yield SpeechText(direct_reply, utterance)
+            self._finish_turn(direct_reply, utterance)
+            return
 
         full = ""
         spoken = ""
@@ -310,10 +370,10 @@ class BrainSession:
         itself about a finished agent job -- while everything else runs the
         normal confirmation and delegation path.
         """
+        self._direct_reply = None
         if text.startswith(ANNOUNCE_PREFIX):
             instruction = text[len(ANNOUNCE_PREFIX) :].strip()
             instruction = re.sub(r"^\[id=[\w:-]+\]\s*", "", instruction)
-            self._emit({"type": "sys", "text": "Voicing an agent job summary."})
             # The summary narration must never delegate: a marker here spawns a
             # fresh job every time a job finishes, breeding jobs indefinitely.
             self._control_turn = True
@@ -321,6 +381,11 @@ class BrainSession:
         self._emit({"type": "transcript", "role": "user", "text": text})
         self._last_user_text = text
         self._control_turn = False
+
+        if voice_commands.is_local_runtime_time_query(text):
+            self._control_turn = True
+            self._direct_reply = datetime.now().strftime("It is %I:%M %p on %A, %B %d, %Y, sir.")
+            return "[Current local time supplied by the host; do not start any new work.]"
 
         consumed = self._maybe_consume_confirmation(text)
         if consumed is not None:
@@ -335,14 +400,17 @@ class BrainSession:
         cancel_request = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
         if cancel_request is not None:
             return await self._handle_agent_cancel(cancel_request)
+        redirect_agent = voice_commands.parse_agent_redirect(text, cfg.AGENT_SPOKEN_ALIASES)
+        if redirect_agent is not None:
+            return await self._handle_agent_redirect(redirect_agent)
         # Before the per-agent progress question: "is hermes up" asks whether
         # an agent can take work, not how an existing job is going.
         rollcall = voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES)
         if rollcall is not None:
-            return self._handle_agent_rollcall(rollcall[0])
+            return await self._handle_agent_rollcall(rollcall[0])
         status_request = voice_commands.parse_agent_status(text, cfg.AGENT_SPOKEN_ALIASES)
         if status_request is not None:
-            return self._handle_agent_status(status_request)
+            return await self._handle_agent_status(status_request)
         parsed = await self._resolve_delegation(text)
         if parsed is not None:
             agent, task = parsed
@@ -389,7 +457,7 @@ class BrainSession:
             "Tell the user briefly; do not start any new work.]"
         )
 
-    def _handle_agent_rollcall(self, agent: str | None = None) -> str:
+    async def _handle_agent_rollcall(self, agent: str | None = None) -> str:
         """Answer "which agents are there?" from what RAP itself knows.
 
         An agent cannot report on its peers -- asked to, it guesses, and a
@@ -399,28 +467,12 @@ class BrainSession:
         the roll call is answered here and never delegated.
         """
         self._control_turn = True
-        remote_states = {state["name"]: state for state in self._bridge.remote_hosts()}
-        active = {}
-        for job in self._bridge.active_jobs():
-            active[job.agent] = active.get(job.agent, 0) + 1
-        rows = []
-        backends = [
-            name
-            for name in self._bridge.backend_names()
-            if agent is None or name == agent or name.endswith(f":{agent}")
+        results = await self._control_plane.list_agents(refresh=True)
+        rows = [
+            _control_summary(backend, snapshot)
+            for backend, snapshot in results.items()
+            if agent is None or backend == agent or backend.endswith(f":{agent}")
         ]
-        for backend in backends:
-            split = remote_protocol.split_backend_name(backend)
-            if split is not None and split[0] in remote_states:
-                state = remote_states[split[0]]
-                ready = "ready" if state["online"] else f"unreachable ({state['error']})"
-                where = state["machine"]
-            else:
-                status, detail = agent_bridge.executable_status(cfg.AGENT_BACKENDS.get(backend, []))
-                ready = "ready" if status == "ok" else f"not runnable here ({detail})"
-                where = self._bridge.machine_for(backend)
-            busy = f", {active[backend]} job(s) running" if backend in active else ""
-            rows.append(f"{backend} on {where}: {ready}{busy}")
         if not rows:
             missing = (
                 f"there is no agent backend named '{agent}'"
@@ -436,7 +488,31 @@ class BrainSession:
             "start any new work.]"
         )
 
-    def _handle_agent_status(self, status_request: tuple[str | None]) -> str:
+    async def _handle_agent_redirect(self, new_agent: str) -> str:
+        """Move the current RAP-owned job through the coordinator, never another harness."""
+        self._control_turn = True
+        current = self._bridge.latest_active()
+        if current is None:
+            self._direct_reply = "There is no active RAP-owned task to redirect, sir."
+            return "[No active RAP-owned task exists; do not start any new work.]"
+        result = await self._control_plane.redirect_job(
+            current.job_id,
+            new_agent,
+            AgentTask(current.task, cwd=current.cwd or None, announce_start=current.announce_start),
+        )
+        if isinstance(result, JobHandle):
+            self._direct_reply = (
+                f"I redirected the task from {current.agent} to {result.agent_id}, sir."
+            )
+            return (
+                "[RAP completed the ordered cancellation and redirection; do not start new work.]"
+            )
+        assert isinstance(result, ControlResult)
+        detail = result.error.detail if result.error else "the coordinator could not redirect it"
+        self._direct_reply = f"I could not redirect the task: {detail}"
+        return "[RAP attempted the requested redirection; do not start new work.]"
+
+    async def _handle_agent_status(self, status_request: tuple[str | None]) -> str:
         """Answer a progress question from live job state instead of delegating.
 
         Live sessions showed "can I get an update?" spawning a fresh job per
@@ -444,17 +520,23 @@ class BrainSession:
         """
         (agent,) = status_request
         self._control_turn = True
-        jobs = self._bridge.active_jobs(agent)
-        if not jobs:
-            scope = f"for {agent}" if agent else "right now"
-            return (
-                f"[Agent status: no active agent tasks {scope}. "
-                "Answer from this; do not start any new work.]"
-            )
-        lines = "; ".join(
-            f"{job.agent} is {job.status} on '{agent_bridge.task_label(job.task)}'" for job in jobs
+        if agent is not None:
+            snapshot = await self._control_plane.get_agent_status(agent, refresh=False)
+            summary = _control_summary(agent, snapshot)
+            self._direct_reply = f"{summary}."
+            return f"[Agent status: {summary}. Answer from this; do not start any new work.]"
+        results = await self._control_plane.list_agents(refresh=False)
+        summary = "; ".join(
+            _control_summary(backend, snapshot) for backend, snapshot in results.items()
         )
-        return f"[Agent status: {lines}. Answer from this; do not start any new work.]"
+        self._direct_reply = f"{summary}."
+        return f"[Agent status: {summary}. Answer from this; do not start any new work.]"
+
+    def _take_direct_reply(self) -> str | None:
+        """Return one evidence-bound reply without giving the chat model room to alter it."""
+        reply = self._direct_reply
+        self._direct_reply = None
+        return reply
 
     async def _resolve_delegation(self, text: str) -> tuple[str, str] | None:
         decision = await self._router.route(text, self._default_agent_backend)
@@ -628,6 +710,10 @@ class BrainSession:
 
     def _endpoints(self) -> tuple[llm_endpoint.Endpoint, ...]:
         """Where to send this turn: the cloud persona first, then this machine's."""
+        if llm_endpoint.cloud_only_enabled():
+            return llm_endpoint.chain(
+                llm_endpoint.BRAIN, cloud_model=getattr(self, "_cloud_model_override", None)
+            )
         local_model = getattr(self, "_model_override", None) or self._persona.model_name(
             cfg.LLM_MODEL
         )
@@ -837,6 +923,7 @@ class BrainSession:
                 "status": job.status,
                 "result": job.result,
                 "summary": job.summary,
+                "failure_detail": job.failure_detail,
                 # A result lands whenever the job happens to finish, which is
                 # routinely a turn or two later and about something the user has
                 # moved on from. Without the task, the spoken relay has no
@@ -847,6 +934,11 @@ class BrainSession:
 
     def _on_agent_event(self, event: dict) -> None:
         self._emit(event)
+        if event.get("type") == "agent_job":
+            self._spawn(
+                self._control_plane.ingest_bridge_event(event),
+                name=f"control-plane-{event.get('job_id', 'event')}",
+            )
 
     def _emit(self, event: dict) -> None:
         event = self._conversation.stamp(event)
@@ -884,10 +976,9 @@ class BrainSession:
         Markers carry a task but no agent, so "maybe code puppy can fix it"
         must not silently dispatch to whatever the default backend is.
         """
-        named = voice_commands.named_backend(
-            f"{self._last_user_text} {task}", cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
+        return intent_router.select_marker_backend(
+            self._last_user_text, task, self._default_agent_backend
         )
-        return named or self._default_agent_backend
 
 
 # Reserved prefix for app-initiated announce turns: the realtime frontend

@@ -8,6 +8,7 @@ The GUI is a controller/observer, not part of the audio path.
 import asyncio
 import itertools
 import sys
+import threading
 import time
 from collections import deque
 from dataclasses import asdict
@@ -39,6 +40,7 @@ from remote_agent_protocol import (
     intent_router,
     job_store,
     lifecycle_ws,
+    llm_endpoint,
     mem0_setup,
     memory,
     memory_manager,
@@ -46,7 +48,6 @@ from remote_agent_protocol import (
     narration,
     ollama_models,
     remote_client,
-    remote_protocol,
     stt_factory,
     tts_factory,
     voice_commands,
@@ -55,6 +56,10 @@ from remote_agent_protocol import (
 )
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import personas as persona_catalog
+from remote_agent_protocol.control_plane import AgentControlPlane, AgentRegistry
+from remote_agent_protocol.control_plane.adapters.base import AgentTask
+from remote_agent_protocol.control_plane.adapters.factory import build_adapters
+from remote_agent_protocol.control_plane.models import AgentSnapshot, ControlError
 from remote_agent_protocol.conversation import ConversationEvents
 from remote_agent_protocol.orchestration import telemetry as orchestration_telemetry
 from remote_agent_protocol.orchestration.orchestrator import (
@@ -77,6 +82,19 @@ from remote_agent_protocol.session_processors import (
     looks_like_delegation_promise,
 )
 from remote_agent_protocol.speech_events import SpeechPlaybackTap
+
+
+def _control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str:
+    """Turn a control-plane result into concise, evidence-bound narration input."""
+    if isinstance(result, ControlError):
+        return f"{agent_id} could not be verified ({result.code})"
+    observation = result.observation
+    freshness = "stale" if result.is_stale() else "current"
+    work = f", {observation.current_work.summary}" if observation.current_work else ""
+    return (
+        f"{observation.display_name} on {observation.machine}: {observation.presence.value}, "
+        f"{observation.activity.value}, {observation.health.value} ({freshness}{work})"
+    )
 
 
 class VoiceSession:
@@ -110,6 +128,7 @@ class VoiceSession:
         self._mem0_service = None
         self._worker: PipelineWorker | None = None
         self._runner: WorkerRunner | None = None
+        self._shutdown_requested = threading.Event()
         # Agents offered by other machines; empty unless AGENT_REMOTE_HOSTS_JSON
         # names a host. Discovered agents join delegation as "<host>:<agent>".
         self._remotes = remote_client.RemoteRegistry()
@@ -128,6 +147,11 @@ class VoiceSession:
             scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
             host_repo=cfg.AGENT_HOST_REPO,
             remotes=self._remotes,
+        )
+        self._control_plane = AgentControlPlane(
+            build_adapters(self._bridge, cfg.AGENT_BACKENDS, cfg.AGENT_MACHINES),
+            registry=AgentRegistry(cfg.DATA_DIR / "agent_registry.json"),
+            on_event=self._on_agent_event,
         )
         # Local/Cloud/Hybrid orchestration layer, additive on top of the
         # router/bridge above: risk-scores whether ORCHESTRATION REASONING
@@ -240,14 +264,19 @@ class VoiceSession:
         # reasoning_effort="none" disables the hidden <think> monologue -- the
         # single biggest voice-latency win (see config.py).
         llm_extra: dict = {}
-        if cfg.LLM_REASONING_EFFORT is not None:
+        if cfg.LLM_REASONING_EFFORT is not None and not llm_endpoint.cloud_only_enabled():
             llm_extra["extra_body"] = {"reasoning_effort": cfg.LLM_REASONING_EFFORT}
 
+        endpoint = (
+            llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN)
+            if llm_endpoint.cloud_only_enabled()
+            else llm_endpoint.local_endpoint(llm_endpoint.BRAIN)
+        )
         self._llm = OpenAILLMService(
-            api_key="ollama",
-            base_url=cfg.OLLAMA_BASE_URL,
+            api_key=endpoint.api_key or "ollama",
+            base_url=endpoint.base_url,
             settings=OpenAILLMService.Settings(
-                model=self._persona.model_name(cfg.LLM_MODEL),
+                model=endpoint.model,
                 system_instruction=self._system_instruction(),
                 extra=llm_extra,
             ),
@@ -377,16 +406,45 @@ class VoiceSession:
     # -- run / lifecycle ----------------------------------------------------
 
     async def run(self) -> None:
-        """Run the pipeline until shutdown; persists memory on exit."""
+        """Run the pipeline until shutdown; release resources after partial startup too."""
         assert self._worker is not None, "call build() before run()"
         self._loop = asyncio.get_running_loop()
+        try:
+            if not self._shutdown_requested.is_set():
+                await self._run_pipeline()
+        finally:
+            tasks = [task for task in self._bg_tasks if task is not asyncio.current_task()]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            cleanup = [
+                ("remote connections", self._remotes.stop),
+                ("agent jobs", self._bridge.shutdown),
+            ]
+            if self._lifecycle_ws is not None:
+                cleanup.insert(0, ("lifecycle server", self._lifecycle_ws.stop))
+            for label, stop in cleanup:
+                try:
+                    await stop()
+                except Exception as exc:
+                    logger.warning(f"Could not stop {label}: {exc}")
+            try:
+                voicebox.stop_server()
+                self._save_memory()
+            finally:
+                self._loop = None
+
+    async def _run_pipeline(self) -> None:
+        """Start services and run the audio pipeline."""
         if self._lifecycle_ws is not None:
             await self._lifecycle_ws.start()
         self._remotes.start()
         self._start_voicebox_warmups()
         # Narration shares the router's model, so the warmup below covers both.
         self._narrator.enable()
-        self._spawn(self._router.warmup(), name="intent-router-warmup")
+        if not llm_endpoint.cloud_only_enabled():
+            self._spawn(self._router.warmup(), name="intent-router-warmup")
         # Probe providers once so the orchestration panel shows real status on
         # first view instead of "not checked yet" until someone clicks Check now.
         self._spawn(
@@ -394,15 +452,16 @@ class VoiceSession:
         )
         # The reply model too, not just the router: a cold load lands on the
         # first spoken turn otherwise.
-        self._spawn(
-            asyncio.to_thread(
-                ollama_models.preload,
-                cfg.OLLAMA_HOST,
-                self._startup_model or self._persona.model_name(cfg.LLM_MODEL),
-                cfg.LLM_KEEP_ALIVE,
-            ),
-            name="chat-model-warmup",
-        )
+        if not llm_endpoint.cloud_only_enabled():
+            self._spawn(
+                asyncio.to_thread(
+                    ollama_models.preload,
+                    cfg.OLLAMA_HOST,
+                    self._startup_model or self._persona.model_name(cfg.LLM_MODEL),
+                    cfg.LLM_KEEP_ALIVE,
+                ),
+                name="chat-model-warmup",
+            )
         if (
             self._startup_voice
             or self._startup_tts_backend
@@ -426,18 +485,8 @@ class VoiceSession:
 
         self._runner = WorkerRunner(handle_sigint=sys.platform != "win32")
         await self._runner.add_workers(self._worker)
-        try:
+        if not self._shutdown_requested.is_set():
             await self._runner.run()
-        finally:
-            if self._lifecycle_ws is not None:
-                await self._lifecycle_ws.stop()
-            await self._remotes.stop()
-            # Reap agent subprocesses while the loop is still open; otherwise
-            # their transports die in __del__ after loop close (noisy crash on
-            # the Windows proactor loop) and the children leak.
-            await self._bridge.shutdown()
-            voicebox.stop_server()
-            self._save_memory()
 
     def _save_memory(self) -> None:
         if not (cfg.MEMORY_ENABLED and self._context):
@@ -848,8 +897,13 @@ class VoiceSession:
         assert self._llm is not None and self._worker is not None
         self._narrator.set_persona(persona.name, persona.personality)
         await self._apply_persona_tts(persona)
+        model = (
+            llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN).model
+            if llm_endpoint.cloud_only_enabled()
+            else persona.model_name(cfg.LLM_MODEL)
+        )
         delta = self._llm.Settings(
-            model=persona.model_name(cfg.LLM_MODEL),
+            model=model,
             system_instruction=self._system_instruction(),
         )
         await self._worker.queue_frames([LLMUpdateSettingsFrame(delta=delta)])
@@ -1069,9 +1123,13 @@ class VoiceSession:
         if deny_reason is not None:
             self._emit({"type": "sys", "text": f"Not dispatched -- {deny_reason}."})
             return
-        await self._bridge.start(
-            agent, self._with_delegation_context(task), cwd, announce_start=True
+        result = await self._control_plane.dispatch_task(
+            agent,
+            AgentTask(self._with_delegation_context(task), cwd=cwd, announce_start=True),
         )
+        if not hasattr(result, "job_id"):
+            detail = result.error.detail if result.error else "Agent dispatch failed."
+            self._emit({"type": "sys", "text": detail})
 
     def _with_delegation_context(self, task: str) -> str:
         """Attach a small, explicitly untrusted conversation snapshot to a task."""
@@ -1268,10 +1326,9 @@ class VoiceSession:
         Delegation markers carry a task but no agent, so "maybe code puppy can
         fix it" must not silently dispatch to whatever the default backend is.
         """
-        named = voice_commands.named_backend(
-            f"{self._last_user_text} {task}", cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
+        return intent_router.select_marker_backend(
+            self._last_user_text, task, self._default_agent_backend
         )
-        return named or self._default_agent_backend
 
     def _maybe_consume_confirmation(self, text: str) -> str | None:
         """If a job is pending and ``text`` is a yes/no, resolve it. Else None."""
@@ -1320,10 +1377,10 @@ class VoiceSession:
         # an agent can take work, not how an existing job is going.
         rollcall = voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES)
         if rollcall is not None:
-            return self._handle_agent_rollcall(rollcall[0])
+            return await self._handle_agent_rollcall(rollcall[0])
         status_request = voice_commands.parse_agent_status(text, cfg.AGENT_SPOKEN_ALIASES)
         if status_request is not None:
-            return self._handle_agent_status(status_request)
+            return await self._handle_agent_status(status_request)
 
         correction = voice_commands.parse_task_correction(text)
         if correction is not None:
@@ -1362,7 +1419,7 @@ class VoiceSession:
             return f"[Agent update: cancelled {count} active {noun}.]"
         return "[Agent update: there were no matching active tasks to cancel.]"
 
-    def _handle_agent_rollcall(self, agent: str | None = None) -> str:
+    async def _handle_agent_rollcall(self, agent: str | None = None) -> str:
         """Answer "which agents are there?" from what RAP itself knows.
 
         An agent cannot report on its peers -- asked to, it guesses, and a
@@ -1372,28 +1429,12 @@ class VoiceSession:
         the roll call is answered here and never delegated.
         """
         self._agent_ack_turn = True
-        remote_states = {state["name"]: state for state in self._bridge.remote_hosts()}
-        active: dict[str, int] = {}
-        for job in self._bridge.active_jobs():
-            active[job.agent] = active.get(job.agent, 0) + 1
-        backends = [
-            name
-            for name in self._bridge.backend_names()
-            if agent is None or name == agent or name.endswith(f":{agent}")
+        results = await self._control_plane.list_agents(refresh=True)
+        rows = [
+            _control_summary(backend, snapshot)
+            for backend, snapshot in results.items()
+            if agent is None or backend == agent or backend.endswith(f":{agent}")
         ]
-        rows = []
-        for backend in backends:
-            split = remote_protocol.split_backend_name(backend)
-            if split is not None and split[0] in remote_states:
-                state = remote_states[split[0]]
-                ready = "ready" if state["online"] else f"unreachable ({state['error']})"
-                where = state["machine"]
-            else:
-                status, detail = agent_bridge.executable_status(cfg.AGENT_BACKENDS.get(backend, []))
-                ready = "ready" if status == "ok" else f"not runnable here ({detail})"
-                where = self._bridge.machine_for(backend)
-            busy = f", {active[backend]} job(s) running" if backend in active else ""
-            rows.append(f"{backend} on {where}: {ready}{busy}")
         if not rows:
             missing = (
                 f"there is no agent backend named '{agent}'"
@@ -1409,7 +1450,7 @@ class VoiceSession:
             "start any new work.]"
         )
 
-    def _handle_agent_status(self, status_request: tuple[str | None]) -> str:
+    async def _handle_agent_status(self, status_request: tuple[str | None]) -> str:
         """Answer a progress question from live job state instead of delegating.
 
         Without this, "how's that going" / "any update?" reached the intent
@@ -1419,17 +1460,20 @@ class VoiceSession:
         """
         (agent,) = status_request
         self._agent_ack_turn = True
-        jobs = self._bridge.active_jobs(agent)
-        if not jobs:
-            scope = f"for {agent}" if agent else "right now"
+        if agent is not None:
+            snapshot = await self._control_plane.get_agent_status(agent, refresh=False)
             return (
-                f"[Agent status: no active agent tasks {scope}. "
+                f"[Agent status: {_control_summary(agent, snapshot)}. "
                 "Answer from this; do not start any new work.]"
             )
-        lines = "; ".join(
-            f"{job.agent} is {job.status} on '{agent_bridge.task_label(job.task)}'" for job in jobs
+        results = await self._control_plane.list_agents(refresh=False)
+        return (
+            "[Agent status: "
+            + "; ".join(
+                _control_summary(backend, snapshot) for backend, snapshot in results.items()
+            )
+            + ". Answer from this; do not start any new work.]"
         )
-        return f"[Agent status: {lines}. Answer from this; do not start any new work.]"
 
     async def _handle_task_correction(self, text: str, correction: str) -> str | None:
         if self._pending_confirmations:
@@ -1878,6 +1922,11 @@ class VoiceSession:
         self._emit(event)
         if self._lifecycle_ws is not None:
             self._lifecycle_ws.publish(event)
+        if event.get("type") == "agent_job":
+            self._spawn(
+                self._control_plane.ingest_bridge_event(event),
+                name=f"control-plane-{event.get('job_id', 'event')}",
+            )
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
 
@@ -2045,5 +2094,6 @@ class VoiceSession:
 
     def shutdown(self) -> None:
         """Ask the pipeline to end gracefully (safe to call from any thread)."""
+        self._shutdown_requested.set()
         if self._runner is not None:
             self._schedule(self._runner.end("gui-shutdown"))

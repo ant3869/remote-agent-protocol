@@ -5,7 +5,7 @@ echo.
 echo   Pick a persona, override the voice, mute the mic, watch the transcript.
 echo   Audio stays 100%% local (mic + speakers) so the back-and-forth stays snappy.
 echo.
-echo Close the window to quit.
+echo Use Quit, close the last app tab, or close this launcher to stop.
 echo.
 ".venv\Scripts\python" -u -m remote_agent_protocol
 pause

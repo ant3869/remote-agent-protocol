@@ -266,6 +266,35 @@ def test_an_announcement_without_a_task_still_goes_out(monkeypatch, tmp_path, br
     assert "all clear" in json.loads(queued[0].read_text(encoding="utf-8"))["text"]
 
 
+def test_failed_relay_preserves_cause_over_partial_result(monkeypatch, tmp_path, brain_adapter):
+    monkeypatch.setattr(cfg, "S2S_ANNOUNCE_FILE", str(tmp_path / "announce.json"))
+    brain_adapter._publish_announcement(
+        {
+            "agent": "hermes",
+            "job_id": "job-q",
+            "status": "failed",
+            "result": "Checking settings",
+            "failure_detail": "HTTP 429: quota exceeded",
+        }
+    )
+    [queued] = (tmp_path / "announce.json.queue").glob("*.json")
+    text = json.loads(queued.read_text(encoding="utf-8"))["text"]
+    assert "Outcome: HTTP 429: quota exceeded" in text
+
+
+def test_empty_completion_is_not_presented_as_verified_success(
+    monkeypatch, tmp_path, brain_adapter
+):
+    monkeypatch.setattr(cfg, "S2S_ANNOUNCE_FILE", str(tmp_path / "announce.json"))
+    brain_adapter._publish_announcement(
+        {"agent": "hermes", "job_id": "job-empty", "status": "done"}
+    )
+    [queued] = (tmp_path / "announce.json.queue").glob("*.json")
+    text = json.loads(queued.read_text(encoding="utf-8"))["text"]
+    assert "no substantive answer" in text
+    assert "unverified" in text
+
+
 def test_the_brain_puts_the_task_on_the_summary_event():
     """The adapter can only name the job if the event carries it."""
     source = inspect.getsource(brain_module.BrainSession._announce_agent_job)

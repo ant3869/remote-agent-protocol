@@ -10,6 +10,37 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ## [Unreleased]
 
+### Added
+
+- Evidence-backed live agent control plane for the five configured local
+  harnesses. It probes each CLI directly, preserves stale last-known state,
+  projects RAP job evidence, and emits concurrent probe activity to the
+  transcript, roster, lifecycle feed, and avatar.
+
+### Changed
+
+- User messages appear on the right in compact bubbles, with persona and harness
+  output on the left.
+- Conversational corrections use existing history before task classification;
+  brain control turns retain the user's original wording. Spoken summaries are
+  guided to give concrete results and distinguish unknown outcomes from success.
+- Compact transcript rows with inline actions, visible harness results, and a
+  persistent progress row for every active harness above the message composer.
+  Tool updates retain the latest explanatory progress; related persona summaries
+  can be expanded without repeating the full result in the main conversation.
+
+### Fixed
+
+- Diagnosis requests such as "figure out what's wrong with Hermes" select a
+  different configured executor, unless the user explicitly directs Hermes.
+- Diagnostic prose mentioning another agent's quota failure no longer triggers
+  an immediate quota abort of the investigating agent.
+- Failed completion relays preserve the actual cause ahead of partial output;
+  empty completions are reported as unverified.
+- Preserve the actual failure cause when replying to an agent consultation,
+  including provider quota errors, instead of reporting only that it could not answer.
+- Remove routine summary-narration announcements from the transcript.
+
 ## [1.15.0] - 2026-09-15
 
 ### Added

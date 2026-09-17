@@ -21,6 +21,7 @@ def cloud(monkeypatch):
     monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL", "fast-cloud-model")
     monkeypatch.setattr(cfg, "CLOUD_INTENT_MODEL", "")
     monkeypatch.setattr(cfg, "CLOUD_ORCHESTRATION_MODEL", "")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", True)
 
 
 @pytest.fixture
@@ -43,6 +44,16 @@ def test_cloud_is_tried_first_and_local_is_always_last(cloud):
         chain = llm_endpoint.chain(kind)
         assert [e.cloud for e in chain] == [True, False], f"{kind} must fall back locally"
         assert chain[0].headers == {"Authorization": "Bearer sk-test"}
+
+
+def test_cloud_only_omits_the_local_endpoint(monkeypatch, cloud):
+    monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", False)
+
+    chain = llm_endpoint.chain(llm_endpoint.BRAIN, cloud_model="operator-selected-model")
+
+    assert [endpoint.cloud for endpoint in chain] == [True]
+    assert chain[0].model == "operator-selected-model"
+    assert llm_endpoint.cloud_only_enabled() is True
 
 
 def test_a_half_configured_cloud_is_no_cloud(monkeypatch, cloud):
@@ -137,6 +148,7 @@ def test_an_openrouter_key_alone_is_enough(monkeypatch):
     import importlib
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("CLOUD_LLM_LOCAL_FALLBACK", "true")
     for name in ("CLOUD_LLM_BASE_URL", "CLOUD_LLM_API_KEY", "CLOUD_LLM_MODEL"):
         monkeypatch.delenv(name, raising=False)
     reloaded = importlib.reload(cfg)

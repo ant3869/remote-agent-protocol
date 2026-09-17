@@ -45,6 +45,25 @@
     return { status, text: result };
   }
 
+  function progress(row) {
+    const entries = row.activity || [];
+    const action = row.action || entries.at(-1)?.text || row.state || "Waiting for agent output.";
+    // Keep the latest explanatory update visible when a tool or heartbeat arrives.
+    const thought = [...entries].reverse().find(entry => entry.text && entry.text !== action
+      && !/^(Running\b|Still working\b|Starting\b)/i.test(entry.text)
+      && entry.text !== row.task);
+    return { action, thought: thought?.text || "" };
+  }
+
+  function visibleRows(rows) {
+    return rows.filter(row => {
+      if (row.type === "agent_job") return terminal.has(row.status);
+      if (row.type === "routing") return false;
+      // Older servers/replayed sessions may still emit this narration telemetry.
+      return !(row.type === "sys" && row.text === "Voicing an agent job summary.");
+    });
+  }
+
   function el(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -91,9 +110,10 @@
     return body;
   }
 
-  function createView({ store, log, newMessages, live, inspect, decide, cancel }) {
+  function createView({ store, log, newMessages, live, activity, inspect, decide, cancel }) {
     const nodes = new Map();
     const announced = new Map();
+    const activityNodes = new Map();
     let wasAtBottom = true;
     function scrollHost() {
       let node = log;
@@ -133,7 +153,41 @@
       }
       return body;
     }
-    function build(row, consultations) {
+    function renderActivity(activeJobs) {
+      if (!activity) return;
+      activity.hidden = !activeJobs.length;
+      const keys = new Set(activeJobs.map(row => row.key));
+      for (const [key, node] of activityNodes) {
+        if (!keys.has(key)) { node.remove(); activityNodes.delete(key); }
+      }
+      for (const row of activeJobs) {
+        let node = activityNodes.get(row.key);
+        if (!node) {
+          node = el("div", "live-job"); node.dataset.key = row.key;
+          const head = el("div", "live-job-head");
+          head.append(el("i", "presence-dot"), el("strong", "live-job-agent"), el("span", "live-job-state"),
+            button(`Inspect ${row.agent || "harness"} output`, () => inspect(row.job_id), "inspect", "terminal"),
+            button(`Cancel ${row.agent || "harness"} task`, () => cancel(row.job_id), "cancel", "close"));
+          node.append(head, el("p", "live-job-action"), el("p", "live-job-thought"));
+          activity.append(node); activityNodes.set(row.key, node);
+        }
+        const detail = progress(row);
+        node.dataset.status = row.state || row.status || "running";
+        node.querySelector(".live-job-agent").textContent = row.agent || "Harness";
+        node.querySelector(".live-job-state").textContent = `${statusLabels[row.state] || statusLabels[row.status] || "Working"} · ${row.job_id}`;
+        node.querySelector(".live-job-agent").title = row.task || "";
+        for (const [selector, text] of [[".live-job-action", detail.action], [".live-job-thought", detail.thought]]) {
+          const line = node.querySelector(selector);
+          if (line.textContent !== text) line.textContent = text;
+          line.title = text; line.hidden = !text;
+        }
+        const announcement = `${row.agent || "Harness"}: ${detail.action}`;
+        if (announced.get(row.key) !== announcement) {
+          live.textContent = announcement; announced.set(row.key, announcement);
+        }
+      }
+    }
+    function build(row) {
       const article = el("article", "conversation-row");
       article.dataset.key = row.key;
       if (row.type === "transcript") article.dataset.actor = row.role === "user" ? "user" : row.role === "agent" ? "harness" : "persona";
@@ -160,43 +214,36 @@
         const source = el("strong", "actor-name", row.source_agent);
         source.dataset.actor = "harness"; header.append(source);
       }
-      header.append(el("span", "conversation-state", label));
+      const stateLabel = el("span", "conversation-state", label);
+      if (row.type === "transcript" && !["playing", "queued", "interrupted", "failed"].includes(row.delivery)) {
+        stateLabel.classList.add("conversation-delivery");
+      }
+      header.append(stateLabel);
       if (row.occurred_at) {
         const time = el("time", "conversation-time", new Date(row.occurred_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
         time.dateTime = row.occurred_at; header.append(time);
       }
       article.append(header);
       if (row.type === "agent_job") {
-        article.append(el("h3", "conversation-task-title", row.task || "Agent task"));
-        article.append(el("p", "conversation-meta", [row.machine, row.job_id].filter(Boolean).join(" · ")));
-        if (!terminal.has(row.status)) article.append(el("p", "conversation-current", row.action || row.state || "Waiting for agent output."));
-        if (row.tool || row.step) article.append(el("p", "conversation-meta", [row.tool, row.step ? `Step ${row.step}${row.step_total ? `/${row.step_total}` : ""}` : ""].filter(Boolean).join(" · ")));
-        for (const consult of consultations) article.append(exchange(consult));
-        if (row.activity?.length) {
-          const activity = el("details", "conversation-activity"); activity.dataset.detail = "activity";
-          activity.append(el("summary", "", `Activity (${row.activity.length})`));
-          const list = el("ol");
-          for (const entry of row.activity) {
-            const item = el("li");
-            item.append(el("span", "conversation-meta", entry.at ? new Date(entry.at).toLocaleTimeString() + " · " : ""));
-            item.append(document.createTextNode(entry.text)); list.append(item);
-          }
-          activity.append(list); article.append(activity);
-        }
+        header.title = [row.task, row.machine, row.job_id].filter(Boolean).join(" · ");
         const result = outcome(row);
         if (terminal.has(row.status)) {
-          const details = el("details", "conversation-result"); details.dataset.detail = "result";
-          details.open = result.text.length < 600;
-          details.append(el("summary", "", "Full result"), formatted(result.text));
+          article.append(formatted(result.text));
           const partial = row.result && row.failure_detail && row.result !== row.failure_detail;
-          if (partial) details.append(el("strong", "", "Partial result"), formatted(row.result));
-          details.append(copy(partial ? `${result.text}\n\nPartial result\n${row.result}` : result.text));
-          article.append(details);
+          if (partial) {
+            const details = el("details", "conversation-result"); details.dataset.detail = "partial";
+            details.append(el("summary", "", "Partial result"), formatted(row.result)); article.append(details);
+          }
+          header.append(copy(partial ? `${result.text}\n\nPartial result\n${row.result}` : result.text));
+          if (row.activity?.length) {
+            const history = el("details", "conversation-activity"); history.dataset.detail = "activity";
+            history.append(el("summary", "", "Activity history"));
+            const list = el("ol");
+            for (const entry of row.activity) list.append(el("li", "", entry.text));
+            history.append(list); article.append(history);
+          }
         }
-        if (!terminal.has(row.status) && cancel) {
-          article.append(button("Cancel this job", () => cancel(row.job_id), "cancel", "close"));
-        }
-        article.append(button("Inspect technical output", () => inspect(row.job_id), "inspect", "terminal"));
+        header.append(button("Inspect technical output", () => inspect(row.job_id), "inspect", "terminal"));
       } else if (row.type === "agent_consult") article.append(exchange(row));
       else if (row.type.startsWith("agent_confirm")) {
         article.append(formatted(row.task || ""), el("p", "conversation-meta", row.reason || ""));
@@ -206,14 +253,21 @@
       } else if (row.type === "routing") {
         article.append(formatted(row.task || ""), el("p", "conversation-meta", row.reason || `Routing source: ${row.source || "not reported"}`));
       } else {
-        article.append(formatted(row.text || ""));
+        const linkedResult = row.relation === "summary" && row.final !== false && row.delivery !== "playing"
+          && [...store.rows.values()].some(job => job.type === "agent_job" && job.job_id === row.job_id && terminal.has(job.status));
+        if (linkedResult) {
+          article.classList.add("conversation-relay");
+          const relay = el("details"); relay.dataset.detail = "relay";
+          relay.append(el("summary", "", "Read summary"), formatted(row.text || ""));
+          article.append(relay);
+        } else article.append(formatted(row.text || ""));
         if (row.spoken_text != null && row.spoken_text !== row.text) {
           const spoken = el("details"); spoken.dataset.detail = "spoken";
           spoken.append(el("summary", "", "Reported spoken text"), formatted(row.spoken_text)); article.append(spoken);
         }
         if (row.type === "transcript") {
-          article.append(copy(row.text || ""));
-          if (row.job_id) article.append(button(`Open task ${row.job_id}`, () => inspect(row.job_id), "task", "link"));
+          header.append(copy(row.text || ""));
+          if (row.job_id) header.append(button(`Open task ${row.job_id}`, () => inspect(row.job_id), "task", "link"));
         }
       }
       return article;
@@ -227,17 +281,17 @@
         const anchorKey = anchor?.dataset.key;
         const anchorTop = anchor?.getBoundingClientRect().top;
         const all = [...store.rows.values()];
+        const activeJobs = all.filter(row => row.type === "agent_job" && !terminal.has(row.status));
+        renderActivity(activeJobs);
+        const visible = visibleRows(all);
         const seen = new Set();
-        const jobs = new Set(all.filter(row => row.type === "agent_job").map(row => row.job_id));
         let changed = false;
-        for (const row of all) {
-          if (row.type === "agent_consult" && jobs.has(row.parent_job_id || row.job_id)) continue;
-          const consultations = row.type === "agent_job" ? all.filter(other => other.type === "agent_consult" && (other.parent_job_id || other.job_id) === row.job_id) : [];
+        for (const row of visible) {
           seen.add(row.key);
-          const fingerprint = JSON.stringify([row, consultations]);
+          const fingerprint = JSON.stringify(row);
           const old = nodes.get(row.key);
           if (old?.fingerprint === fingerprint) continue;
-          const node = build(row, consultations);
+          const node = build(row);
           if (old) {
             const opens = new Map([...old.node.querySelectorAll("details")].map(d => [d.dataset.detail, d.open]));
             for (const d of node.querySelectorAll("details")) if (opens.has(d.dataset.detail)) d.open = opens.get(d.dataset.detail);
@@ -256,7 +310,7 @@
         }
         for (const [key, entry] of nodes) if (!seen.has(key)) { entry.node.remove(); nodes.delete(key); announced.delete(key); }
         log.querySelector(".empty-state")?.remove();
-        if (!all.length) {
+        if (!visible.length) {
           log.append(el("div", "empty-state", "Conversation is ready. Speak or type a message."));
           wasAtBottom = true; newMessages.hidden = true; return;
         }
@@ -270,7 +324,7 @@
       },
     };
   }
-  const api = { createStore, createView, outcome, deliveryLabels };
+  const api = { createStore, createView, outcome, deliveryLabels, progress, visibleRows };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.RapConversation = api;
 })(typeof window === "undefined" ? globalThis : window);

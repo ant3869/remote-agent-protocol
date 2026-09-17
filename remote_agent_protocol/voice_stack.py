@@ -26,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -492,6 +493,13 @@ def build_stages(
                 # makes the butler feel like he is reading prepared remarks.
                 "--stream_batch_sentences",
                 "1",
+                # A wake phrase is intentionally not forwarded, so the first
+                # command can be brief. Override the sibling launcher's 450 ms
+                # floor: it dropped a real 448 ms post-wake command.
+                "--min_speech_ms",
+                str(cfg.S2S_VAD_MIN_SPEECH_MS),
+                "--min_speech_continuation_ms",
+                str(cfg.S2S_VAD_MIN_SPEECH_CONTINUATION_MS),
                 # End-of-turn patience. The sibling launcher's own values end a
                 # turn on a mid-sentence pause and then give the tail only a
                 # brief window to rejoin it, so a hesitation becomes two turns
@@ -640,17 +648,16 @@ def _spawn(stage: Stage, env: dict[str, str]) -> subprocess.Popen:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Truncate per run: "the last run's log" is the useful artifact, and the
     # console window it replaces never accumulated history either.
-    log_handle = log_path.open("wb")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    process = subprocess.Popen(
-        stage.args,
-        cwd=str(stage.cwd),
-        env=env,
-        creationflags=flags,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-    )
-    log_handle.close()
+    with log_path.open("wb") as log_handle:
+        process = subprocess.Popen(
+            stage.args,
+            cwd=str(stage.cwd),
+            env=env,
+            creationflags=flags,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+        )
     return process
 
 
@@ -729,11 +736,26 @@ def _shutdown(started: list[tuple[Stage, subprocess.Popen]]) -> None:
                     continue
             except (OSError, subprocess.SubprocessError):
                 logger.warning(f"Soft shutdown failed for {stage.name}; forcing its process tree")
-        _force_process_tree(process)
+        try:
+            _force_process_tree(process)
+            process.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning(f"Could not finish stopping {stage.name}: {exc}")
 
 
 def run_stack() -> int:
     """Start every stage in order, then supervise until one exits."""
+    if process_guard.instance_is_running():
+        url = process_guard.existing_instance_url()
+        if url:
+            logger.info(f"Reopening Remote Agent Protocol: {url}")
+            webbrowser.open(url)
+            return 0
+        logger.error(
+            "Remote Agent Protocol is already running. Its window could not be reopened; "
+            "wait for startup or close its original launcher before trying again."
+        )
+        return 2
     s2s_home = resolve_s2s_home()
     if s2s_home is None:
         logger.error(
@@ -808,7 +830,7 @@ def run_stack() -> int:
             if stopped:
                 return
             stopped = True
-        _shutdown(started)
+            _shutdown(started)
 
     # Closing this window sends CTRL_CLOSE_EVENT, which CPython does not
     # turn into KeyboardInterrupt. Left unhandled, Windows force-terminates
@@ -826,8 +848,11 @@ def run_stack() -> int:
             output_device=output_device,
         ):
             logger.info(f"Starting {stage.name}")
-            process = _spawn(stage, env)
-            started.append((stage, process))
+            with stop_lock:
+                if stopped:
+                    return 0
+                process = _spawn(stage, env)
+                started.append((stage, process))
             if not _await_ready(stage, process):
                 return 1
             logger.info(f"{stage.name} is ready")
@@ -844,6 +869,9 @@ def run_stack() -> int:
     except KeyboardInterrupt:
         logger.info("Interrupted; shutting down the voice stack")
         return 0
+    except OSError as exc:
+        logger.error(f"Could not start the voice stack: {exc}")
+        return 1
     finally:
         stop_everything()
 

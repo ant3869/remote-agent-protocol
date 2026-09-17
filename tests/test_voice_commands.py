@@ -327,6 +327,26 @@ class ParseImplicitTaskTests(unittest.TestCase):
         self.assertIsNotNone(self.parse("are you accessing my microphone right now?"))
 
 
+class LocalRuntimeTimeQueryTests(unittest.TestCase):
+    def test_current_clock_questions_are_recognized(self):
+        for text in (
+            "what time is it?",
+            "what's the current time",
+            "can you tell me what time it is right now",
+            "tell me today's date",
+            "what day is it",
+        ):
+            self.assertTrue(voice_commands.is_local_runtime_time_query(text), text)
+
+    def test_live_lookups_with_time_words_are_not_host_clock_questions(self):
+        for text in (
+            "what time does the store open?",
+            "what's the travel time to the airport?",
+            "what date is the next concert?",
+        ):
+            self.assertFalse(voice_commands.is_local_runtime_time_query(text), text)
+
+
 class ParseTaskCorrectionTests(unittest.TestCase):
     def test_correction_returns_the_instruction(self):
         self.assertEqual(
@@ -494,6 +514,12 @@ class AgentStatusPhrasingTests(unittest.TestCase):
             (None,),
         )
 
+    def test_named_agent_work_question_is_a_local_status_read(self):
+        self.assertEqual(self.status("What is Hermes working on?"), ("hermes",))
+
+    def test_short_follow_up_progress_question_is_a_local_status_read(self):
+        self.assertEqual(self.status("How far along is it?"), (None,))
+
     def test_update_about_unrelated_topics_does_not_match(self):
         self.assertIsNone(self.status("give me an update on the weather situation"))
 
@@ -517,6 +543,21 @@ class AgentStatusPhrasingTests(unittest.TestCase):
 
     def test_is_anything_still_running_without_agent_wording_does_not_match(self):
         self.assertIsNone(self.status("is anything still running in the kitchen?"))
+
+
+class AgentRedirectPhrasingTests(unittest.TestCase):
+    ALIASES = {"codex": "codex", "code puppy": "code-puppy"}
+
+    def test_redirects_an_active_task_to_a_named_agent(self):
+        self.assertEqual(
+            voice_commands.parse_agent_redirect("Redirect that task to Codex", self.ALIASES),
+            "codex",
+        )
+
+    def test_requires_a_specific_active_task_reference(self):
+        self.assertIsNone(
+            voice_commands.parse_agent_redirect("Ask Codex to redirect the report", self.ALIASES)
+        )
 
 
 class RequiresConfirmationTests(unittest.TestCase):

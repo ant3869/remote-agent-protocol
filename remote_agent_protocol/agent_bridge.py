@@ -211,15 +211,16 @@ _CAPACITY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A live provider banner is short. Agents also echo long content -- task text,
-# memory dumps, file excerpts -- and a long line carrying one of these phrases
-# is that echo, not a provider status. Judging one aborts a healthy job.
-_PROVIDER_FAILURE_MAX_CHARS = 400
-# The exception: a provider can answer with a verbose JSON error body. This
-# tells that apart from echoed prose without leaning on the quota wording,
-# which is exactly what the echoed text contains too.
+# Match error reports at the start, not quoted failures inside diagnostic prose.
 _PROVIDER_ERROR_SHAPE_RE = re.compile(
-    r'"error"|\berror\b\s*[:=]|\bstatus_code\b|\bHTTP/\d',
+    r"^(?:\[?(?:error|fatal)\]?\b|[\w.]+(?:Error|Exception)\b|"
+    r"(?:api|provider|request|stream|completion|authentication|unexpected)\s+(?:error|failed)\b|"
+    r"HTTP(?:/\d(?:\.\d)?)?\s+[45]\d\d\b|[45]\d\d\b|status_code\s*[:=]|"
+    r"usage.?limit.?reached\b|insufficient.?quota\b|billing.?hard.?limit\b|"
+    r"quota (?:has been )?(?:exceeded|exhausted)\b|resource.?exhausted\b|"
+    r"rate.?limit\b|too many requests\b|out of (?:credits|usage)\b|"
+    r"credit balance\b|invalid api key\b|not authenticated\b|"
+    r"(?:server|service|provider) (?:is )?(?:overloaded|at capacity)\b)",
     re.IGNORECASE,
 )
 # Approval menus and confirmation prompts. Agents run headless with no stdin,
@@ -324,12 +325,18 @@ def build_command(
 def detect_provider_failure(line: str) -> str | None:
     """Classify provider-side quota, throttling, auth, or capacity failures.
 
-    Only short lines are judged. These phrases turn up inside content an agent
-    prints back -- a task description, a memory dump -- and reading that as a
-    live provider status kills a job that was working. A long line still counts
-    when it is shaped like an error report rather than prose.
+    Require an error banner or a top-level JSON error. Diagnostic prose and
+    structured progress can discuss another job's failure without failing this job.
     """
-    if len(line) > _PROVIDER_FAILURE_MAX_CHARS and not _PROVIDER_ERROR_SHAPE_RE.search(line):
+    line = re.sub(r"^[^\w{\[]+", "", clean_line(line).strip())
+    json_error = False
+    if line.startswith("{"):
+        try:
+            payload = json.loads(line)
+            json_error = isinstance(payload, dict) and bool(payload.get("error"))
+        except ValueError:
+            pass
+    if not json_error and not _PROVIDER_ERROR_SHAPE_RE.match(line):
         return None
     if _QUOTA_RE.search(line):
         return "quota"
@@ -1474,6 +1481,13 @@ class AgentBridge:
         token, consult_id, asker, question = pending
         answer = job.result or job.summary
         ok = job.status == STATUS_DONE and bool(answer)
+        reason = (
+            ""
+            if ok
+            else (
+                job.failure_detail or job.summary or f"{job.agent} could not answer ({job.status})"
+            )
+        )
         await asyncio.to_thread(
             collab.write_consult_answer,
             self._workspace_dir,
@@ -1481,7 +1495,7 @@ class AgentBridge:
             consult_id,
             ok=ok,
             answer=answer,
-            reason="" if ok else f"{job.agent} could not answer",
+            reason=reason,
             agent=job.agent,
         )
         self._emit(
@@ -1496,6 +1510,7 @@ class AgentBridge:
                 "peer": asker,
                 "question": question,
                 "answer": answer if ok else "",
+                "reason": reason,
             }
         )
 
@@ -1866,6 +1881,29 @@ class AgentBridge:
         """Ask the process to stop, escalating to a hard kill after the grace."""
         if proc.returncode is not None:
             return
+        if sys.platform == "win32":
+            # Several agent CLIs are command wrappers that spawn a Node/Python
+            # child which inherits stdout. Terminating only the wrapper leaves
+            # that child alive and the stream reader never sees EOF, so RAP
+            # falsely acknowledges cancellation without a terminal job event.
+            # This PID belongs to the subprocess we started for this job.
+            try:
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(proc.pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(killer.wait(), timeout=self._kill_grace_secs + 5.0)
+                await asyncio.wait_for(proc.wait(), timeout=self._kill_grace_secs + 5.0)
+                return
+            except (OSError, ProcessLookupError, TimeoutError):
+                # Fall back to the portable direct-child path below. It still
+                # handles a CLI that exited between the status check and kill.
+                pass
         try:
             proc.terminate()
         except ProcessLookupError:
