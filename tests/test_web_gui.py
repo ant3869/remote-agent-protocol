@@ -409,6 +409,7 @@ def test_avatar_frames_are_served_with_immutable_browser_cache():
             f"http://127.0.0.1:{port}/assets/avatars/butler/runtime_512_v1/base.webp",
             timeout=5,
         )
+        assert response.headers["Content-Type"] == "image/webp"
         assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
     finally:
         server.shutdown()

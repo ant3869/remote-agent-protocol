@@ -1,6 +1,8 @@
 import { AvatarEnvelopeStream } from "./lip-sync.js";
 
 const ASSET_BASE = "/assets/avatars/butler/runtime_512_v1/";
+const ASSET_REVISION = "20260917";
+const FRAME_LOAD_TIMEOUT_MS = 6000;
 const MATERIALIZE_DURATIONS = [55, 55, 55, 55, 55, 72, 72, 72, 72, 72, 95, 110, 220];
 const FAILURE_DURATIONS = [80, 65, 65, 75, 70, 75, 80, 100, 650];
 
@@ -36,7 +38,9 @@ export function criticalFrameNames() {
 }
 
 export function frameUrls(base = ASSET_BASE) {
-  return Object.fromEntries(FRAME_NAMES.map((name) => [name, `${base}${name}.webp`]));
+  return Object.fromEntries(
+    FRAME_NAMES.map((name) => [name, `${base}${name}.webp?v=${ASSET_REVISION}`]),
+  );
 }
 
 export function stateForResolved(state) {
@@ -71,11 +75,26 @@ function randomBetween(minimum, maximum) {
   return minimum + Math.random() * (maximum - minimum);
 }
 
-async function preloadFrames(urls, names = FRAME_NAMES, ImageImpl = Image) {
+export async function preloadFrames(
+  urls,
+  names = FRAME_NAMES,
+  ImageImpl = Image,
+  timeoutMs = FRAME_LOAD_TIMEOUT_MS,
+) {
   const entries = await Promise.all(names.map((name) => new Promise((resolve, reject) => {
     const image = new ImageImpl();
-    image.onload = () => resolve([name, image]);
-    image.onerror = () => reject(new Error(`Unable to load Butler frame: ${name}`));
+    const timeout = setTimeout(
+      () => reject(new Error(`Timed out loading Butler frame: ${name}`)),
+      timeoutMs,
+    );
+    image.onload = () => {
+      clearTimeout(timeout);
+      resolve([name, image]);
+    };
+    image.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error(`Unable to load Butler frame: ${name}`));
+    };
     image.src = urls[name];
   })));
   return Object.fromEntries(entries);

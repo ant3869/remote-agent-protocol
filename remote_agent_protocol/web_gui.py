@@ -2152,9 +2152,12 @@ class WebVoiceApp:
                         b"__CSRF_TOKEN_PLACEHOLDER__", app._csrf_token.encode("ascii")
                     )
                 self.send_response(HTTPStatus.OK)
-                self.send_header(
-                    "Content-Type", mimetypes.guess_type(target.name)[0] or "text/plain"
+                content_type = (
+                    "image/webp"
+                    if target.suffix.lower() == ".webp"
+                    else mimetypes.guess_type(target.name)[0] or "text/plain"
                 )
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 if rel.startswith("assets/avatars/"):
                     self.send_header("Cache-Control", "public, max-age=31536000, immutable")

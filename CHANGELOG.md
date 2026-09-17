@@ -10,6 +10,8 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-09-17
+
 ### Added
 
 - Evidence-backed live agent control plane for the five configured local
@@ -28,6 +30,8 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   persistent progress row for every active harness above the message composer.
   Tool updates retain the latest explanatory progress; related persona summaries
   can be expanded without repeating the full result in the main conversation.
+- Persona and harness attribution now use quieter graphite-compatible lavender
+  tones and semibold labels instead of the previous heavy coral treatment.
 
 ### Fixed
 
@@ -40,6 +44,9 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - Preserve the actual failure cause when replying to an agent consultation,
   including provider quota errors, instead of reporting only that it could not answer.
 - Remove routine summary-narration announcements from the transcript.
+- Butler frame delivery now uses a versioned resource URL, correct WebP media
+  types, and a bounded preload deadline, so a stalled browser resource cannot
+  leave the companion panel blank indefinitely.
 
 ## [1.15.0] - 2026-09-15
 

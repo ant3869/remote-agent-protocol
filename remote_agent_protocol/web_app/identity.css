@@ -1,9 +1,11 @@
 /* Shared actor identity and icon treatment, independent of the selected layout. */
 :root {
   --identity-user: #7dd3fc;
-  --identity-persona: #fb7185;
-  --identity-harness: #c084fc;
-  --identity-harness-edge: #a855f7;
+  /* Keep actor attribution inside the graphite palette: cool lavender for
+     the host, violet for harnesses, and ice blue for the user. */
+  --identity-persona: #c4b5fd;
+  --identity-harness: #b8a7f7;
+  --identity-harness-edge: #8b7ad8;
 }
 .ui-icon { display: block; width: 22px; height: 22px; flex: 0 0 auto; pointer-events: none; }
 [data-icon] { display: inline-flex; align-items: center; justify-content: center; }
@@ -21,25 +23,25 @@
 [data-actor="user"] { --actor-color: var(--identity-user); }
 [data-actor="persona"] { --actor-color: var(--identity-persona); }
 [data-actor="harness"] { --actor-color: var(--identity-harness); }
-.actor-name, [data-actor] > .conversation-header .conversation-name { color: var(--actor-color); font-weight: 800; }
-.conversation-row[data-actor] { border-left: 5px solid var(--actor-color); }
+.actor-name, [data-actor] > .conversation-header .conversation-name { color: var(--actor-color); font-weight: 600; }
+.conversation-row[data-actor] { border-left: 3px solid var(--actor-color); }
 .conversation-row[data-actor="harness"] { border-left-color: var(--identity-harness-edge); }
 .conversation-exchange { border-left: 3px solid var(--identity-harness); }
-.conversation-exchange strong { color: var(--identity-harness); font-weight: 800; }
+.conversation-exchange strong { color: var(--identity-harness); font-weight: 600; }
 
 #personaName, #heroPersona, #avatarPersonaName, #personaPreviewName, #settingsPersona,
-#personaSelect, #settingsPersonaSelect, #personaEditName, .persona-row > strong { color: var(--identity-persona); font-weight: 800; }
-.persona-row { border-left: 3px solid var(--identity-persona); }
+#personaSelect, #settingsPersonaSelect, #personaEditName, .persona-row > strong { color: var(--identity-persona); font-weight: 600; }
+.persona-row { border-left: 2px solid var(--identity-persona); }
 .agent-chip > strong, .agent-roster-row > strong, .agent-job-row > strong, #confirmTitle,
 .confirm-history-head > strong, #agentDetailAgent, #settingsAgent, #toolSelect,
-#settingsToolSelect, #personaEditToolUser, #personaPreviewTool { color: var(--identity-harness); font-weight: 800; }
-.agent-chip, .agent-roster-row { border-left: 3px solid var(--identity-harness-edge); }
+#settingsToolSelect, #personaEditToolUser, #personaPreviewTool { color: var(--identity-harness); font-weight: 600; }
+.agent-chip, .agent-roster-row { border-left: 2px solid var(--identity-harness-edge); }
 #messageInput { border-left: 3px solid var(--identity-user); }
-.palette-result[data-actor] > span { color: var(--actor-color); font-weight: 800; }
+.palette-result[data-actor] > span { color: var(--actor-color); font-weight: 600; }
 .palette-result .ui-icon { color: var(--text-secondary); }
 .palette-result { display: flex; align-items: center; gap: 10px; }
 .palette-result > span { flex: 1; }
-.status-resource-stack [data-actor] > strong { color: var(--actor-color); font-weight: 800; }
+.status-resource-stack [data-actor] > strong { color: var(--actor-color); font-weight: 600; }
 
 .conversation-action.icon-only { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; min-height: 40px; padding: 9px; margin: 6px 4px 0 0; border: 1px solid transparent; border-radius: 7px; color: var(--text-muted); }
 .conversation-action.icon-only:hover, .conversation-action.icon-only:focus-visible { color: var(--text-primary); border-color: var(--border-strong); background: var(--surface-hover); }

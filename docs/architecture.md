@@ -35,7 +35,8 @@ Brain mode:
 - `web_gui.py` serves the loopback web control center (a hand-rolled
   `http.server` with a per-launch CSRF token) and bridges HTTP actions/events
   to `VoiceSession`; `web_app/` is the served HTML/CSS/JS, including the
-  Three.js holographic avatar under `web_app/avatar/`. The UI renders
+  holographic avatar runtime under `web_app/avatar/`. The bundled Butler uses
+  Canvas 2D frames; other avatar IDs can use the vendored Three.js path. The UI renders
   transcript, health, latency, session state, persona controls, shortcuts, and
   the shared prompt composer. In composer mode, voice transcripts, typed
   notes, links, images, and files stay in a local draft until the user sends
@@ -133,6 +134,11 @@ frontend mic -> frontend VAD/STT -> RAP brain endpoint -> frontend TTS -> fronte
   control surface the GUI expects, so the same web control center drives both
   modes. Controls with no local audio path degrade explicitly rather than
   silently: spoken output is reported as text, not voiced.
+- `agent_control.py` owns evidence-backed harness probes and RAP-owned task
+  cancellation/redirection. It contacts each configured CLI independently,
+  persists the latest observation, and marks it stale after a restart until a
+  fresh probe succeeds; it does not infer external-session progress or perform
+  unsafe external cancellation.
 - `openai_bridge.py` is the loopback OpenAI-compatible HTTP server
   (`/health`, `/v1/models`, `/v1/chat/completions`, SSE streaming). `web_gui.py`
   serves the same routes when the GUI itself is in brain mode; run one or the

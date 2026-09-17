@@ -8,6 +8,7 @@ import {
   stateForResolved,
   frameForState,
   frameUrls,
+  preloadFrames,
 } from "../../remote_agent_protocol/web_app/avatar/frame-avatar-scene.js";
 
 
@@ -143,5 +144,17 @@ test("all frame URLs are same-origin RAP assets", () => {
 
   assert.deepEqual(Object.keys(urls), FRAME_NAMES);
   assert.ok(Object.values(urls).every((url) => url.startsWith("/assets/avatars/butler/runtime_512_v1/")));
+  assert.ok(Object.values(urls).every((url) => url.includes("?v=20260917")));
   assert.ok(Object.values(urls).every((url) => !url.includes("4188")));
+});
+
+test("frame preload times out instead of leaving the companion blank forever", async () => {
+  class NeverLoadingImage {
+    set src(_value) {}
+  }
+
+  await assert.rejects(
+    preloadFrames({ base: "/assets/avatars/butler/runtime_512_v1/base.webp" }, ["base"], NeverLoadingImage, 5),
+    /Timed out loading Butler frame: base/,
+  );
 });

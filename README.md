@@ -37,6 +37,10 @@ real-time audio pipeline.
 - Agent jobs run as background subprocesses, stream output without blocking
   voice, follow a normalized lifecycle (started / in progress / tool running /
   waiting / blocked / completed / failed), and are announced out loud.
+- The live agent control plane directly probes each configured harness for
+  current evidence, keeps one unavailable harness from blocking the others,
+  and projects RAP-owned task progress without claiming control of external
+  sessions it cannot safely inspect or cancel.
 - Destructive or elevated delegations are held for spoken or clicked
   confirmation before they run. If a one-shot backend asks for permission and
   exits, approval safely relaunches the same task instead of reporting success.
