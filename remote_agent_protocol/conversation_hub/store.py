@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -19,6 +20,19 @@ from .models import (
 
 SCHEMA_VERSION = 1
 _SECRET_KEY_PARTS = ("token", "secret", "password", "api_key", "authorization")
+_SECRET_ASSIGNMENT = re.compile(
+    r"\b(?P<label>api_key|token|secret|password|hidden[ _]reasoning)\b"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)",
+    flags=re.IGNORECASE,
+)
+_AUTHORIZATION_HEADER = re.compile(
+    r"\bauthorization\b(?P<separator>\s*:\s*)(?:bearer\s+)?(?P<value>[^\s,;]+)",
+    flags=re.IGNORECASE,
+)
+_HIDDEN_REASONING_BLOCK = re.compile(
+    r"<(?:analysis|thinking|reasoning)>.*?</(?:analysis|thinking|reasoning)>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -55,7 +69,16 @@ def _redact(value: Any) -> Any:
         return [_redact(item) for item in value]
     if isinstance(value, tuple):
         return [_redact(item) for item in value]
+    if isinstance(value, str):
+        return _redact_text(value)
     return value
+
+
+def _redact_text(value: str) -> str:
+    """Remove secret values and hidden-reasoning blocks from persisted text."""
+    value = _HIDDEN_REASONING_BLOCK.sub("[REDACTED]", value)
+    value = _AUTHORIZATION_HEADER.sub(r"Authorization\g<separator>[REDACTED]", value)
+    return _SECRET_ASSIGNMENT.sub(r"\g<label>\g<separator>[REDACTED]", value)
 
 
 def _list_of_objects(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
