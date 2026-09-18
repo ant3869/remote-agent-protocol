@@ -7,7 +7,10 @@ import re
 import shutil
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
+from ...conversation_hub.context import ContextPackage
+from ...conversation_hub.models import SessionBinding, SessionStrategy
 from ..models import (
     Activity,
     AgentCapability,
@@ -36,6 +39,7 @@ class BridgeCliAdapter:
     """
 
     executable: str
+    conversation_session_strategy = SessionStrategy.REHYDRATE
 
     def __init__(
         self,
@@ -54,6 +58,44 @@ class BridgeCliAdapter:
         self._machine = machine
         self._probe_timeout_secs = probe_timeout_secs
         self._freshness_secs = freshness_secs
+
+    async def validate_bound_session(self, binding: SessionBinding) -> bool:
+        """Validate only stateless rehydration; native ownership is not yet proven."""
+        return (
+            binding.agent_id == self.agent_id
+            and binding.adapter_id == self.agent_id
+            and binding.channel_id == f"agent:{self.agent_id}"
+            and binding.strategy is SessionStrategy.REHYDRATE
+            and binding.native_session_id is None
+        )
+
+    async def create_bound_session(self, channel_id: str) -> SessionBinding:
+        """Allocate a RAP binding without adopting any terminal conversation."""
+        if channel_id != f"agent:{self.agent_id}":
+            raise ValueError("Requested channel does not match adapter identity")
+        now = datetime.now(UTC)
+        return SessionBinding(
+            binding_id=f"binding_{uuid4().hex}",
+            channel_id=channel_id,
+            agent_id=self.agent_id,
+            strategy=SessionStrategy.REHYDRATE,
+            adapter_id=self.agent_id,
+            native_session_id=None,
+            created_at=now,
+            last_used_at=now,
+        )
+
+    async def dispatch_in_session(
+        self, binding: SessionBinding, context: ContextPackage
+    ) -> JobHandle:
+        """Rehydrate a clean subprocess through the existing bridge lifecycle."""
+        if not await self.validate_bound_session(binding):
+            raise ValueError("Unsafe or mismatched conversation session binding")
+        job_id = await self._bridge.start(self.agent_id, context.render(), clean_session=True)
+        job = self._bridge.get(job_id)
+        if job is not None and job.status == "failed":
+            raise RuntimeError(job.failure_detail or job.summary or "Session dispatch failed")
+        return JobHandle(job_id, self.agent_id)
 
     async def discover(self) -> AgentObservation:
         """Determine whether the configured executable is installed."""

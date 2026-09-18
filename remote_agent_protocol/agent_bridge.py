@@ -303,6 +303,80 @@ class AgentJob:
     _last_status: float = field(default=0.0, repr=False)
     _host_before: str | None = field(default=None, repr=False)
     _launch_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _clean_session: bool = field(default=False, repr=False)
+    _command_template: tuple[str, ...] | None = field(default=None, repr=False)
+
+
+def clean_session_template(template: list[str]) -> list[str]:
+    """Remove terminal resume selectors from verified headless CLI command forms.
+
+    Operate before task substitution, so user text is never interpreted as CLI
+    options. Unknown wrappers and alternate command forms fail closed instead
+    of guessing at their session semantics. The configured template is immutable.
+    """
+    if not template or template.count("{task}") != 1:
+        raise ValueError("Clean sessions require a direct CLI and one task argument")
+    executable = Path(template[0]).stem.lower()
+    selectors: dict[str, int]  # 0: flag only; 1: optional/required selector value
+    if executable == "claude" and any(flag in template for flag in ("-p", "--print")):
+        if any(token.partition("=")[0] in {"--cloud", "--remote-control"} for token in template):
+            raise ValueError("Clean Claude sessions require local print mode")
+        selectors = {
+            "--resume": 1,
+            "-r": 1,
+            "--continue": 0,
+            "-c": 0,
+            "--session-id": 1,
+            "--fork-session": 0,
+            "--from-pr": 1,
+            "--teleport": 1,
+        }
+        extra = ["--no-session-persistence"]
+        offset = 1
+    elif executable == "codex" and template[1:2] == ["exec"]:
+        if "resume" in template[2:] or "fork" in template[2:] or "--last" in template:
+            raise ValueError("Clean Codex sessions require exec without resume or fork")
+        selectors = {}
+        extra = ["--ephemeral"]
+        offset = 2
+    elif executable == "hermes" and template[1:2] == ["chat"]:
+        selectors = {"--resume": 1, "-r": 1, "--continue": 1, "-c": 1, "--create-if-missing": 0}
+        extra = ["--oneshot"]
+        offset = 2
+    elif executable == "code-puppy" and any(flag in template for flag in ("-p", "--prompt")):
+        selectors = {"--resume": 1, "-r": 1, "--quick-resume": 1, "-qr": 1}
+        extra = []
+        offset = 1
+    elif executable == "openclaw" and template[1:3] == ["agent", "exec"]:
+        selectors = {}
+        extra = []
+        offset = 3
+    else:
+        raise ValueError("Clean sessions require a verified headless CLI command form")
+    cleaned = template[:offset]
+    index = offset
+    while index < len(template):
+        token = template[index]
+        flag, separator, _ = token.partition("=")
+        if flag in selectors:
+            index += 1
+            if selectors[flag] and not separator and index < len(template):
+                value = template[index]
+                if value != "{task}" and not value.startswith("-"):
+                    index += 1
+            continue
+        if any(
+            token.startswith(short) and token != short
+            for short in selectors
+            if short.startswith("-") and not short.startswith("--")
+        ):
+            raise ValueError("Ambiguous abbreviated session option in clean command")
+        if flag.startswith("--") and any(option.startswith(flag) for option in selectors):
+            raise ValueError("Abbreviated session option in clean command")
+        cleaned.append(token)
+        index += 1
+    cleaned[offset:offset] = [flag for flag in extra if flag not in cleaned]
+    return cleaned
 
 
 def build_command(
@@ -1061,6 +1135,7 @@ class AgentBridge:
         consult_depth: int = 0,
         consult_chain: tuple[str, ...] = (),
         timeout_secs: float | None = None,
+        clean_session: bool = False,
     ) -> str:
         """Spawn a job and return its id immediately; output streams via events."""
         job = AgentJob(
@@ -1078,6 +1153,19 @@ class AgentBridge:
         job._last_status = job._t0
         self._jobs[job.job_id] = job
         self._idle_notified = False
+
+        if clean_session:
+            try:
+                if self._is_remote(agent):
+                    raise ValueError(
+                        "Clean conversation sessions are not supported by remote hosts"
+                    )
+                job._command_template = tuple(clean_session_template(self._backends.get(agent, [])))
+                job._clean_session = True
+            except ValueError as exc:
+                result = await self._fail_fast(job, str(exc))
+                job._launch_done.set()
+                return result
 
         if agent not in self._backends and not self._is_remote(agent):
             # A configured host that is simply asleep deserves to be named as
@@ -1192,6 +1280,12 @@ class AgentBridge:
         """Resolve cwd, build the command, spawn the subprocess, and stream it to completion."""
         agent = job.agent
         if self._is_remote(agent):
+            if job._clean_session:
+                await self._fail_fast(
+                    job, "Clean conversation sessions are not supported by remote hosts"
+                )
+                job._launch_done.set()
+                return
             await self._launch_remote(job, task, cwd)
             return
         cwd = resolve_cwd(cwd, self._workspace_dir)
@@ -1245,11 +1339,13 @@ class AgentBridge:
                         peers, str(folder), budget=cfg.AGENT_CONSULT_BUDGET
                     )
         command = build_command(
-            self._backends[agent], command_task, extra_args=self._model_overrides.get(agent)
+            list(job._command_template) if job._command_template else self._backends[agent],
+            command_task,
+            extra_args=self._model_overrides.get(agent),
         )
-        if agent in _HERMES_SESSION_AGENTS:
+        if not job._clean_session and agent in _HERMES_SESSION_AGENTS:
             self._maybe_rotate_session(agent, job)
-        if session_id := self._session_ids.get(agent):
+        if not job._clean_session and (session_id := self._session_ids.get(agent)):
             try:
                 chat_index = command.index("chat") + 1
             except ValueError:
@@ -1590,7 +1686,8 @@ class AgentBridge:
             if job.agent in _HERMES_SESSION_AGENTS and (
                 session_match := _HERMES_SESSION_RE.fullmatch(line)
             ):
-                self._session_ids[job.agent] = session_match.group(1)
+                if not job._clean_session:
+                    self._session_ids[job.agent] = session_match.group(1)
                 continue
             consult_request = parse_consult_line(line)
             if consult_request is not None:
