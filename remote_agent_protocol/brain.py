@@ -387,6 +387,44 @@ class BrainSession:
             self._direct_reply = datetime.now().strftime("It is %I:%M %p on %A, %B %d, %Y, sir.")
             return "[Current local time supplied by the host; do not start any new work.]"
 
+        # A selection correction must not approve the old backend merely
+        # because the utterance begins with "okay".
+        if voice_commands.needs_agent_selection(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES):
+            cancel_request = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
+            if cancel_request is not None:
+                return await self._handle_agent_cancel(cancel_request)
+            excluded, different = voice_commands.agent_selection_constraints(
+                text, cfg.AGENT_SPOKEN_ALIASES
+            )
+            if different and not excluded:
+                current = self._bridge.latest_active()
+                excluded.add(current.agent if current else self._default_agent_backend)
+            if voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES) is not None:
+                return await self._handle_agent_rollcall(excluded=excluded)
+            self._control_turn = True
+            self._direct_reply = (
+                "Which agent should I use instead, sir? I have not sent or reassigned any work."
+            )
+            return "[Agent selection needs a named destination; do not start any new work.]"
+
+        cancel_request = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
+        if (
+            cancel_request is not None
+            and voice_commands.parse_delegation(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)
+            is not None
+        ):
+            return await self._handle_agent_cancel(cancel_request)
+        redirect_agent = voice_commands.parse_agent_redirect(text, cfg.AGENT_SPOKEN_ALIASES)
+        if redirect_agent is not None:
+            return await self._handle_agent_redirect(redirect_agent)
+        # Before progress or confirmation: "okay, ping Codex" is a local
+        # check, not approval of an unrelated pending delegation.
+        rollcall = voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES)
+        if rollcall is not None:
+            return await self._handle_agent_rollcall(rollcall[0])
+        status_request = voice_commands.parse_agent_status(text, cfg.AGENT_SPOKEN_ALIASES)
+        if status_request is not None:
+            return await self._handle_agent_status(status_request)
         consumed = self._maybe_consume_confirmation(text)
         if consumed is not None:
             # A real dispatch (or denial) already happened deterministically;
@@ -397,20 +435,8 @@ class BrainSession:
             # twice, the second time from the acknowledgment reply itself).
             self._control_turn = True
             return consumed
-        cancel_request = voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES)
         if cancel_request is not None:
             return await self._handle_agent_cancel(cancel_request)
-        redirect_agent = voice_commands.parse_agent_redirect(text, cfg.AGENT_SPOKEN_ALIASES)
-        if redirect_agent is not None:
-            return await self._handle_agent_redirect(redirect_agent)
-        # Before the per-agent progress question: "is hermes up" asks whether
-        # an agent can take work, not how an existing job is going.
-        rollcall = voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES)
-        if rollcall is not None:
-            return await self._handle_agent_rollcall(rollcall[0])
-        status_request = voice_commands.parse_agent_status(text, cfg.AGENT_SPOKEN_ALIASES)
-        if status_request is not None:
-            return await self._handle_agent_status(status_request)
         parsed = await self._resolve_delegation(text)
         if parsed is not None:
             agent, task = parsed
@@ -440,6 +466,10 @@ class BrainSession:
             logger.warning(
                 f"Voice cancel still running after {self._cancel_wait_s}s; backgrounding"
             )
+            self._direct_reply = (
+                "I requested cancellation, sir, but an agent is slow to stop. "
+                "Cancellation is still running in the background."
+            )
             return (
                 "[Agent update: cancellation is underway but at least one agent is slow "
                 "to stop; it will finish in the background. Tell the user briefly; "
@@ -448,16 +478,20 @@ class BrainSession:
         logger.info(f"Voice cancel -> agent={agent} all={all_jobs} cancelled={count}")
         if count:
             noun = "task" if count == 1 else "tasks"
+            self._direct_reply = f"I cancelled {count} active {noun}, sir."
             return (
                 f"[Agent update: cancelled {count} active {noun}. "
                 "Confirm briefly; do not start any new work.]"
             )
+        self._direct_reply = "I found no matching active tasks to cancel, sir."
         return (
             "[Agent update: there were no matching active tasks to cancel. "
             "Tell the user briefly; do not start any new work.]"
         )
 
-    async def _handle_agent_rollcall(self, agent: str | None = None) -> str:
+    async def _handle_agent_rollcall(
+        self, agent: str | None = None, *, excluded: set[str] | None = None
+    ) -> str:
         """Answer "which agents are there?" from what RAP itself knows.
 
         An agent cannot report on its peers -- asked to, it guesses, and a
@@ -471,16 +505,23 @@ class BrainSession:
         rows = [
             _control_summary(backend, snapshot)
             for backend, snapshot in results.items()
-            if agent is None or backend == agent or backend.endswith(f":{agent}")
+            if (agent is None or backend == agent or backend.endswith(f":{agent}"))
+            and backend not in (excluded or set())
         ]
         if not rows:
             missing = (
                 f"there is no agent backend named '{agent}'"
                 if agent
-                else ("no agent backends are configured")
+                else (
+                    "no alternative agent backends are configured"
+                    if excluded
+                    else "no agent backends are configured"
+                )
             )
+            self._direct_reply = f"I could not check another agent: {missing}."
             return f"[Agent roll call: {missing}. Answer from this; do not start any new work.]"
         listed = "; ".join(rows)
+        self._direct_reply = f"I checked through Remote Agent Protocol: {listed}."
         return (
             f"[Agent roll call: {listed}. This is Remote Agent Protocol's own check of each "
             "backend -- whether it can be started here and whether its machine is answering -- "

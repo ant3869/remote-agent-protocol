@@ -272,8 +272,42 @@ def is_local_runtime_time_query(text: str) -> bool:
     return _LOCAL_RUNTIME_TIME_QUERY_RE.fullmatch(lowered) is not None
 
 
+def agent_selection_constraints(text: str, aliases: dict[str, str]) -> tuple[set[str], bool]:
+    """Return excluded backends and whether an unspecified alternative was requested."""
+    lowered = re.sub(r"[-_]+", " ", text.lower())
+    excluded = set()
+    for alias, backend in aliases.items():
+        name = re.escape(alias)
+        if re.search(
+            rf"\b(?:not|except|excluding|other than|instead of|anything but)\s+"
+            rf"(?:the\s+)?{name}\b|"
+            rf"\b(?:do not|don't|dont|never)\s+(?:use|ask|tell|choose|pick|send|give|assign)"
+            rf"\b[^.!?;]{{0,45}}\b{name}\b",
+            lowered,
+        ):
+            excluded.add(backend)
+    different = bool(
+        re.search(
+            r"\b(?:(?:a\s+)?different\s+agent|another\s+agent|(?:someone|somebody|anyone)\s+else)\b",
+            lowered,
+        )
+    )
+    return excluded, different
+
+
+def needs_agent_selection(text: str, backends: dict, aliases: dict[str, str]) -> bool:
+    """Whether coordinator clarification is needed before selecting an executor."""
+    excluded, different = agent_selection_constraints(text, aliases)
+    if not excluded and not different:
+        return False
+    explicit = parse_delegation(text, backends, aliases)
+    if explicit and explicit[0] not in excluded:
+        return False
+    return named_backend(text, backends, aliases) is None
+
+
 def named_backend(text: str, backends: dict, aliases: dict[str, str]) -> str | None:
-    """Return the backend for an agent alias mentioned anywhere in ``text``.
+    """Return a positively named backend, excluding negated agent references.
 
     ``parse_delegation`` only understands rigid command grammars; this is the
     looser complement for tiers that already decided *something* should run and
@@ -281,12 +315,13 @@ def named_backend(text: str, backends: dict, aliases: dict[str, str]) -> str | N
     could fix it"). Longest alias first so "code puppy" beats "puppy", and
     word boundaries so "codexes" never summons codex.
     """
-    lowered = text.lower()
+    lowered = re.sub(r"[-_]+", " ", text.lower())
+    excluded, _ = agent_selection_constraints(text, aliases)
     for alias in sorted(aliases, key=len, reverse=True):
         if not re.search(rf"\b{re.escape(alias)}\b", lowered):
             continue
         backend = aliases[alias]
-        if backend in backends:
+        if backend in backends and backend not in excluded:
             return backend
     return None
 
@@ -417,6 +452,17 @@ def parse_agent_cancel(text: str, aliases: dict[str, str]) -> tuple[str | None, 
         "",
         lowered,
     )
+    # The executor wrapper does not change ownership of cancellation. RAP
+    # cancels the referenced work itself, even when asked to use another agent.
+    names = "|".join(re.escape(alias) for alias in sorted(aliases, key=len, reverse=True))
+    wrapper = re.match(
+        rf"^(?:then\s+)?(?:use|ask|tell|have|get)\s+"
+        rf"(?:(?:an?\s+)?(?:other|different)\s+agent|another\s+agent|{names})\s+"
+        rf"(?:to\s+)?(?P<command>(?:cancel|stop|abort|terminate|halt)\b.*)$",
+        lowered,
+    )
+    if wrapper:
+        lowered = wrapper.group("command")
     # "Terminate" and "kill" are how an operator talks about a process, and
     # they used to fall through to delegation: "terminate claude-code process"
     # became a *task for claude-code*, which sat there until its inactivity
@@ -512,6 +558,10 @@ def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None
     lowered = _POLITE_LEAD.sub("", lowered).strip()
     if not lowered:
         return None
+    excluded, different = agent_selection_constraints(text, aliases)
+    if (excluded or different) and re.match(r"^(?:ping|check|test|poll)\b", lowered):
+        if _AGENT_NOUNS.search(lowered):
+            return (None,)
     if _AGENT_NOUNS.search(lowered) and _ROLLCALL_SCOPE.search(lowered):
         if _ROLLCALL_VERBS.search(lowered):
             return (None,)
@@ -588,11 +638,15 @@ def parse_agent_status(text: str, aliases: dict[str, str]) -> tuple[str | None] 
 def parse_agent_redirect(text: str, aliases: dict[str, str]) -> str | None:
     """Return the destination agent for a request to move the active RAP job."""
     lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    excluded, _ = agent_selection_constraints(text, aliases)
     for alias in sorted(aliases, key=len, reverse=True):
+        if aliases[alias] in excluded:
+            continue
         name = re.escape(alias)
-        if re.fullmatch(
-            rf"(?:redirect|move|transfer)\s+(?:(?:that|this|the\s+current)\s+"
-            rf"(?:task|job|work)|it)\s+(?:over\s+)?to\s+(?:the\s+)?{name}",
+        if re.search(
+            rf"(?:^|[.!?;]\s*)(?:redirect|move|transfer|give|send|assign)\s+"
+            rf"(?:(?:that|this|the\s+current)\s+"
+            rf"(?:task|job|work)|it)\s+(?:over\s+)?to\s+(?:the\s+)?{name}(?:$|[.!?;])",
             lowered,
         ):
             return aliases[alias]

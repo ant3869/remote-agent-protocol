@@ -826,6 +826,18 @@ class IntentRouter:
         Ordered cheapest-and-most-certain first. Returns None only when no tier
         matched, which is the sole condition for paying for classification.
         """
+        if (
+            voice_commands.needs_agent_selection(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)
+            or voice_commands.parse_agent_cancel(text, cfg.AGENT_SPOKEN_ALIASES) is not None
+            or voice_commands.parse_agent_redirect(text, cfg.AGENT_SPOKEN_ALIASES) is not None
+        ):
+            return RoutingDecision(
+                text=text,
+                confidence=1.0,
+                reason="agent selection or control requires the local coordinator",
+                source="control",
+            )
+
         # Tier 1: the user named the agent -- deterministic, always wins.
         parsed = voice_commands.parse_delegation(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)
         if parsed is not None:
