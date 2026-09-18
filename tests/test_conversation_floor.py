@@ -37,6 +37,8 @@ def manager() -> FloorManager:
     [
         ("OpenClaw, check my email", "butler", "direct", "openclaw"),
         ("What about school messages?", "openclaw", "follow_up", "openclaw"),
+        ("Why?", "openclaw", "follow_up", "openclaw"),
+        ("How?", "openclaw", "follow_up", "openclaw"),
         ("Thanks", "openclaw", "acknowledgment", "openclaw"),
         ("Butler", "openclaw", "return_to_butler", "butler"),
         ("Plan a new dashboard", "openclaw", "butler_mediated", "butler"),

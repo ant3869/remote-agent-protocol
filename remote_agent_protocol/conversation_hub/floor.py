@@ -125,18 +125,6 @@ class FloorManager:
             target_id, _task_text = direct
             return self._resolve_direct(routing_input, current_floor, target_id)
 
-        if is_smalltalk(text):
-            target_id = _agent_id(routing_input.last_speaker_id) or current_floor
-            return FloorDecision(
-                kind="acknowledgment",
-                target_id=target_id,
-                task_id=self._current_task_id(routing_input, target_id),
-                requires_clarification=False,
-                requires_butler_selection=False,
-                reason_code="acknowledgment_last_speaker",
-                next_floor_id=current_floor,
-            )
-
         active_tasks = _active_tasks(routing_input.active_tasks)
         if _DEICTIC_REFERENCE.search(text) and len(active_tasks) > 1:
             return FloorDecision(
@@ -158,6 +146,32 @@ class FloorManager:
                 requires_clarification=False,
                 requires_butler_selection=False,
                 reason_code="current_subject_follow_up",
+                next_floor_id=current_floor,
+            )
+
+        # Short questions such as "why?" and "how?" overlap the generic
+        # small-talk vocabulary, but belong to the current subject when an
+        # agent owns the floor. Keep this before acknowledgment handling.
+        if current_floor != BUTLER_ID and _FOLLOW_UP.search(text):
+            return FloorDecision(
+                kind="follow_up",
+                target_id=current_floor,
+                task_id=self._current_task_id(routing_input, current_floor),
+                requires_clarification=False,
+                requires_butler_selection=False,
+                reason_code="current_subject_follow_up",
+                next_floor_id=current_floor,
+            )
+
+        if is_smalltalk(text):
+            target_id = _agent_id(routing_input.last_speaker_id) or current_floor
+            return FloorDecision(
+                kind="acknowledgment",
+                target_id=target_id,
+                task_id=self._current_task_id(routing_input, target_id),
+                requires_clarification=False,
+                requires_butler_selection=False,
+                reason_code="acknowledgment_last_speaker",
                 next_floor_id=current_floor,
             )
 
