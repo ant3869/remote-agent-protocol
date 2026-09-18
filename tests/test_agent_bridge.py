@@ -402,6 +402,11 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(agent_bridge.fallback_result(lines), "CP_OK")
         self.assertEqual(agent_bridge.summarize_output(lines), "CP_OK")
 
+    def test_exact_self_check_sentinel_survives_bridge_result_extraction(self):
+        lines = ["RAP_SELF_CHECK_OK"]
+
+        self.assertEqual(agent_bridge.fallback_result(lines), "RAP_SELF_CHECK_OK")
+
     def test_prompt_echo_is_not_promoted_to_result_or_summary(self):
         job = agent_bridge.AgentJob(
             job_id="j",

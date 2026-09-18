@@ -23,6 +23,7 @@ from ..models import (
     LaunchResult,
     ObservedWork,
     Presence,
+    UpdateState,
     WorkOwnership,
 )
 from .base import AgentTask
@@ -168,8 +169,9 @@ class BridgeCliAdapter:
             presence=Presence.REACHABLE,
             activity=active.state if active else Activity.IDLE,
             health=Health.HEALTHY,
-            detail=detail or "CLI responded to version probe.",
+            detail=detail or "CLI responded to the version probe.",
             current_work=active,
+            update_state=_update_state(detail),
         )
 
     async def launch(self) -> LaunchResult:
@@ -253,6 +255,7 @@ class BridgeCliAdapter:
         detail: str,
         current_work: ObservedWork | None = None,
         issues: tuple[str, ...] = (),
+        update_state: UpdateState = UpdateState.UNKNOWN,
     ) -> AgentObservation:
         return AgentObservation(
             agent_id=self.agent_id,
@@ -267,6 +270,7 @@ class BridgeCliAdapter:
                     AgentCapability.ACCEPT_TASK,
                     AgentCapability.CANCEL_RAP_JOB,
                     AgentCapability.REPORT_PROGRESS,
+                    AgentCapability.VERIFY_RESPONSE,
                 }
             ),
             evidence=(Evidence(f"{self.agent_id}_adapter", now, detail),),
@@ -274,6 +278,7 @@ class BridgeCliAdapter:
             expires_at=now + timedelta(seconds=self._freshness_secs),
             current_work=current_work,
             issues=issues,
+            update_state=update_state,
         )
 
 
@@ -283,6 +288,15 @@ def _clean_output(raw: bytes) -> str:
         .strip()
         .replace("\x00", " ")[:500]
     )
+
+
+def _update_state(detail: str) -> UpdateState:
+    """Report an update only when the CLI emitted its own concrete signal."""
+    if re.search(
+        r"(?:update available|new version .* available|please consider updating)", detail, re.I
+    ):
+        return UpdateState.UPDATE_AVAILABLE
+    return UpdateState.UNKNOWN
 
 
 def _as_datetime(raw: Any) -> datetime | None:

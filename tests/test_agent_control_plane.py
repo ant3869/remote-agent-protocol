@@ -1,6 +1,7 @@
 """Coordinator refresh and safety-policy contracts."""
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,9 +15,16 @@ from remote_agent_protocol.control_plane.models import (
     Evidence,
     Health,
     JobHandle,
+    ObservedWork,
     Presence,
+    ResponseState,
+    WorkOwnership,
 )
-from remote_agent_protocol.control_plane.service import AgentControlPlane
+from remote_agent_protocol.control_plane.service import (
+    SELF_CHECK_PROMPT,
+    SELF_CHECK_SENTINEL,
+    AgentControlPlane,
+)
 
 
 def make_observation(agent_id: str) -> AgentObservation:
@@ -139,3 +147,89 @@ async def test_redirect_cancels_before_dispatching_to_new_agent() -> None:
     assert result.job_id == "job-2"
     assert source.calls == ["cancel"]
     assert target.calls == ["dispatch"]
+
+
+@pytest.mark.asyncio
+async def test_response_check_tracks_only_the_fixed_sentinel_as_actual_evidence() -> None:
+    """A CLI version probe must not be mistaken for a harness response."""
+    adapter = FakeAgentAdapter(
+        "codex",
+        probe=make_observation("codex"),
+        dispatch=JobHandle("self-check-1", "codex"),
+    )
+    plane = AgentControlPlane({"codex": adapter})
+
+    started = await plane.request_response_check("codex")
+
+    assert started == JobHandle("self-check-1", "codex")
+    assert adapter.tasks == [AgentTask(SELF_CHECK_PROMPT, announce_start=False)]
+    pending = await plane.get_agent_status("codex")
+    assert pending.observation.response_state is ResponseState.PENDING
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "self-check-1",
+            "agent": "codex",
+            "status": "done",
+            "result": SELF_CHECK_SENTINEL,
+        }
+    )
+
+    confirmed = await plane.get_agent_status("codex")
+    assert confirmed.observation.response_state is ResponseState.RESPONDED
+    assert confirmed.observation.evidence[0].detail == (
+        "RAP received the exact fixed response from this harness."
+    )
+
+
+@pytest.mark.asyncio
+async def test_response_check_reports_rate_limit_without_persisting_agent_output() -> None:
+    adapter = FakeAgentAdapter(
+        "codex",
+        probe=make_observation("codex"),
+        dispatch=JobHandle("self-check-2", "codex"),
+    )
+    plane = AgentControlPlane({"codex": adapter})
+    await plane.request_response_check("codex")
+
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "self-check-2",
+            "agent": "codex",
+            "status": "failed",
+            "result": "provider prose that must not become evidence",
+            "failure_kind": "rate_limit",
+            "failure_detail": "429 provider response",
+        }
+    )
+
+    result = await plane.get_agent_status("codex")
+    assert result.observation.response_state is ResponseState.FAILED
+    assert result.observation.health is Health.DEGRADED
+    assert "rate_limit" in result.observation.evidence[0].detail
+    assert "provider prose" not in result.observation.evidence[0].detail
+
+
+@pytest.mark.asyncio
+async def test_response_check_does_not_compete_with_a_busy_rap_job() -> None:
+    busy = replace(
+        make_observation("codex"),
+        activity=Activity.WORKING,
+        current_work=ObservedWork(
+            job_id="real-job",
+            ownership=WorkOwnership.RAP,
+            summary="real user task",
+            state=Activity.WORKING,
+        ),
+    )
+    adapter = FakeAgentAdapter("codex", probe=busy)
+    plane = AgentControlPlane({"codex": adapter})
+
+    result = await plane.request_response_check("codex")
+
+    assert not result.ok
+    assert result.error.code == "busy"
+    assert adapter.tasks == []

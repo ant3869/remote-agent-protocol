@@ -41,6 +41,22 @@ class Health(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ResponseState(StrEnum):
+    """Whether RAP has received the fixed response from a safe self-check."""
+
+    UNKNOWN = "unknown"
+    PENDING = "pending"
+    RESPONDED = "responded"
+    FAILED = "failed"
+
+
+class UpdateState(StrEnum):
+    """What the configured CLI itself has proved about an available update."""
+
+    UNKNOWN = "unknown"
+    UPDATE_AVAILABLE = "update_available"
+
+
 class WorkOwnership(StrEnum):
     """Who owns the observed work and therefore which controls are safe."""
 
@@ -58,6 +74,7 @@ class AgentCapability(StrEnum):
     INSPECT_EXTERNAL_SESSION = "inspect_external_session"
     CANCEL_EXTERNAL_SESSION = "cancel_external_session"
     LAUNCH = "launch"
+    VERIFY_RESPONSE = "verify_response"
 
 
 def _aware(value: datetime, name: str) -> datetime:
@@ -178,6 +195,9 @@ class AgentObservation:
     expires_at: datetime
     current_work: ObservedWork | None = None
     issues: tuple[str, ...] = ()
+    response_state: ResponseState = ResponseState.UNKNOWN
+    response_observed_at: datetime | None = None
+    update_state: UpdateState = UpdateState.UNKNOWN
 
     def __post_init__(self) -> None:
         if not self.agent_id.strip():
@@ -190,6 +210,12 @@ class AgentObservation:
             raise ValueError("expires_at must not precede observed_at")
         object.__setattr__(self, "observed_at", observed_at)
         object.__setattr__(self, "expires_at", expires_at)
+        if self.response_observed_at is not None:
+            object.__setattr__(
+                self,
+                "response_observed_at",
+                _aware(self.response_observed_at, "response_observed_at"),
+            )
         object.__setattr__(
             self, "issues", tuple(" ".join(issue.split())[:300] for issue in self.issues)
         )
@@ -209,6 +235,11 @@ class AgentObservation:
             "expires_at": self.expires_at.isoformat(),
             "current_work": self.current_work.to_dict() if self.current_work else None,
             "issues": list(self.issues),
+            "response_state": self.response_state.value,
+            "response_observed_at": self.response_observed_at.isoformat()
+            if self.response_observed_at
+            else None,
+            "update_state": self.update_state.value,
         }
 
     @classmethod
@@ -231,6 +262,11 @@ class AgentObservation:
             if raw.get("current_work")
             else None,
             issues=tuple(str(item) for item in raw.get("issues", ())),
+            response_state=ResponseState(
+                str(raw.get("response_state", ResponseState.UNKNOWN.value))
+            ),
+            response_observed_at=_parse_datetime(raw.get("response_observed_at")),
+            update_state=UpdateState(str(raw.get("update_state", UpdateState.UNKNOWN.value))),
         )
 
 

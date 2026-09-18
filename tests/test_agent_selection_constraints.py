@@ -162,6 +162,24 @@ async def test_rollcall_reports_probe_failure_without_model_health_claims(monkey
     assert "healthy" not in response
 
 
+@pytest.mark.asyncio
+async def test_actual_response_diagnostic_stays_local_and_starts_fixed_check(monkeypatch):
+    brain = _brain(monkeypatch, ["I will delegate this."])
+    brain._control_plane.list_agents = AsyncMock(return_value={"codex": _control_snapshot()})
+    brain._control_plane.request_response_check = AsyncMock(
+        return_value=JobHandle("check-1", "codex")
+    )
+    brain._resolve_delegation = AsyncMock(side_effect=AssertionError("must stay local"))
+
+    response = "".join(await _collect(brain, "Which agents are actually responding?"))
+
+    brain._control_plane.list_agents.assert_awaited_once_with(refresh=True)
+    brain._control_plane.request_response_check.assert_awaited_once_with("codex")
+    assert "self-check is pinging" in response
+    assert "Version probes prove only" in response
+    assert "[[delegate" not in response
+
+
 @pytest.mark.parametrize(
     "text",
     [

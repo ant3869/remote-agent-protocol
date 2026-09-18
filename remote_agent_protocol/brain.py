@@ -41,6 +41,8 @@ from remote_agent_protocol.control_plane.models import (
     ControlError,
     ControlResult,
     JobHandle,
+    ResponseState,
+    UpdateState,
 )
 from remote_agent_protocol.conversation import ConversationEvents, SpeechText
 from remote_agent_protocol.orchestration import telemetry as orchestration_telemetry
@@ -61,9 +63,22 @@ def _control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str
     observation = result.observation
     freshness = "stale" if result.is_stale() else "current"
     work = f", {observation.current_work.summary}" if observation.current_work else ""
+    response = {
+        ResponseState.RESPONDED: "actual response confirmed",
+        ResponseState.PENDING: "actual response check pinging",
+        ResponseState.FAILED: "actual response check failed",
+        ResponseState.UNKNOWN: "no actual response evidence",
+    }[observation.response_state]
+    update = (
+        "CLI update available"
+        if observation.update_state is UpdateState.UPDATE_AVAILABLE
+        else "no CLI update evidence"
+    )
+    issues = f", issues: {', '.join(observation.issues)}" if observation.issues else ""
     return (
         f"{observation.display_name} on {observation.machine}: {observation.presence.value}, "
-        f"{observation.activity.value}, {observation.health.value} ({freshness}{work})"
+        f"{observation.activity.value}, {observation.health.value} ({freshness}{work}); "
+        f"CLI probe is installation/reachability only; {response}; {update}{issues}"
     )
 
 
@@ -387,6 +402,10 @@ class BrainSession:
             self._direct_reply = datetime.now().strftime("It is %I:%M %p on %A, %B %d, %Y, sir.")
             return "[Current local time supplied by the host; do not start any new work.]"
 
+        diagnostic = voice_commands.parse_agent_diagnostic(text, cfg.AGENT_SPOKEN_ALIASES)
+        if diagnostic is not None:
+            return await self._handle_agent_diagnostic(*diagnostic)
+
         # A selection correction must not approve the old backend merely
         # because the utterance begins with "okay".
         if voice_commands.needs_agent_selection(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES):
@@ -528,6 +547,42 @@ class BrainSession:
             "not a reply from the agents themselves. Report it as such, briefly, and do not "
             "start any new work.]"
         )
+
+    async def _handle_agent_diagnostic(self, agent: str | None, actual_response: bool) -> str:
+        """Report RAP-owned evidence and optionally start fixed-response checks."""
+        self._control_turn = True
+        results = await self._control_plane.list_agents(refresh=True)
+        selected = {
+            backend: snapshot
+            for backend, snapshot in results.items()
+            if agent is None or backend == agent or backend.endswith(f":{agent}")
+        }
+        if not selected:
+            missing = (
+                f"there is no agent backend named '{agent}'"
+                if agent
+                else "no agents are configured"
+            )
+            self._direct_reply = f"I could not run an agent diagnostic: {missing}."
+            return f"[Agent diagnostic: {missing}. Do not start any new work.]"
+        rows = [_control_summary(backend, snapshot) for backend, snapshot in selected.items()]
+        if actual_response:
+            checks = await asyncio.gather(
+                *(self._control_plane.request_response_check(backend) for backend in selected),
+            )
+            for backend, check in zip(selected, checks, strict=True):
+                if isinstance(check, JobHandle):
+                    rows.append(f"{backend}: fixed-response self-check is pinging")
+                else:
+                    detail = check.error.detail if check.error else "self-check was not started"
+                    rows.append(f"{backend}: fixed-response self-check not started ({detail})")
+        listed = "; ".join(rows)
+        limitation = (
+            "Version probes prove only the installed CLI answered locally; they are not agent replies. "
+            "RAP cannot inspect unsupported external sessions."
+        )
+        self._direct_reply = f"Agent diagnostic: {listed}. {limitation}"
+        return f"[Agent diagnostic: {listed}. {limitation} Answer from this; do not start any new work.]"
 
     async def _handle_agent_redirect(self, new_agent: str) -> str:
         """Move the current RAP-owned job through the coordinator, never another harness."""

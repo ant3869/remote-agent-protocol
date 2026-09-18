@@ -37,11 +37,22 @@ from .models import (
     JobHandle,
     ObservedWork,
     Presence,
+    ResponseState,
+    UpdateState,
     WorkOwnership,
 )
 from .registry import AgentRegistry
 
 EventListener = Callable[[dict[str, Any]], None]
+
+# This is intentionally a fixed, harmless request. It proves that the selected
+# harness can return a response to RAP; it is never a request for one harness
+# to inspect another one or to do useful work on the user's behalf.
+SELF_CHECK_SENTINEL = "RAP_SELF_CHECK_OK"
+SELF_CHECK_PROMPT = (
+    "RAP self-check. Reply with exactly RAP_SELF_CHECK_OK and nothing else. "
+    "Do not inspect or write files, run commands, access tools, or delegate."
+)
 
 
 class AgentControlPlane:
@@ -66,6 +77,7 @@ class AgentControlPlane:
         self._refresh_tasks: dict[str, asyncio.Task[AgentSnapshot | ControlError]] = {}
         self._jobs: dict[str, ObservedWork] = {}
         self._job_agents: dict[str, str] = {}
+        self._self_checks: dict[str, str] = {}
 
     @property
     def agent_ids(self) -> tuple[str, ...]:
@@ -221,6 +233,70 @@ class AgentControlPlane:
             self._emit(JOB_DISPATCHED, agent_id, job_id=result.job_id)
         return result
 
+    async def request_response_check(self, agent_id: str) -> JobHandle | ControlResult:
+        """Ask one idle harness for a fixed response through ``AgentBridge``.
+
+        A version probe only proves that the installed executable answered a
+        local command. This check is deliberately separate and its terminal
+        lifecycle event is the sole source of ``response_state`` evidence.
+        """
+        adapter = self._adapters.get(agent_id)
+        if adapter is None:
+            return ControlResult(
+                False,
+                agent_id,
+                error=ControlError("unknown_agent", "That agent is not configured.", agent_id),
+            )
+        snapshot = await self.get_agent_status(agent_id, refresh=True)
+        if isinstance(snapshot, ControlError):
+            return ControlResult(False, agent_id, error=snapshot)
+        observation = snapshot.observation
+        if observation.presence is not Presence.REACHABLE:
+            return ControlResult(
+                False,
+                agent_id,
+                error=ControlError(
+                    "unreachable",
+                    "The installation probe did not reach this harness; no response check was sent.",
+                    agent_id,
+                ),
+            )
+        if observation.current_work is not None:
+            return ControlResult(
+                False,
+                agent_id,
+                error=ControlError(
+                    "busy",
+                    "A RAP-owned job is already active; no concurrent response check was sent.",
+                    agent_id,
+                    retryable=True,
+                ),
+            )
+        dispatched = await adapter.dispatch(AgentTask(SELF_CHECK_PROMPT, announce_start=False))
+        if isinstance(dispatched, ControlResult):
+            await self._record_response_result(
+                agent_id,
+                ResponseState.FAILED,
+                "The response check could not be started.",
+                failure_kind=dispatched.error.code if dispatched.error else "dispatch_failed",
+            )
+            return dispatched
+        self._self_checks[dispatched.job_id] = agent_id
+        await self._record_response_result(
+            agent_id,
+            ResponseState.PENDING,
+            "RAP sent a fixed self-check and is waiting for its exact response.",
+            current_work=ObservedWork(
+                job_id=dispatched.job_id,
+                ownership=WorkOwnership.RAP,
+                summary="RAP self-check awaiting exact response",
+                started_at=datetime.now(UTC),
+                last_activity_at=datetime.now(UTC),
+                state=Activity.WORKING,
+            ),
+        )
+        return dispatched
+
     async def cancel_job(self, job_id: str, *, external_confirmed: bool = False) -> ControlResult:
         work = self._jobs.get(job_id)
         if work is None:
@@ -279,6 +355,10 @@ class AgentControlPlane:
             "blocked": Activity.BLOCKED,
         }.get(status, Activity.IDLE)
         job_id = str(event.get("job_id", ""))
+        self_check_agent = self._self_checks.get(job_id)
+        if self_check_agent is not None and self_check_agent == agent_id:
+            await self._ingest_response_check_event(event)
+            return
         work = None
         if status in {"running", "waiting", "blocked"} and job_id:
             work = ObservedWork(
@@ -299,11 +379,7 @@ class AgentControlPlane:
         previous = await self.registry.get(agent_id)
         previous_observation = previous.observation if previous else None
         failure_kind = str(event.get("failure_kind") or "")
-        health = (
-            Health.DEGRADED
-            if failure_kind in {"quota", "rate_limit", "authentication"}
-            else Health.HEALTHY
-        )
+        health = Health.DEGRADED if failure_kind in _DEGRADED_FAILURE_KINDS else Health.HEALTHY
         observation = AgentObservation(
             agent_id=agent_id,
             display_name=previous_observation.display_name if previous_observation else agent_id,
@@ -335,9 +411,112 @@ class AgentControlPlane:
             expires_at=now + timedelta(seconds=self._freshness_secs),
             current_work=work,
             issues=(str(event.get("failure_detail") or ""),) if failure_kind else (),
+            response_state=previous_observation.response_state
+            if previous_observation
+            else ResponseState.UNKNOWN,
+            response_observed_at=previous_observation.response_observed_at
+            if previous_observation
+            else None,
+            update_state=previous_observation.update_state
+            if previous_observation
+            else UpdateState.UNKNOWN,
         )
         await self.registry.observe(observation)
         self._emit(JOB_PROGRESS_CHANGED, agent_id, job_id=job_id, data={"activity": activity.value})
+
+    async def _ingest_response_check_event(self, event: dict[str, Any]) -> None:
+        """Turn the fixed self-check lifecycle into evidence without storing output."""
+        agent_id = str(event["agent"])
+        job_id = str(event.get("job_id", ""))
+        status = str(event.get("status", ""))
+        if status in {"running", "waiting", "blocked"}:
+            await self._record_response_result(
+                agent_id,
+                ResponseState.PENDING,
+                "RAP self-check is still waiting for the exact response.",
+                current_work=ObservedWork(
+                    job_id=job_id,
+                    ownership=WorkOwnership.RAP,
+                    summary="RAP self-check awaiting exact response",
+                    started_at=_event_time(event.get("started_at")),
+                    last_activity_at=datetime.now(UTC),
+                    state={
+                        "running": Activity.WORKING,
+                        "waiting": Activity.WAITING,
+                        "blocked": Activity.BLOCKED,
+                    }[status],
+                ),
+            )
+            return
+        self._self_checks.pop(job_id, None)
+        response = str(event.get("result") or "").strip()
+        failure_kind = str(event.get("failure_kind") or "")
+        if status == "done" and response == SELF_CHECK_SENTINEL:
+            await self._record_response_result(
+                agent_id,
+                ResponseState.RESPONDED,
+                "RAP received the exact fixed response from this harness.",
+            )
+            return
+        reason = _response_failure_reason(failure_kind)
+        await self._record_response_result(
+            agent_id,
+            ResponseState.FAILED,
+            reason,
+            failure_kind=failure_kind or "unexpected_response",
+        )
+
+    async def _record_response_result(
+        self,
+        agent_id: str,
+        response_state: ResponseState,
+        detail: str,
+        *,
+        current_work: ObservedWork | None = None,
+        failure_kind: str = "",
+    ) -> None:
+        """Persist a bounded self-check fact while retaining CLI probe evidence."""
+        now = datetime.now(UTC)
+        previous = await self.registry.get(agent_id)
+        base = (
+            previous.observation
+            if previous
+            else self._unknown(agent_id, "No observation.").observation
+        )
+        health = (
+            Health.DEGRADED
+            if failure_kind in _DEGRADED_FAILURE_KINDS
+            else Health.FAILED
+            if response_state is ResponseState.FAILED
+            else base.health
+        )
+        observation = replace(
+            base,
+            activity=current_work.state if current_work else Activity.IDLE,
+            health=health,
+            evidence=(Evidence("rap_response_check", now, detail), *base.evidence[:2]),
+            observed_at=now,
+            expires_at=now + timedelta(seconds=self._freshness_secs),
+            current_work=current_work,
+            issues=(*base.issues, failure_kind) if failure_kind else base.issues,
+            response_state=response_state,
+            response_observed_at=now,
+        )
+        await self.registry.observe(observation)
+        self._emit(
+            STATUS_CHANGED, agent_id, data={"snapshot": AgentSnapshot(observation).to_dict()}
+        )
+
+
+_DEGRADED_FAILURE_KINDS = frozenset({"quota", "rate_limit", "capacity", "auth", "authentication"})
+
+
+def _response_failure_reason(failure_kind: str) -> str:
+    if failure_kind in _DEGRADED_FAILURE_KINDS:
+        return f"The self-check failed with {failure_kind}; no actual response was confirmed."
+    return (
+        "The self-check ended without the exact fixed response; no actual response was confirmed."
+    )
 
 
 def _event_time(raw: Any) -> datetime | None:

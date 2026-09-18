@@ -13,6 +13,8 @@ from .models import (
     Evidence,
     Health,
     Presence,
+    ResponseState,
+    UpdateState,
     WorkOwnership,
 )
 from .registry import AgentRegistry
@@ -28,5 +30,7 @@ __all__ = [
     "Evidence",
     "Health",
     "Presence",
+    "ResponseState",
+    "UpdateState",
     "WorkOwnership",
 ]

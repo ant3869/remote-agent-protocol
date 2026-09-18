@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pipecat.frames.frames import TTSSpeakFrame
 from remote_agent_protocol import agent_bridge, personas, session, session_processors
@@ -171,6 +171,27 @@ class SessionDelegationTests(unittest.TestCase):
 
 
 class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_voice_diagnostic_stays_local_and_starts_response_check(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        from tests.test_brain_streaming import _control_snapshot
+
+        voice_session._control_plane.list_agents = AsyncMock(
+            return_value={"codex": _control_snapshot()}
+        )
+        voice_session._control_plane.request_response_check = AsyncMock(
+            return_value=session.JobHandle("check-1", "codex")
+        )
+
+        prompt = await voice_session._maybe_handle_model_control(
+            "give me a full agent diagnostic and see which agents are actually responding"
+        )
+
+        voice_session._control_plane.list_agents.assert_awaited_once_with(refresh=True)
+        voice_session._control_plane.request_response_check.assert_awaited_once_with("codex")
+        self.assertIn("self-check is pinging", prompt)
+        self.assertIn("do not start any new work", prompt.lower())
+        self.assertTrue(voice_session._agent_ack_turn)
+
     async def test_agent_events_are_published_to_lifecycle_server_without_announcements(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
         lifecycle = RecordingLifecycleServer()

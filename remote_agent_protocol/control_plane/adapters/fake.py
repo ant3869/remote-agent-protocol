@@ -32,6 +32,7 @@ class FakeAgentAdapter:
         self.agent_id = agent_id
         self.outcomes = outcomes
         self.calls: list[str] = []
+        self.tasks: list[AgentTask] = []
 
     async def _run(self, name: str, default: Outcome) -> Outcome:
         self.calls.append(name)
@@ -58,6 +59,7 @@ class FakeAgentAdapter:
         return await self._run("inspect_jobs", ())  # type: ignore[return-value]
 
     async def dispatch(self, task: AgentTask) -> JobHandle | ControlResult:
+        self.tasks.append(task)
         return await self._run(
             "dispatch",
             ControlResult(False, self.agent_id, error=ControlError("unsupported", "unsupported")),

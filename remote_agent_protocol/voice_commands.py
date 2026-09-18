@@ -510,6 +510,15 @@ _ROLLCALL_VERBS = re.compile(
 )
 _ROLLCALL_SCOPE = re.compile(r"\b(?:all|every|each|which|what|who|any of)\b")
 _AGENT_NOUNS = re.compile(r"\b(?:agents?|backends?|bots?|helpers?|machines?)\b")
+_DIAGNOSTIC_TERMS = re.compile(
+    r"\b(?:diagnostic|diagnose|broken|busy|pinging|rate[ -]?limited|quota|capacity|"
+    r"authentication|auth|needs? updating|updated|update needed|available update|"
+    r"full (?:agent )?(?:status|report))\b"
+)
+_ACTUAL_RESPONSE_TERMS = re.compile(
+    r"\b(?:actually respond(?:ing)?|actual response|confirm (?:an )?response|"
+    r"self[ -]?check|respond(?:ing|ed)?)\b"
+)
 
 
 # Liveness asked about one named agent: the agent is the *object* of the check,
@@ -587,6 +596,35 @@ def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None
         if any(re.fullmatch(pattern, lowered) for pattern in patterns):
             return (aliases[alias],)
     return None
+
+
+def parse_agent_diagnostic(text: str, aliases: dict[str, str]) -> tuple[str | None, bool] | None:
+    """Parse an evidence request before it can become delegated work.
+
+    The boolean asks RAP to start a harmless fixed-response self-check.  A
+    normal diagnostic refreshes installation and RAP-job evidence only; it
+    never implies a harness replied to a real prompt.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    lowered = re.sub(r"[-_]+", " ", lowered)
+    lowered = _POLITE_LEAD.sub("", lowered).strip()
+    if not lowered:
+        return None
+    named = next(
+        (
+            aliases[alias]
+            for alias in sorted(aliases, key=len, reverse=True)
+            if re.search(rf"\b{re.escape(alias)}\b", lowered)
+        ),
+        None,
+    )
+    actual_response = bool(_ACTUAL_RESPONSE_TERMS.search(lowered))
+    diagnostic = bool(_DIAGNOSTIC_TERMS.search(lowered))
+    if not (actual_response or diagnostic):
+        return None
+    if named is None and not _AGENT_NOUNS.search(lowered):
+        return None
+    return named, actual_response
 
 
 _STATUS_PHRASES = re.compile(

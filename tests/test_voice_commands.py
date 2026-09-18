@@ -749,6 +749,26 @@ class AgentRollCallTests(unittest.TestCase):
             self.assertIsNone(voice_commands.parse_agent_rollcall(text, self.ALIASES), text)
 
 
+class AgentDiagnosticPhrasingTests(unittest.TestCase):
+    ALIASES = {"codex": "codex", "code puppy": "code-puppy"}
+
+    def test_actual_response_requests_are_local_diagnostics(self):
+        for text, expected in (
+            ("which agents are actually responding", (None, True)),
+            ("give me a full agent diagnostic", (None, False)),
+            ("which agents are broken busy or rate limited", (None, False)),
+            ("check whether Codex is actually responding", ("codex", True)),
+        ):
+            self.assertEqual(voice_commands.parse_agent_diagnostic(text, self.ALIASES), expected)
+
+    def test_ordinary_progress_update_is_not_reclassified_as_a_diagnostic(self):
+        self.assertIsNone(
+            voice_commands.parse_agent_diagnostic(
+                "what about an update on the codex task", self.ALIASES
+            )
+        )
+
+
 class AgentCancelVerbTests(unittest.TestCase):
     """Operators say "terminate" and "kill" about processes; so does RAP now."""
 
