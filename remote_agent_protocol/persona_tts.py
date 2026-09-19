@@ -19,7 +19,7 @@ from pipecat.services.kokoro.tts import (
     _ensure_model_files,
     language_to_kokoro_language,
 )
-from pipecat.services.settings import TTSSettings, assert_given
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.tracing.service_decorators import traced_tts
@@ -31,8 +31,8 @@ from remote_agent_protocol import coqui_tts, voicebox, voices
 class PersonaTTSSettings(TTSSettings):
     """TTS settings plus the persona-level backend/personality switches."""
 
-    voice_backend: str = "kokoro"
-    personality: bool = False
+    voice_backend: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    personality: bool | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     extra: dict = field(default_factory=dict)
 
 

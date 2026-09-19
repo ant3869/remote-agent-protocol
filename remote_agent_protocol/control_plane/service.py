@@ -100,6 +100,8 @@ class AgentControlPlane:
             agent_id: asyncio.create_task(self._refresh(agent_id), name=f"agent-refresh-{agent_id}")
             for agent_id in self._adapters
         }
+        if not tasks:
+            return {}
         done, pending = await asyncio.wait(
             tasks.values(), timeout=self._overall_timeout_secs, return_when=asyncio.ALL_COMPLETED
         )

@@ -62,6 +62,7 @@ def create_tts(
                 model=voice_model,
                 language="en-us",
                 voice_backend="voicebox" if voicebox.is_voicebox_ref(persona_voice) else backend,
+                personality=False,
                 extra=tts_options or {},
             )
         )

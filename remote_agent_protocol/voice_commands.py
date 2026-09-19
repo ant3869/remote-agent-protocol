@@ -517,7 +517,7 @@ _DIAGNOSTIC_TERMS = re.compile(
 )
 _ACTUAL_RESPONSE_TERMS = re.compile(
     r"\b(?:actually respond(?:ing)?|actual response|confirm (?:an )?response|"
-    r"self[ -]?check|respond(?:ing|ed)?)\b"
+    r"self[ -]?check)\b"
 )
 
 
