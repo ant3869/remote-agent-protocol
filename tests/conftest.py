@@ -27,7 +27,15 @@ os.environ.setdefault("AGENT_MOCK_BACKEND_ENABLED", "1")
 # event synchronously during __init__, which is exactly the scenario that
 # surfaced two separate construction-order bugs during Task 8's own
 # verification. Sandbox it the same way a real deployment never would.
+#
+# The path must be unique per test *process*, not just per test: a fixed
+# filename under the shared system temp directory persists across separate
+# pytest invocations (nothing ever deletes it), so the first run that ever
+# creates a channel silently poisons every later run on the same machine --
+# including an otherwise fully isolated single-test run -- with a spurious
+# CHANNEL_RESTORED replay. A PID-suffixed name keeps every invocation
+# hermetic while still being easy to find if one needs inspecting.
 os.environ.setdefault(
     "CONVERSATION_STORE_PATH",
-    os.path.join(tempfile.gettempdir(), "rap_test_conversations.json"),
+    os.path.join(tempfile.gettempdir(), f"rap_test_conversations_{os.getpid()}.json"),
 )

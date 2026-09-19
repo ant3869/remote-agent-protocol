@@ -514,7 +514,18 @@ def _pending_brain(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "S2S_VOICE_FILE", str(tmp_path / "v.txt"))
     adapter = BrainSessionAdapter(PERSONAS[0])
     brain = adapter._brain
-    brain._pending_confirmations["tok-a"] = ("claude", "delete the archive", None, "state-changing")
+    # Must be a real configured backend id (not the bare "claude" CLI name):
+    # confirmation approval now dispatches through the conversation hub's
+    # adapter for this id (Task 8), which only exists for configured
+    # backends -- an unrecognized id short-circuits to "unavailable" before
+    # ever reaching AgentBridge.start, unlike the pre-Task-8 direct call this
+    # test used to exercise.
+    brain._pending_confirmations["tok-a"] = (
+        "claude-code",
+        "delete the archive",
+        None,
+        "state-changing",
+    )
     brain._pending_confirmations["tok-b"] = ("codex", "list the files", None, "state-changing")
     return adapter, brain
 
@@ -525,7 +536,7 @@ async def test_button_approval_dispatches_the_named_task_not_the_newest(monkeypa
     adapter, brain = _pending_brain(monkeypatch, tmp_path)
     started = []
 
-    async def record(agent, task, cwd):
+    async def record(agent, task, **kwargs):
         started.append((agent, task))
 
     monkeypatch.setattr(brain._bridge, "start", record)
@@ -533,10 +544,10 @@ async def test_button_approval_dispatches_the_named_task_not_the_newest(monkeypa
     reply = brain.resolve_confirmation("tok-a", "approve")
     await asyncio.sleep(0)
 
-    assert "claude" in reply
+    assert "claude-code" in reply
     assert list(brain._pending_confirmations) == ["tok-b"]
     assert len(started) == 1
-    assert started[0][0] == "claude"
+    assert started[0][0] == "claude-code"
     assert "delete the archive" in started[0][1]
 
 
