@@ -1666,6 +1666,8 @@ class VoiceSession:
         return job_store.clear_history(cfg.AGENT_HISTORY_FILE)
 
     async def _persist_job(self, job: agent_bridge.AgentJob) -> None:
+        if job.internal:
+            return
         await asyncio.to_thread(
             job_store.append_job,
             cfg.AGENT_HISTORY_FILE,
@@ -1839,6 +1841,8 @@ class VoiceSession:
 
     async def _announce_agent_job(self, job: agent_bridge.AgentJob) -> None:
         """Speak terminal agent status directly, without depending on the LLM."""
+        if job.internal:
+            return
         # job_id never repeats, so leaving these keyed by it after the job
         # stops progressing (a confirmation hold relaunches under a new id)
         # is an unbounded leak over a long-running session.
@@ -1978,14 +1982,16 @@ class VoiceSession:
 
     def _on_agent_event(self, event: dict) -> None:
         """Forward agent state to the UI and narrate useful, throttled progress."""
-        self._emit(event)
-        if self._lifecycle_ws is not None:
-            self._lifecycle_ws.publish(event)
         if event.get("type") == "agent_job":
             self._spawn(
                 self._control_plane.ingest_bridge_event(event),
                 name=f"control-plane-{event.get('job_id', 'event')}",
             )
+            if event.get("internal"):
+                return
+        self._emit(event)
+        if self._lifecycle_ws is not None:
+            self._lifecycle_ws.publish(event)
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
 

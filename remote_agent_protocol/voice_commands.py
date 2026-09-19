@@ -610,6 +610,16 @@ def parse_agent_diagnostic(text: str, aliases: dict[str, str]) -> tuple[str | No
     lowered = _POLITE_LEAD.sub("", lowered).strip()
     if not lowered:
         return None
+    # Here the named harness is the actor being assigned work, not the
+    # subject whose availability RAP should inspect. Keep instructions such
+    # as "Ask Codex why the server is not responding" on the normal
+    # delegation path even though their task text contains a diagnostic word.
+    for alias in sorted(aliases, key=len, reverse=True):
+        if re.match(
+            rf"^(?:ask|have|get|tell|use|send|make)\s+(?:the\s+)?{re.escape(alias)}\b",
+            lowered,
+        ):
+            return None
     named = next(
         (
             aliases[alias]

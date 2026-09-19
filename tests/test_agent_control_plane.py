@@ -3,14 +3,18 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from remote_agent_protocol.control_plane.adapters.base import AgentTask
+from remote_agent_protocol.control_plane.adapters.cli import BridgeCliAdapter
 from remote_agent_protocol.control_plane.adapters.fake import FakeAgentAdapter
 from remote_agent_protocol.control_plane.models import (
     Activity,
     AgentObservation,
+    ControlError,
     ControlResult,
     Evidence,
     Health,
@@ -162,7 +166,14 @@ async def test_response_check_tracks_only_the_fixed_sentinel_as_actual_evidence(
     started = await plane.request_response_check("codex")
 
     assert started == JobHandle("self-check-1", "codex")
-    assert adapter.tasks == [AgentTask(SELF_CHECK_PROMPT, announce_start=False)]
+    assert adapter.tasks == [
+        AgentTask(
+            SELF_CHECK_PROMPT,
+            announce_start=False,
+            clean_session=True,
+            internal=True,
+        )
+    ]
     pending = await plane.get_agent_status("codex")
     assert pending.observation.response_state is ResponseState.PENDING
     await plane.ingest_bridge_event(
@@ -233,3 +244,114 @@ async def test_response_check_does_not_compete_with_a_busy_rap_job() -> None:
     assert not result.ok
     assert result.error.code == "busy"
     assert adapter.tasks == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_response_checks_reserve_before_probe_and_dispatch_once() -> None:
+    """Two simultaneous callers cannot both launch a self-check for one agent."""
+    release_probe = asyncio.Event()
+
+    async def delayed_probe():
+        await release_probe.wait()
+        return make_observation("codex")
+
+    adapter = FakeAgentAdapter(
+        "codex",
+        probe=delayed_probe,
+        dispatch=JobHandle("self-check-race", "codex"),
+    )
+    plane = AgentControlPlane({"codex": adapter})
+
+    first_task = asyncio.create_task(plane.request_response_check("codex"))
+    await asyncio.sleep(0)
+    second = await plane.request_response_check("codex")
+    release_probe.set()
+    first = await first_task
+
+    assert first == JobHandle("self-check-race", "codex")
+    assert isinstance(second, ControlResult)
+    assert second.error.code == "self_check_active"
+    assert adapter.calls == ["probe", "dispatch"]
+
+
+@pytest.mark.asyncio
+async def test_response_check_reservation_clears_after_dispatch_failure_and_terminal_event() -> (
+    None
+):
+    failure = ControlResult(
+        False,
+        "codex",
+        error=ControlError("dispatch_failed", "could not start", "codex"),
+    )
+    adapter = FakeAgentAdapter(
+        "codex",
+        probe=make_observation("codex"),
+        dispatch=failure,
+    )
+    plane = AgentControlPlane({"codex": adapter})
+
+    failed = await plane.request_response_check("codex")
+    assert failed is failure
+    adapter.outcomes["dispatch"] = JobHandle("self-check-next", "codex")
+    started = await plane.request_response_check("codex")
+    assert started == JobHandle("self-check-next", "codex")
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "self-check-next",
+            "agent": "codex",
+            "status": "done",
+            "result": SELF_CHECK_SENTINEL,
+            "internal": True,
+        }
+    )
+    adapter.outcomes["dispatch"] = JobHandle("self-check-final", "codex")
+    restarted = await plane.request_response_check("codex")
+
+    assert restarted == JobHandle("self-check-final", "codex")
+    assert adapter.calls.count("dispatch") == 3
+
+
+@pytest.mark.asyncio
+async def test_response_check_reservation_clears_after_dispatch_exception() -> None:
+    adapter = FakeAgentAdapter(
+        "codex",
+        probe=make_observation("codex"),
+        dispatch=RuntimeError("launch exploded"),
+    )
+    plane = AgentControlPlane({"codex": adapter})
+
+    failed = await plane.request_response_check("codex")
+    adapter.outcomes["dispatch"] = JobHandle("self-check-retry", "codex")
+    retried = await plane.request_response_check("codex")
+
+    assert isinstance(failed, ControlResult)
+    assert failed.error.code == "dispatch_failed"
+    assert retried == JobHandle("self-check-retry", "codex")
+
+
+@pytest.mark.asyncio
+async def test_bridge_cli_dispatch_forwards_internal_clean_session_flags() -> None:
+    bridge = SimpleNamespace(
+        start=AsyncMock(return_value="check-1"),
+        get=lambda _job_id: None,
+    )
+    adapter = BridgeCliAdapter(
+        "hermes",
+        bridge,
+        display_name="Hermes",
+        machine="test",
+    )
+
+    result = await adapter.dispatch(AgentTask(SELF_CHECK_PROMPT, clean_session=True, internal=True))
+
+    assert result == JobHandle("check-1", "hermes")
+    bridge.start.assert_awaited_once_with(
+        "hermes",
+        SELF_CHECK_PROMPT,
+        cwd=None,
+        announce_start=False,
+        clean_session=True,
+        internal=True,
+    )

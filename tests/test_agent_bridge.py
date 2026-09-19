@@ -639,6 +639,56 @@ class BridgeLifecycleTests(unittest.TestCase):
     def _run(self, coro):
         return asyncio.run(coro)
 
+    def test_internal_job_emits_lifecycle_but_never_persists_narrates_or_joins_commons(self):
+        events: list[dict] = []
+        persisted = AsyncMock()
+        finished = AsyncMock()
+
+        async def scenario():
+            backend = {
+                "codex": [
+                    "{python}",
+                    "-u",
+                    "-c",
+                    "print('RAP_SELF_CHECK_OK', flush=True)",
+                    "{task}",
+                ]
+            }
+            bridge = agent_bridge.AgentBridge(
+                backend,
+                events.append,
+                on_finished=finished,
+                on_persist=persisted,
+            )
+            bridge._commons_enabled = True
+            bridge._workspace_dir = "unused"
+            job_id = await bridge.start("codex", "internal check", internal=True)
+            for _ in range(200):
+                if any(
+                    event.get("event") == "finished" and event.get("job_id") == job_id
+                    for event in events
+                ):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        with (
+            mock.patch.object(agent_bridge.collab, "record_outcome") as record_outcome,
+            mock.patch.object(agent_bridge.collab, "with_commons") as with_commons,
+        ):
+            job = self._run(scenario())
+
+        terminal = next(event for event in events if event.get("event") == "finished")
+        self.assertTrue(terminal["internal"])
+        self.assertFalse(any(event.get("type") == "agent_jobs_idle" for event in events))
+        persisted.assert_not_awaited()
+        finished.assert_not_awaited()
+        record_outcome.assert_not_called()
+        with_commons.assert_not_called()
+        self.assertEqual(agent_bridge.result_detail(job), "")
+        self.assertEqual(agent_bridge.spoken_answer(job), "")
+        self.assertEqual(agent_bridge.announcement(job), "")
+
     def test_hermes_follow_up_resumes_the_captured_session(self):
         events: list[dict] = []
         script = (
@@ -1711,3 +1761,17 @@ class JobRetentionTests(unittest.TestCase):
         bridge._trim_finished_jobs()
 
         self.assertEqual(len(bridge._jobs), 5)
+
+    def test_internal_job_is_active_for_cleanup_but_hidden_from_user_queries(self):
+        bridge = self._bridge()
+        job = agent_bridge.AgentJob(
+            job_id="check-1",
+            agent="mock",
+            task="self-check",
+            internal=True,
+        )
+        bridge._jobs[job.job_id] = job
+
+        self.assertTrue(bridge.has_active())
+        self.assertEqual(bridge.active_jobs(), [])
+        self.assertIsNone(bridge.latest_active())

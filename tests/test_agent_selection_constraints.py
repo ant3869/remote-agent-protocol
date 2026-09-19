@@ -2,12 +2,12 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from remote_agent_protocol import agent_bridge, intent_router, voice_commands
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import intent_router, voice_commands
 from remote_agent_protocol.control_plane.models import ControlError, JobHandle
 from tests.test_brain_streaming import _brain, _collect, _control_snapshot
 
@@ -178,6 +178,46 @@ async def test_actual_response_diagnostic_stays_local_and_starts_fixed_check(mon
     assert "self-check is pinging" in response
     assert "Version probes prove only" in response
     assert "[[delegate" not in response
+
+
+@pytest.mark.asyncio
+async def test_named_agent_server_diagnosis_remains_delegated_work(monkeypatch):
+    brain = _brain(monkeypatch, ["unused"])
+    brain._handle_agent_diagnostic = AsyncMock(
+        side_effect=AssertionError("real work must not become a local self-check")
+    )
+    brain._resolve_delegation = AsyncMock(
+        return_value=("codex", "why the server is not responding")
+    )
+    brain._delegate_ack = MagicMock(return_value="delegated")
+
+    content = await brain._turn_content("Ask Codex why the server is not responding", None)
+
+    assert content == "delegated"
+    brain._resolve_delegation.assert_awaited_once()
+    brain._delegate_ack.assert_called_once_with("codex", "why the server is not responding")
+    brain._handle_agent_diagnostic.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_internal_diagnostic_result_is_not_relayed_by_brain(monkeypatch):
+    brain = _brain(monkeypatch, ["unused"])
+    brain._emit = MagicMock()
+    brain._orchestrator.record_outcome = MagicMock()
+    job = agent_bridge.AgentJob(
+        "check-1",
+        "codex",
+        "RAP self-check",
+        status=agent_bridge.STATUS_DONE,
+        result="RAP_SELF_CHECK_OK",
+        internal=True,
+    )
+
+    await brain._announce_agent_job(job)
+
+    assert brain._messages == []
+    brain._orchestrator.record_outcome.assert_not_called()
+    brain._emit.assert_not_called()
 
 
 @pytest.mark.parametrize(

@@ -768,6 +768,14 @@ class AgentDiagnosticPhrasingTests(unittest.TestCase):
             )
         )
 
+    def test_named_agent_work_instruction_is_not_reclassified_as_a_diagnostic(self):
+        for text in (
+            "Ask Codex why the server is not responding",
+            "Have Codex diagnose why the backend is broken",
+            "Tell code puppy to check whether the website is rate limited",
+        ):
+            self.assertIsNone(voice_commands.parse_agent_diagnostic(text, self.ALIASES), text)
+
 
 class AgentCancelVerbTests(unittest.TestCase):
     """Operators say "terminate" and "kill" about processes; so does RAP now."""

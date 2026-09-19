@@ -299,6 +299,7 @@ class AgentJob:
     consults_seen: int = 0  # consult lines printed, accepted or not
     consult_token: str = ""  # this job's private mailbox for consult answers
     timeout_secs: float | None = None  # overrides the bridge default for this job
+    internal: bool = False  # control-plane work hidden from user conversation surfaces
     _t0: float = field(default=0.0, repr=False)
     _last_status: float = field(default=0.0, repr=False)
     _host_before: str | None = field(default=None, repr=False)
@@ -843,6 +844,8 @@ def result_detail(job: AgentJob) -> str:
     output tail so that agents which print their answer to stdout without a
     ``result`` field still have it relayed rather than lost behind the summary.
     """
+    if job.internal:
+        return ""
     if job.result and not _unsafe_public_text(job.result):
         return job.result
     body = fallback_result(job.lines, max_chars=_MAX_RESULT_CHARS)
@@ -907,7 +910,7 @@ def spoken_answer(job: AgentJob, *, max_chars: int | None = None) -> str:
     which is the repetition generated narration exists to replace: the
     narrator writes a fresh lead-in and this supplies the part worth hearing.
     """
-    if job.status != STATUS_DONE:
+    if job.internal or job.status != STATUS_DONE:
         return ""
     summary = job.summary if job.summary and not _unsafe_public_text(job.summary) else ""
     summary = summary or summarize_output(job.lines)
@@ -925,6 +928,8 @@ def announcement(job: AgentJob, *, max_answer_chars: int | None = None) -> str:
     ``max_answer_chars`` caps how much of a STATUS_DONE answer is read aloud;
     None (the default) always speaks the full answer, unchanged from before.
     """
+    if job.internal:
+        return ""
     tamper = f" {_TAMPER_WARNING}" if job.host_modified else ""
     questions = follow_up_questions(job)
     if questions:
@@ -1062,6 +1067,7 @@ class AgentBridge:
         # silently dropping the agent output and the completion announcement.
         self._tasks: set[asyncio.Task] = set()
         self._idle_notified = True
+        self._public_work_since_idle = False
 
     # -- queries ------------------------------------------------------------
 
@@ -1095,9 +1101,13 @@ class AgentBridge:
         return any(job.status in _ACTIVE_STATUSES for job in self._jobs.values())
 
     def latest_active(self) -> AgentJob | None:
-        """Return the newest active job, if any."""
+        """Return the newest user-visible active job, if any."""
         return next(
-            (job for job in reversed(self._jobs.values()) if job.status in _ACTIVE_STATUSES),
+            (
+                job
+                for job in reversed(self._jobs.values())
+                if job.status in _ACTIVE_STATUSES and not job.internal
+            ),
             None,
         )
 
@@ -1136,6 +1146,7 @@ class AgentBridge:
         consult_chain: tuple[str, ...] = (),
         timeout_secs: float | None = None,
         clean_session: bool = False,
+        internal: bool = False,
     ) -> str:
         """Spawn a job and return its id immediately; output streams via events."""
         job = AgentJob(
@@ -1148,11 +1159,14 @@ class AgentBridge:
             consult_depth=consult_depth,
             consult_chain=consult_chain,
             timeout_secs=timeout_secs,
+            internal=internal,
         )
         job._t0 = time.monotonic()
         job._last_status = job._t0
         self._jobs[job.job_id] = job
-        self._idle_notified = False
+        if not internal:
+            self._idle_notified = False
+            self._public_work_since_idle = True
 
         if clean_session:
             try:
@@ -1308,15 +1322,17 @@ class AgentBridge:
             # Off the loop for the same reason the write in _notify_finished
             # is: reading the commons is a couple of small files, but a slow
             # disk must not stall the voice pipeline mid-dispatch.
-            briefed = await asyncio.to_thread(
-                collab.with_commons,
-                scoped,
-                self._workspace_dir if self._commons_enabled else None,
-                agent,
-                findings=cfg.AGENT_COMMONS_FINDINGS,
-                lessons=cfg.AGENT_COMMONS_LESSONS,
-                elevated=agent in cfg.AGENT_ELEVATED_BACKENDS,
-            )
+            briefed = scoped
+            if not job.internal:
+                briefed = await asyncio.to_thread(
+                    collab.with_commons,
+                    scoped,
+                    self._workspace_dir if self._commons_enabled else None,
+                    agent,
+                    findings=cfg.AGENT_COMMONS_FINDINGS,
+                    lessons=cfg.AGENT_COMMONS_LESSONS,
+                    elevated=agent in cfg.AGENT_ELEVATED_BACKENDS,
+                )
             command_task = with_status_protocol(briefed)
             # Only offered when this job could actually ask: an agent told it
             # may consult when it may not spends a turn finding out otherwise.
@@ -1402,11 +1418,13 @@ class AgentBridge:
         await self._terminate(proc)
 
     def active_jobs(self, agent: str | None = None) -> list:
-        """Active jobs, oldest first, optionally filtered by agent."""
+        """User-visible active jobs, oldest first, optionally filtered by agent."""
         return [
             job
             for job in self._jobs.values()
-            if job.status in _ACTIVE_STATUSES and (agent is None or job.agent == agent)
+            if job.status in _ACTIVE_STATUSES
+            and not job.internal
+            and (agent is None or job.agent == agent)
         ]
 
     async def cancel_active(self, agent: str | None = None, *, all_jobs: bool = False) -> int:
@@ -1451,7 +1469,7 @@ class AgentBridge:
 
     def consult_peers(self, job: AgentJob) -> list[str]:
         """Backends this job is actually allowed to ask, which may be none."""
-        if not cfg.AGENT_CONSULT_ENABLED or not self._commons_enabled:
+        if job.internal or not cfg.AGENT_CONSULT_ENABLED or not self._commons_enabled:
             return []
         if job.consult_depth >= cfg.AGENT_CONSULT_MAX_DEPTH:
             return []
@@ -1864,6 +1882,8 @@ class AgentBridge:
         """Run best-effort persistence and voice callbacks for terminal jobs."""
         # First, because another agent is blocked polling for this answer.
         await self._answer_consult(job)
+        if job.internal:
+            return
         if self._commons_enabled:
             # Off the loop: the commons is a couple of short appends, but a
             # slow disk must never hold up announcing that a job finished.
@@ -1894,6 +1914,9 @@ class AgentBridge:
         if self._idle_notified or self.has_active():
             return
         self._idle_notified = True
+        if not self._public_work_since_idle:
+            return
+        self._public_work_since_idle = False
         payload = {
             "type": "agent_jobs_idle",
             "event": "all_finished",
@@ -2042,6 +2065,7 @@ class AgentBridge:
             if job.secs is not None
             else round(time.monotonic() - job._t0, 1),
             "announce_start": job.announce_start,
+            "internal": job.internal,
             **extra,
         }
         try:

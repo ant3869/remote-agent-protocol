@@ -993,6 +993,8 @@ class BrainSession:
             self._recent_delegations.append((time.monotonic(), key))
 
     async def _persist_job(self, job: agent_bridge.AgentJob) -> None:
+        if job.internal:
+            return
         await asyncio.to_thread(
             job_store.append_job,
             cfg.AGENT_HISTORY_FILE,
@@ -1001,6 +1003,8 @@ class BrainSession:
         )
 
     async def _announce_agent_job(self, job: agent_bridge.AgentJob) -> None:
+        if job.internal:
+            return
         # TRACK -> RELAY: telemetry close-out. A no-op for jobs the
         # orchestrator did not route (e.g. a manual GUI dispatch).
         self._orchestrator.record_outcome(job)
@@ -1029,12 +1033,14 @@ class BrainSession:
         )
 
     def _on_agent_event(self, event: dict) -> None:
-        self._emit(event)
         if event.get("type") == "agent_job":
             self._spawn(
                 self._control_plane.ingest_bridge_event(event),
                 name=f"control-plane-{event.get('job_id', 'event')}",
             )
+            if event.get("internal"):
+                return
+        self._emit(event)
 
     def _emit(self, event: dict) -> None:
         event = self._conversation.stamp(event)

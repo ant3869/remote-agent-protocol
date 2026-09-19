@@ -78,6 +78,7 @@ class AgentControlPlane:
         self._jobs: dict[str, ObservedWork] = {}
         self._job_agents: dict[str, str] = {}
         self._self_checks: dict[str, str] = {}
+        self._self_check_agents: set[str] = set()
 
     @property
     def agent_ids(self) -> tuple[str, ...]:
@@ -247,55 +248,97 @@ class AgentControlPlane:
                 agent_id,
                 error=ControlError("unknown_agent", "That agent is not configured.", agent_id),
             )
-        snapshot = await self.get_agent_status(agent_id, refresh=True)
-        if isinstance(snapshot, ControlError):
-            return ControlResult(False, agent_id, error=snapshot)
-        observation = snapshot.observation
-        if observation.presence is not Presence.REACHABLE:
+        # Reserve synchronously before the first await. Two simultaneous callers
+        # otherwise both pass the fresh/busy checks and launch duplicate pings.
+        if agent_id in self._self_check_agents:
             return ControlResult(
                 False,
                 agent_id,
                 error=ControlError(
-                    "unreachable",
-                    "The installation probe did not reach this harness; no response check was sent.",
-                    agent_id,
-                ),
-            )
-        if observation.current_work is not None:
-            return ControlResult(
-                False,
-                agent_id,
-                error=ControlError(
-                    "busy",
-                    "A RAP-owned job is already active; no concurrent response check was sent.",
+                    "self_check_active",
+                    "A response self-check is already active for this agent.",
                     agent_id,
                     retryable=True,
                 ),
             )
-        dispatched = await adapter.dispatch(AgentTask(SELF_CHECK_PROMPT, announce_start=False))
-        if isinstance(dispatched, ControlResult):
+        self._self_check_agents.add(agent_id)
+        keep_reservation = False
+        reserved_job_id = ""
+        try:
+            snapshot = await self.get_agent_status(agent_id, refresh=True)
+            if isinstance(snapshot, ControlError):
+                return ControlResult(False, agent_id, error=snapshot)
+            observation = snapshot.observation
+            if observation.presence is not Presence.REACHABLE:
+                return ControlResult(
+                    False,
+                    agent_id,
+                    error=ControlError(
+                        "unreachable",
+                        "The installation probe did not reach this harness; no response check was sent.",
+                        agent_id,
+                    ),
+                )
+            if observation.current_work is not None:
+                return ControlResult(
+                    False,
+                    agent_id,
+                    error=ControlError(
+                        "busy",
+                        "A RAP-owned job is already active; no concurrent response check was sent.",
+                        agent_id,
+                        retryable=True,
+                    ),
+                )
+            try:
+                dispatched = await adapter.dispatch(
+                    AgentTask(
+                        SELF_CHECK_PROMPT,
+                        announce_start=False,
+                        clean_session=True,
+                        internal=True,
+                    )
+                )
+            except Exception as exc:
+                error = ControlError("dispatch_failed", str(exc), agent_id, retryable=True)
+                await self._record_response_result(
+                    agent_id,
+                    ResponseState.FAILED,
+                    "The response check could not be started.",
+                    failure_kind=error.code,
+                )
+                return ControlResult(False, agent_id, error=error)
+            if isinstance(dispatched, ControlResult):
+                await self._record_response_result(
+                    agent_id,
+                    ResponseState.FAILED,
+                    "The response check could not be started.",
+                    failure_kind=dispatched.error.code if dispatched.error else "dispatch_failed",
+                )
+                return dispatched
+            self._self_checks[dispatched.job_id] = agent_id
+            reserved_job_id = dispatched.job_id
+            now = datetime.now(UTC)
             await self._record_response_result(
                 agent_id,
-                ResponseState.FAILED,
-                "The response check could not be started.",
-                failure_kind=dispatched.error.code if dispatched.error else "dispatch_failed",
+                ResponseState.PENDING,
+                "RAP sent a fixed self-check and is waiting for its exact response.",
+                current_work=ObservedWork(
+                    job_id=dispatched.job_id,
+                    ownership=WorkOwnership.RAP,
+                    summary="RAP self-check awaiting exact response",
+                    started_at=now,
+                    last_activity_at=now,
+                    state=Activity.WORKING,
+                ),
             )
+            keep_reservation = True
             return dispatched
-        self._self_checks[dispatched.job_id] = agent_id
-        await self._record_response_result(
-            agent_id,
-            ResponseState.PENDING,
-            "RAP sent a fixed self-check and is waiting for its exact response.",
-            current_work=ObservedWork(
-                job_id=dispatched.job_id,
-                ownership=WorkOwnership.RAP,
-                summary="RAP self-check awaiting exact response",
-                started_at=datetime.now(UTC),
-                last_activity_at=datetime.now(UTC),
-                state=Activity.WORKING,
-            ),
-        )
-        return dispatched
+        finally:
+            if not keep_reservation:
+                if reserved_job_id:
+                    self._self_checks.pop(reserved_job_id, None)
+                self._self_check_agents.discard(agent_id)
 
     async def cancel_job(self, job_id: str, *, external_confirmed: bool = False) -> ControlResult:
         work = self._jobs.get(job_id)
@@ -449,6 +492,7 @@ class AgentControlPlane:
             )
             return
         self._self_checks.pop(job_id, None)
+        self._self_check_agents.discard(agent_id)
         response = str(event.get("result") or "").strip()
         failure_kind = str(event.get("failure_kind") or "")
         if status == "done" and response == SELF_CHECK_SENTINEL:

@@ -149,20 +149,6 @@ class FloorManager:
                 next_floor_id=current_floor,
             )
 
-        # Short questions such as "why?" and "how?" overlap the generic
-        # small-talk vocabulary, but belong to the current subject when an
-        # agent owns the floor. Keep this before acknowledgment handling.
-        if current_floor != BUTLER_ID and _FOLLOW_UP.search(text):
-            return FloorDecision(
-                kind="follow_up",
-                target_id=current_floor,
-                task_id=self._current_task_id(routing_input, current_floor),
-                requires_clarification=False,
-                requires_butler_selection=False,
-                reason_code="current_subject_follow_up",
-                next_floor_id=current_floor,
-            )
-
         if is_smalltalk(text):
             target_id = _agent_id(routing_input.last_speaker_id) or current_floor
             return FloorDecision(

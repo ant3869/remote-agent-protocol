@@ -266,7 +266,11 @@ class AgentSelector:
                 eligible.append(candidate)
             else:
                 eliminated.append(candidate.with_reason_codes(reason))
-                requires_probe = requires_probe or reason in {"missing_access", "stale_access"}
+                requires_probe = requires_probe or reason in {
+                    "missing_access",
+                    "stale_access",
+                    "stale_snapshot",
+                }
 
         if not eligible:
             return SelectionDecision(
@@ -297,6 +301,8 @@ class AgentSelector:
         now: datetime,
     ) -> str | None:
         observation = candidate.snapshot.observation
+        if candidate.snapshot.is_stale(now):
+            return "stale_snapshot"
         if not requirement.required_capabilities.issubset(observation.capabilities):
             return "missing_capability"
         if observation.presence is not Presence.REACHABLE:

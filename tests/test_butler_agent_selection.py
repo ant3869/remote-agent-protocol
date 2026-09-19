@@ -79,7 +79,7 @@ def test_fresh_access_beats_stale_history(selector: AgentSelector) -> None:
     )
 
     assert decision.agent_id == "openclaw"
-    assert decision.eliminated[0].reason_codes == ("stale_access",)
+    assert decision.eliminated[0].reason_codes == ("stale_snapshot",)
 
 
 def test_unknown_access_requests_probe_instead_of_inventing_candidate(
@@ -98,13 +98,12 @@ def test_unknown_access_requests_probe_instead_of_inventing_candidate(
 
 def test_old_success_is_not_permanent_access(selector: AgentSelector) -> None:
     """A historical success cannot silently become a current authorization claim."""
-    old_success = snapshot("openclaw", fresh=False)
+    old_success = snapshot("openclaw", fresh=True)
     old_success = AgentSnapshot(
         replace(
             old_success.observation,
             evidence=(Evidence("test", NOW - timedelta(days=2), "success: email"),),
         ),
-        stale=True,
     )
 
     decision = selector.select(email_request(), (old_success,))
@@ -112,6 +111,21 @@ def test_old_success_is_not_permanent_access(selector: AgentSelector) -> None:
     assert decision.agent_id is None
     assert decision.requires_probe is True
     assert decision.eliminated[0].reason_codes == ("stale_access",)
+
+
+def test_stale_snapshot_never_selects_for_current_work_and_requires_probe(
+    selector: AgentSelector,
+) -> None:
+    """Even a capability-qualified default cannot be selected from stale state."""
+    decision = selector.select(
+        CapabilityRequirement(),
+        (snapshot("hermes", fresh=False),),
+    )
+
+    assert decision.agent_id is None
+    assert decision.requires_probe is True
+    assert decision.reason_codes == ("no_verified_candidate",)
+    assert decision.eliminated[0].reason_codes == ("stale_snapshot",)
 
 
 def test_fresh_success_is_timestamped_access_evidence(selector: AgentSelector) -> None:
@@ -221,7 +235,7 @@ def test_decision_persistence_contains_requirement_and_provenance(selector: Agen
 
     assert payload["requirement"]["required_access"] == ["email"]
     assert payload["selected_agent_id"] == "openclaw"
-    assert payload["eliminated"][0]["reason_codes"] == ["stale_access"]
+    assert payload["eliminated"][0]["reason_codes"] == ["stale_snapshot"]
     assert payload["selected_evidence"][0]["observed_at"] == NOW.isoformat()
 
 

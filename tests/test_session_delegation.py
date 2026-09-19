@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from pipecat.frames.frames import TTSSpeakFrame
 from remote_agent_protocol import agent_bridge, personas, session, session_processors
@@ -208,6 +208,56 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
             voice_session._on_agent_event(event)
 
         self.assertEqual(lifecycle.events, [event])
+
+    async def test_internal_diagnostic_lifecycle_is_control_plane_only(self):
+        emitted = []
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA, on_event=emitted.append)
+        lifecycle = RecordingLifecycleServer()
+        voice_session._lifecycle_ws = lifecycle
+        voice_session._control_plane.ingest_bridge_event = AsyncMock()
+        voice_session._worker = RecordingWorker()
+        event = {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "check-1",
+            "agent": "hermes",
+            "status": "done",
+            "result": "RAP_SELF_CHECK_OK",
+            "internal": True,
+        }
+
+        voice_session._on_agent_event(event)
+        await asyncio.sleep(0)
+
+        voice_session._control_plane.ingest_bridge_event.assert_awaited_once_with(event)
+        self.assertEqual(emitted, [])
+        self.assertEqual(lifecycle.events, [])
+        self.assertEqual(voice_session._worker.frames, [])
+
+    async def test_internal_diagnostic_job_cannot_reach_history_context_or_narration(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        voice_session._context = MagicMock()
+        voice_session._worker = RecordingWorker()
+        voice_session._orchestrator.record_outcome = MagicMock()
+        voice_session._speak_agent_text = AsyncMock()
+        job = agent_bridge.AgentJob(
+            "check-1",
+            "hermes",
+            "RAP self-check",
+            status=agent_bridge.STATUS_DONE,
+            result="RAP_SELF_CHECK_OK",
+            internal=True,
+        )
+
+        with patch.object(session.job_store, "append_job") as append_job:
+            await voice_session._persist_job(job)
+        await voice_session._announce_agent_job(job)
+
+        append_job.assert_not_called()
+        voice_session._context.add_message.assert_not_called()
+        voice_session._orchestrator.record_outcome.assert_not_called()
+        voice_session._speak_agent_text.assert_not_awaited()
+        self.assertEqual(voice_session._worker.frames, [])
 
     async def test_wake_persona_is_applied_before_callback_returns(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)

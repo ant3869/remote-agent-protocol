@@ -220,7 +220,12 @@ class BridgeCliAdapter:
     async def dispatch(self, task: AgentTask) -> JobHandle | ControlResult:
         """Launch work only through AgentBridge's existing safety boundary."""
         job_id = await self._bridge.start(
-            self.agent_id, task.text, cwd=task.cwd, announce_start=task.announce_start
+            self.agent_id,
+            task.text,
+            cwd=task.cwd,
+            announce_start=task.announce_start,
+            clean_session=task.clean_session,
+            internal=task.internal,
         )
         job = self._bridge.get(job_id)
         if job is not None and job.status == "failed":

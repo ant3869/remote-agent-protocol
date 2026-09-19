@@ -18,6 +18,8 @@ class AgentTask:
     text: str
     cwd: str | None = None
     announce_start: bool = False
+    clean_session: bool = False
+    internal: bool = False
 
 
 class AgentAdapter(Protocol):
