@@ -771,6 +771,7 @@ class AgentDiagnosticPhrasingTests(unittest.TestCase):
     def test_named_agent_work_instruction_is_not_reclassified_as_a_diagnostic(self):
         for text in (
             "Ask Codex why the server is not responding",
+            "Codex, diagnose why the server is not responding",
             "Have Codex diagnose why the backend is broken",
             "Tell code puppy to check whether the website is rate limited",
         ):

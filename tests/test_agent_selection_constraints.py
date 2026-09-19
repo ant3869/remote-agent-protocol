@@ -180,22 +180,30 @@ async def test_actual_response_diagnostic_stays_local_and_starts_fixed_check(mon
     assert "[[delegate" not in response
 
 
+@pytest.mark.parametrize(
+    ("text", "task"),
+    [
+        ("Ask Codex why the server is not responding", "why the server is not responding"),
+        (
+            "Codex, diagnose why the server is not responding",
+            "diagnose why the server is not responding",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_named_agent_server_diagnosis_remains_delegated_work(monkeypatch):
+async def test_named_agent_server_diagnosis_remains_delegated_work(monkeypatch, text, task):
     brain = _brain(monkeypatch, ["unused"])
     brain._handle_agent_diagnostic = AsyncMock(
         side_effect=AssertionError("real work must not become a local self-check")
     )
-    brain._resolve_delegation = AsyncMock(
-        return_value=("codex", "why the server is not responding")
-    )
+    brain._resolve_delegation = AsyncMock(return_value=("codex", task))
     brain._delegate_ack = MagicMock(return_value="delegated")
 
-    content = await brain._turn_content("Ask Codex why the server is not responding", None)
+    content = await brain._turn_content(text, None)
 
     assert content == "delegated"
     brain._resolve_delegation.assert_awaited_once()
-    brain._delegate_ack.assert_called_once_with("codex", "why the server is not responding")
+    brain._delegate_ack.assert_called_once_with("codex", task)
     brain._handle_agent_diagnostic.assert_not_awaited()
 
 

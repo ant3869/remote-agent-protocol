@@ -1212,9 +1212,13 @@ class AgentBridge:
         wait here. Other backends have no shared session and are unaffected.
         """
         agent = job.agent
+        # RAP neither resumes from nor adopts a clean subprocess's session id,
+        # so clean work uses an independent lane. In particular, a bounded
+        # internal self-check must never make real Hermes work wait behind a
+        # hidden diagnostic process.
         lock = (
             self._session_locks.setdefault(agent, asyncio.Lock())
-            if agent in _HERMES_SESSION_AGENTS
+            if agent in _HERMES_SESSION_AGENTS and not job._clean_session
             else None
         )
         if lock is not None and lock.locked():

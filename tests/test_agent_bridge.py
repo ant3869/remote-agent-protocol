@@ -689,6 +689,73 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(agent_bridge.spoken_answer(job), "")
         self.assertEqual(agent_bridge.announcement(job), "")
 
+    def test_clean_internal_hermes_check_does_not_block_resumed_user_work(self):
+        events: list[dict] = []
+        session_id = "20260707_174900_abc123"
+        script = (
+            "import sys,time; "
+            "task=sys.argv[-1]; "
+            "time.sleep(5 if 'internal check' in task else 0.01); "
+            "print('ARGV ' + ' '.join(sys.argv[1:]), flush=True); "
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"ok",'
+            '"result":"RAP_SELF_CHECK_OK"}\', flush=True)'
+        )
+        backend = {"hermes": ["{python}", "-u", "-c", script, "chat", "-q", "{task}"]}
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                backend,
+                events.append,
+                completion_grace_secs=0.01,
+            )
+            bridge._session_ids["hermes"] = session_id
+            bridge._session_turns["hermes"] = 0
+            internal_id = await bridge.start(
+                "hermes",
+                "internal check",
+                clean_session=True,
+                internal=True,
+            )
+            for _ in range(100):
+                if internal_id in bridge._procs:
+                    break
+                await asyncio.sleep(0.01)
+            real_id = await bridge.start("hermes", "real user work")
+            for _ in range(100):
+                if bridge.get(real_id).status == agent_bridge.STATUS_DONE:
+                    break
+                await asyncio.sleep(0.01)
+            real_finished_while_internal_running = (
+                bridge.get(real_id).status == agent_bridge.STATUS_DONE
+                and bridge.get(internal_id).status == agent_bridge.STATUS_RUNNING
+            )
+            await bridge.cancel(internal_id)
+            for _ in range(100):
+                if bridge.get(internal_id).status == agent_bridge.STATUS_CANCELLED:
+                    if internal_id not in bridge._procs:
+                        break
+                await asyncio.sleep(0.01)
+            await bridge.shutdown()
+            return (
+                bridge.get(internal_id),
+                bridge.get(real_id),
+                real_finished_while_internal_running,
+                bridge._session_ids.get("hermes"),
+                bridge._session_turns.get("hermes"),
+            )
+
+        with mock.patch.object(
+            agent_bridge, "clean_session_template", side_effect=lambda template: list(template)
+        ):
+            internal, real, overlapped, retained_session, resumed_turns = self._run(scenario())
+
+        self.assertEqual(real.status, agent_bridge.STATUS_DONE)
+        self.assertTrue(overlapped)
+        self.assertEqual(internal.status, agent_bridge.STATUS_CANCELLED)
+        self.assertIn(f"--resume {session_id}", "\n".join(real.lines))
+        self.assertEqual(retained_session, session_id)
+        self.assertEqual(resumed_turns, 1)
+
     def test_hermes_follow_up_resumes_the_captured_session(self):
         events: list[dict] = []
         script = (

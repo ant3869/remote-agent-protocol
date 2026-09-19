@@ -259,6 +259,29 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
         voice_session._speak_agent_text.assert_not_awaited()
         self.assertEqual(voice_session._worker.frames, [])
 
+    async def test_direct_address_diagnostic_words_stay_on_voice_delegation_path(self):
+        voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
+        voice_session._context = MagicMock()
+        voice_session._worker = RecordingWorker()
+        voice_session._handle_agent_diagnostic = AsyncMock(
+            side_effect=AssertionError("direct work must not become a local self-check")
+        )
+        voice_session._resolve_delegation = AsyncMock(
+            return_value=("codex", "diagnose why the server is not responding")
+        )
+        voice_session._delegate_ack = MagicMock(return_value="delegated")
+
+        await voice_session._send_text("Codex, diagnose why the server is not responding")
+
+        voice_session._handle_agent_diagnostic.assert_not_awaited()
+        voice_session._resolve_delegation.assert_awaited_once()
+        voice_session._delegate_ack.assert_called_once_with(
+            "codex", "diagnose why the server is not responding"
+        )
+        voice_session._context.add_message.assert_called_once_with(
+            {"role": "user", "content": "delegated"}
+        )
+
     async def test_wake_persona_is_applied_before_callback_returns(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
         applied = []
