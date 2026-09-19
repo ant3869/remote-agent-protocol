@@ -49,23 +49,12 @@ from .models import (
     SessionBinding,
     TaskReference,
 )
+from .results import COMMUNICATION_CONTRACT, ResultPresenter, classify_recovery
 from .selection import AgentSelector, CapabilityRequirement
 from .sessions import SessionBindingManager
 from .store import ConversationLoadResult, ConversationStore
 
 EventListener = Callable[[dict[str, Any]], None]
-
-# Task 7 owns the versioned, formal communication-contract envelope
-# (COMMUNICATION_CONTRACT_VERSION/AgentResultEnvelope). The hub needs a
-# contract string before then, so this copy matches the design doc exactly
-# and should be replaced by an import from results.py once Task 7 lands.
-COMMUNICATION_CONTRACT_VERSION = 1
-COMMUNICATION_CONTRACT = (
-    "Speak to Ant like a trusted teammate: natural, direct, and brief, but complete. "
-    "Lead with the outcome. Include every important result, decision, warning, failure, "
-    "and next step. Omit internal tool chatter unless asked. Keep operational progress "
-    "separate from the final answer. If blocked, ask one clear question. Never impersonate Butler."
-)
 
 _NO_DISPATCH_KINDS = frozenset(
     {
@@ -78,6 +67,13 @@ _NO_DISPATCH_KINDS = frozenset(
     }
 )
 _NON_TERMINAL_JOB_STATUSES = frozenset({"running", "waiting", "blocked"})
+_PRESENTATION_REQUEST = (
+    "Your task execution completed, but RAP received only machine-oriented output. "
+    "Using the referenced attempt material, now write the final answer directly to Ant. "
+    "State the outcome, material findings, warnings, and next step; do not describe this "
+    "presentation request or imitate Butler. If the answer is long, offer to continue reading it."
+)
+_INVALID_FINAL_OUTPUT = "invalid_final_output"
 
 
 def _channel_id_for(agent_id: str) -> str:
@@ -158,6 +154,7 @@ class AgentConversationHub:
         self._tasks: dict[str, TaskReference] = {}
         self._floor_state = FloorState.new(now=self._now())
         self._sessions = SessionBindingManager(persist=self._persist_binding)
+        self._presenter = ResultPresenter()
         self._lock = asyncio.Lock()
 
     @property
@@ -316,6 +313,7 @@ class AgentConversationHub:
             full_text=request.text,
             now=now,
             task_id=task_id,
+            contract_version=channel.communication_contract_version,
         )
         self._turns.append(user_turn)
 
@@ -334,7 +332,7 @@ class AgentConversationHub:
         try:
             package = self._context_assembler.assemble(context_request)
         except ValueError as exc:
-            return self._butler_intervention(
+            return await self._butler_intervention(
                 request, decision, task_id, f"Context could not be assembled: {exc}"
             )
         self._emit(
@@ -346,7 +344,7 @@ class AgentConversationHub:
 
         adapter = self._adapters.get(target_id)
         if adapter is None:
-            return self._butler_intervention(
+            return await self._butler_intervention(
                 request, decision, task_id, f"{target_id} has no configured session adapter."
             )
 
@@ -361,7 +359,9 @@ class AgentConversationHub:
         try:
             handle = await self._sessions.dispatch(channel.channel_id, adapter, package)
         except Exception as exc:  # noqa: BLE001 - normalized into a Butler intervention
-            return self._butler_intervention(request, decision, task_id, f"Dispatch failed: {exc}")
+            return await self._butler_intervention(
+                request, decision, task_id, f"Dispatch failed: {exc}"
+            )
 
         self._emit(
             SESSION_BOUND, channel.channel_id, task_id=task_id, detail="Session bound for dispatch."
@@ -451,7 +451,7 @@ class AgentConversationHub:
             spoken_acknowledgment=spoken if spoken is not None else decision.spoken_text,
         )
 
-    def _butler_intervention(
+    async def _butler_intervention(
         self,
         request: ConversationTurnRequest,
         decision: FloorDecision,
@@ -459,8 +459,23 @@ class AgentConversationHub:
         detail: str,
     ) -> TurnDisposition:
         """Transfer narration to Butler when dispatch cannot safely proceed."""
+        candidate_agent_id = await self._select_agent()
+        recovery = classify_recovery(
+            "",
+            detail=detail,
+            has_alternative_candidate=candidate_agent_id is not None,
+            candidate_agent_id=candidate_agent_id,
+        )
         self._emit(
-            BUTLER_INTERVENTION_STARTED, "coordinator:butler", task_id=task_id or "", detail=detail
+            BUTLER_INTERVENTION_STARTED,
+            "coordinator:butler",
+            task_id=task_id or "",
+            detail=detail,
+            data={
+                "recovery_kind": recovery.kind,
+                "reason_code": recovery.reason_code,
+                "candidate_agent_id": recovery.candidate_agent_id,
+            },
         )
         channel, created = self._get_or_create_channel(BUTLER_ID)
         if created:
@@ -511,6 +526,69 @@ class AgentConversationHub:
 
     # -- Background job completion -----------------------------------------
 
+    async def _request_agent_presentation(
+        self,
+        *,
+        task: TaskReference,
+        channel: AgentChannel,
+        raw_text: str,
+        source_attempt_id: str,
+        now: datetime,
+    ) -> str | None:
+        """Ask the task owner, through its existing binding, to author a final answer.
+
+        Reconstructed CLI output stays in the bridge's job record and is only
+        passed back as an ephemeral, referenced input. It is never appended to
+        the conversation transcript or promoted into memory.
+        """
+        adapter = self._adapters.get(task.agent_id)
+        if adapter is None:
+            return f"{task.agent_id} has no configured session adapter for final presentation."
+        artifact_ref = f"bridge-job:{source_attempt_id}"
+        context_request = ContextRequest(
+            channel_id=channel.channel_id,
+            current_request=_PRESENTATION_REQUEST,
+            communication_contract=self._contract,
+            task_id=task.task_id,
+            active_task=self._task_context(task.task_id),
+            recent_turns=tuple(
+                turn for turn in self._turns if turn.channel_id == channel.channel_id
+            ),
+            selected_material=(f"Attempt artifact {artifact_ref}:\n{raw_text}",),
+        )
+        try:
+            package = self._context_assembler.assemble(context_request)
+            self._emit(
+                CONTEXT_ASSEMBLED,
+                channel.channel_id,
+                task_id=task.task_id,
+                data={
+                    "omitted_sections": list(package.omitted_sections),
+                    "purpose": "result_presentation",
+                },
+            )
+            handle = await self._sessions.dispatch(channel.channel_id, adapter, package)
+        except Exception as exc:  # noqa: BLE001 - normalized to Butler recovery below
+            return f"Final presentation dispatch failed: {exc}"
+
+        artifact_refs = list(dict.fromkeys([*task.artifact_refs, artifact_ref]))
+        self._tasks[task.task_id] = replace(
+            task,
+            status="active",
+            updated_at=now,
+            attempt_id=handle.job_id,
+            artifact_refs=artifact_refs,
+            presentation_attempted=True,
+        )
+        self._save()
+        self._emit(
+            SESSION_BOUND,
+            channel.channel_id,
+            task_id=task.task_id,
+            detail="Session bound for final presentation.",
+        )
+        return None
+
     async def handle_job_event(self, event: Mapping[str, Any]) -> None:
         """Record RAP-owned job lifecycle without ever stealing the active floor."""
         if event.get("type") != "agent_job":
@@ -534,7 +612,11 @@ class AgentConversationHub:
             if status == "failed" or failure_kind:
                 result_kind, new_status = ResultKind.FAILURE, "failed"
             elif status == "done":
-                result_kind, new_status = ResultKind.SUCCESS, "done"
+                try:
+                    result_kind = ResultKind(str(event.get("result_kind") or ResultKind.SUCCESS))
+                except ValueError:
+                    result_kind = ResultKind.SUCCESS
+                new_status = "done"
             else:
                 return
 
@@ -542,6 +624,7 @@ class AgentConversationHub:
             text = str(
                 event.get("result") or event.get("failure_detail") or event.get("summary") or ""
             )
+            raw_text = text or "(no result text was provided)"
             routing = self._floor_manager.resolve(
                 TurnRoutingInput(
                     text="",
@@ -557,15 +640,84 @@ class AgentConversationHub:
                 self._emit(
                     CHANNEL_CREATED, channel.channel_id, detail="First channel for this agent."
                 )
+
+            spoken_text: str | None = None
+            recovery = None
+            if result_kind is ResultKind.FAILURE:
+                full_text = raw_text
+                candidate_agent_id = await self._select_agent()
+                if candidate_agent_id == agent_id:
+                    candidate_agent_id = None
+                recovery = classify_recovery(
+                    failure_kind,
+                    detail=text or "Agent work failed.",
+                    has_alternative_candidate=candidate_agent_id is not None,
+                    candidate_agent_id=candidate_agent_id,
+                )
+            else:
+                if bool(event.get("result_is_fallback")):
+                    if not task.presentation_attempted:
+                        presentation_error = await self._request_agent_presentation(
+                            task=task,
+                            channel=channel,
+                            raw_text=raw_text,
+                            source_attempt_id=job_id,
+                            now=now,
+                        )
+                        if presentation_error is None:
+                            return
+                        result_kind, new_status = ResultKind.FAILURE, "failed"
+                        failure_kind = "dispatch_failure"
+                        text = presentation_error
+                        raw_text = presentation_error
+                    else:
+                        result_kind, new_status = ResultKind.FAILURE, "failed"
+                        failure_kind = _INVALID_FINAL_OUTPUT
+                        text = (
+                            f"{agent_id} completed the presentation attempt without an "
+                            "agent-authored final answer."
+                        )
+                        raw_text = text
+
+                if result_kind is ResultKind.FAILURE:
+                    full_text = raw_text
+                    candidate_agent_id = await self._select_agent()
+                    if candidate_agent_id == agent_id:
+                        candidate_agent_id = None
+                    recovery = classify_recovery(
+                        failure_kind,
+                        detail=text or "Agent work failed.",
+                        has_alternative_candidate=candidate_agent_id is not None,
+                        candidate_agent_id=candidate_agent_id,
+                    )
+                else:
+                    envelope = self._presenter.present(
+                        task_id=task.task_id,
+                        attempt_id=job_id,
+                        channel_id=channel.channel_id,
+                        agent_id=agent_id,
+                        result_kind=result_kind,
+                        full_text=raw_text,
+                        now=now,
+                        artifact_refs=tuple(task.artifact_refs),
+                    )
+                    full_text = envelope.full_text
+                    spoken_text = envelope.spoken_text
+
             turn = ConversationTurn.new(
                 channel_id=channel.channel_id,
                 speaker_id=agent_id,
                 speaker_role="agent",
-                full_text=text or "(no result text was provided)",
+                full_text=full_text,
                 now=now,
                 task_id=task.task_id,
+                spoken_text=spoken_text,
                 result_kind=result_kind,
                 contract_version=channel.communication_contract_version,
+                metadata={
+                    "attempt_id": job_id,
+                    "artifact_refs": list(task.artifact_refs),
+                },
             )
             self._turns.append(turn)
             self._tasks[task.task_id] = replace(task, status=new_status, updated_at=now)
@@ -591,12 +743,17 @@ class AgentConversationHub:
                 task_id=task.task_id,
                 data={"result_kind": result_kind.value},
             )
-            if result_kind is ResultKind.FAILURE:
+            if recovery is not None:
                 self._emit(
                     BUTLER_INTERVENTION_STARTED,
                     "coordinator:butler",
                     task_id=task.task_id,
                     detail=text or "Agent work failed.",
+                    data={
+                        "recovery_kind": recovery.kind,
+                        "reason_code": recovery.reason_code,
+                        "candidate_agent_id": recovery.candidate_agent_id,
+                    },
                 )
 
     def _task_by_job_id(self, job_id: str) -> TaskReference | None:

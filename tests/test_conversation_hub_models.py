@@ -12,6 +12,7 @@ from remote_agent_protocol.conversation_hub.models import (
     ScopedMemory,
     SessionBinding,
     SessionStrategy,
+    TaskReference,
 )
 
 NOW = datetime(2026, 9, 17, 18, 30, tzinfo=UTC)
@@ -87,3 +88,17 @@ def test_restored_native_binding_requires_validation():
     )
 
     assert SessionBinding.from_dict(binding.to_dict(), restored=True).requires_validation
+
+
+def test_task_reference_round_trips_presentation_attempt_state():
+    task = TaskReference(
+        task_id="task-1",
+        channel_id="agent:openclaw",
+        agent_id="openclaw",
+        status="active",
+        created_at=NOW,
+        updated_at=NOW,
+        presentation_attempted=True,
+    )
+
+    assert TaskReference.from_dict(task.to_dict()) == task

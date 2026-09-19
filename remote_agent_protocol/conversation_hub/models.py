@@ -503,6 +503,7 @@ class TaskReference:
     updated_at: datetime
     attempt_id: str | None = None
     artifact_refs: list[str] = field(default_factory=list)
+    presentation_attempted: bool = False
 
     def __post_init__(self) -> None:
         """Require aware task lifecycle timestamps for direct construction."""
@@ -520,6 +521,7 @@ class TaskReference:
             "updated_at": _timestamp(self.updated_at),
             "attempt_id": self.attempt_id,
             "artifact_refs": self.artifact_refs,
+            "presentation_attempted": self.presentation_attempted,
         }
 
     @classmethod
@@ -527,6 +529,9 @@ class TaskReference:
         """Restore a task reference after validating its durable representation."""
         if not isinstance(payload, dict):
             raise ValueError("task reference payload must be an object")
+        presentation_attempted = payload.get("presentation_attempted", False)
+        if not isinstance(presentation_attempted, bool):
+            raise ValueError("presentation_attempted must be a boolean")
         return cls(
             task_id=_required(payload, "task_id", str),
             channel_id=_required(payload, "channel_id", str),
@@ -536,4 +541,5 @@ class TaskReference:
             updated_at=_read_timestamp(payload.get("updated_at"), "updated_at"),
             attempt_id=_optional_string(payload, "attempt_id"),
             artifact_refs=_string_list(payload, "artifact_refs"),
+            presentation_attempted=presentation_attempted,
         )

@@ -25,6 +25,7 @@ from remote_agent_protocol.conversation_hub.models import (
     SessionBinding,
     SessionStrategy,
 )
+from remote_agent_protocol.conversation_hub.results import COMMUNICATION_CONTRACT
 from remote_agent_protocol.conversation_hub.selection import AgentSelector
 from remote_agent_protocol.conversation_hub.service import (
     AgentConversationHub,
@@ -306,6 +307,127 @@ async def test_failed_background_job_triggers_butler_intervention_event(tmp_path
     last_turn = hub.turns("agent:openclaw")[-1]
     assert last_turn.result_kind == ResultKind.FAILURE
     assert "conversation_butler_intervention_started" in [item["event"] for item in events]
+
+
+@pytest.mark.asyncio
+async def test_machine_output_requires_the_same_bound_agent_to_author_a_final_result(tmp_path):
+    """Fallback CLI text is an artifact, never an agent's canonical answer."""
+    events = []
+    hub, _registry, adapters = make_hub(tmp_path, on_event=events.append)
+    disposition = await hub.handle_turn(turn_request("OpenClaw, check my email"))
+    task = hub.task(disposition.task_id)
+    first_attempt = task.attempt_id
+    first_binding, _first_context = adapters["openclaw"].dispatch_in_session.await_args.args
+    raw_output = "[tool] scanned 12 messages\npriority: school notice"
+
+    await hub.handle_job_event(
+        {
+            "type": "agent_job",
+            "agent": "openclaw",
+            "job_id": task.attempt_id,
+            "status": "done",
+            "result": raw_output,
+            "result_is_fallback": True,
+        }
+    )
+
+    assert adapters["openclaw"].dispatch_in_session.await_count == 2
+    second_binding, presentation_context = adapters["openclaw"].dispatch_in_session.await_args.args
+    assert second_binding.binding_id == first_binding.binding_id
+    assert presentation_context.section("contract").endswith(COMMUNICATION_CONTRACT)
+    assert raw_output in presentation_context.section("active_task")
+    task = hub.task(disposition.task_id)
+    assert task.status == "active"
+    assert task.presentation_attempted is True
+    assert task.artifact_refs == [f"bridge-job:{first_attempt}"]
+    assert raw_output not in "\n".join(turn.full_text for turn in hub.turns("agent:openclaw"))
+
+    await hub.handle_job_event(
+        {
+            "type": "agent_job",
+            "agent": "openclaw",
+            "job_id": task.attempt_id,
+            "status": "done",
+            "result": "The inbox is clear. One school notice needs your review.",
+            "result_is_fallback": False,
+        }
+    )
+
+    result_turn = hub.turns("agent:openclaw")[-1]
+    assert result_turn.speaker_id == "openclaw"
+    assert result_turn.result_kind is ResultKind.SUCCESS
+    assert result_turn.full_text == "The inbox is clear. One school notice needs your review."
+    assert result_turn.metadata["attempt_id"] == task.attempt_id
+    assert result_turn.contract_version == 1
+    assert "conversation_butler_intervention_started" not in [item["event"] for item in events]
+    assert COMMUNICATION_CONTRACT not in (tmp_path / "conversations.json").read_text()
+
+
+@pytest.mark.asyncio
+async def test_invalid_presentation_output_transfers_recovery_to_butler(tmp_path):
+    """A second raw output is not promoted; Butler receives only recovery narration."""
+    events = []
+    hub, _registry, adapters = make_hub(tmp_path, on_event=events.append)
+    disposition = await hub.handle_turn(turn_request("OpenClaw, check my email"))
+    first_attempt = hub.task(disposition.task_id).attempt_id
+
+    await hub.handle_job_event(
+        {
+            "type": "agent_job",
+            "agent": "openclaw",
+            "job_id": first_attempt,
+            "status": "done",
+            "result": "raw first output",
+            "result_is_fallback": True,
+        }
+    )
+    presentation_attempt = hub.task(disposition.task_id).attempt_id
+    await hub.handle_job_event(
+        {
+            "type": "agent_job",
+            "agent": "openclaw",
+            "job_id": presentation_attempt,
+            "status": "done",
+            "result": "raw second output",
+            "result_is_fallback": True,
+        }
+    )
+
+    assert adapters["openclaw"].dispatch_in_session.await_count == 2
+    assert hub.task(disposition.task_id).status == "failed"
+    final_turn = hub.turns("agent:openclaw")[-1]
+    assert final_turn.result_kind is ResultKind.FAILURE
+    assert "raw second output" not in final_turn.full_text
+    intervention = next(
+        item for item in events if item["event"] == "conversation_butler_intervention_started"
+    )
+    assert intervention["data"]["reason_code"] == "invalid_final_output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result_kind", [ResultKind.SUCCESS, ResultKind.PARTIAL, ResultKind.BLOCKED]
+)
+async def test_agent_owns_each_structured_terminal_result_kind(tmp_path, result_kind):
+    """Success, partial, and blocked structured results retain their owner identity."""
+    hub, _registry, _adapters = make_hub(tmp_path)
+    disposition = await hub.handle_turn(turn_request("OpenClaw, check my email"))
+    task = hub.task(disposition.task_id)
+
+    await hub.handle_job_event(
+        {
+            "type": "agent_job",
+            "agent": "openclaw",
+            "job_id": task.attempt_id,
+            "status": "done",
+            "result": "Agent-authored result.",
+            "result_kind": result_kind.value,
+        }
+    )
+
+    result_turn = hub.turns("agent:openclaw")[-1]
+    assert result_turn.speaker_id == "openclaw"
+    assert result_turn.result_kind is result_kind
 
 
 @pytest.mark.asyncio

@@ -1454,6 +1454,52 @@ class BridgeLifecycleTests(unittest.TestCase):
         job_id = self._run(scenario())
         self.assertIn(job_id, persisted)
 
+    def test_structured_result_is_not_flagged_as_fallback(self):
+        # The mock backend reports its own "result" via @@JESS_STATUS; that is
+        # the agent's own answer, not RAP's reconstruction, and downstream
+        # conversation-hub presentation must be able to tell the difference.
+        events: list[dict] = []
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(MOCK_BACKEND, events.append)
+            job_id = await bridge.start("mock", "hi")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_DONE)
+        self.assertFalse(job.result_is_fallback)
+        finished = next(e for e in events if e["event"] == "finished")
+        self.assertFalse(finished["result_is_fallback"])
+
+    def test_result_reconstructed_from_output_is_flagged_as_fallback(self):
+        # An agent that exits cleanly without ever reporting a structured
+        # result gets RAP's best-effort reconstruction from its own output --
+        # that must be distinguishable from an agent-authored answer.
+        events: list[dict] = []
+        script = "print('finding one'); print('finding two')"
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            job_id = await bridge.start("mock", "do a thing")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_DONE)
+        self.assertTrue(job.result_is_fallback)
+        self.assertEqual(job.result, agent_bridge.fallback_result(job.lines))
+        finished = next(e for e in events if e["event"] == "finished")
+        self.assertTrue(finished["result_is_fallback"])
+
     def test_completion_marker_finishes_a_stuck_process(self):
         events: list[dict] = []
         script = (

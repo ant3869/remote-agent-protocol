@@ -288,6 +288,7 @@ class AgentJob:
     finished_at: str = ""
     failure_kind: str = ""
     failure_detail: str = ""
+    result_is_fallback: bool = False  # result was reconstructed from output, not agent-authored
     model_label: str = ""
     host_modified: bool = False  # the job touched the host app's own source
     # Consultation bookkeeping. This is what makes the limits structural: an
@@ -1815,6 +1816,7 @@ class AgentBridge:
                 job.failure_detail = job.summary
         if job.status == STATUS_DONE and not job.result:
             job.result = fallback_result(job.lines)
+            job.result_is_fallback = True
         job.secs = round(time.monotonic() - job._t0, 1)
         summary_source = job.result.splitlines() if job.result else job.lines
         summary = job.summary or summarize_output(summary_source)
@@ -2063,6 +2065,7 @@ class AgentBridge:
             "finished_at": job.finished_at,
             "failure_kind": job.failure_kind,
             "failure_detail": job.failure_detail,
+            "result_is_fallback": job.result_is_fallback,
             "model_label": job.model_label,
             "host_modified": job.host_modified,
             "elapsed_secs": job.secs
