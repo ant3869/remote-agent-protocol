@@ -95,7 +95,9 @@ async def test_a_group_ping_is_answered_from_rap_not_delegated(monkeypatch, tmp_
         "Can you ping all of the agents and see which ones respond?", None
     )
 
-    assert started == [], "a roll call must not dispatch a job"
+    # As above: only the internal fixed-response self-check may reach the
+    # bridge, never the user's own request treated as real delegated work.
+    assert all(task.startswith("RAP self-check") for _agent, task in started)
     assert "Agent roll call:" in content
     assert "mock" in content
     # The instruction has to stop the model claiming the agents answered.
@@ -129,6 +131,11 @@ async def test_a_single_agent_ping_is_also_answered_locally(monkeypatch):
 
     content = await session._turn_content("ping code-puppy", None)
 
-    assert started == []
+    # A roll call never delegates the user's own request as real work -- but
+    # it does now start a harmless, fixed-response self-check per agent
+    # (config change: "status" alone used to prove only that a CLI was
+    # installed, never that it actually responds), so the assertion is that
+    # nothing except that internal self-check ever reaches the bridge.
+    assert all(task.startswith("RAP self-check") for _agent, task in started)
     assert "Code Puppy" in content
     assert "mock" not in content, "a named roll call reports only that agent"

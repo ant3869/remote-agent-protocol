@@ -70,13 +70,45 @@ def _select(
     }
 
 
+async def _append_response_check_rows(
+    rows: list[str],
+    selected: Mapping[str, AgentSnapshot | ControlError],
+    control_plane,
+    request_response_check: Callable[[str], Awaitable[object]] | None,
+) -> None:
+    """Start a fixed-response self-check for every selected backend and report it.
+
+    ``request_response_check`` starts an async job; its terminal result
+    (RESPONDED/FAILED) is reported on a later query, once the harness's
+    lifecycle event lands -- this call can only ever report that the check
+    is pinging, was refused (already busy or unreachable -- itself real
+    evidence), or could not be started. There is no way to make this
+    synchronous without misrepresenting a probe as an actual reply.
+    """
+    checker = request_response_check or control_plane.request_response_check
+    checks = await asyncio.gather(*(checker(backend) for backend in selected))
+    for backend, check in zip(selected, checks, strict=True):
+        if isinstance(check, JobHandle):
+            rows.append(f"{backend}: fixed-response self-check is pinging")
+        else:
+            detail = check.error.detail if check.error else "self-check was not started"
+            rows.append(f"{backend}: fixed-response self-check not started ({detail})")
+
+
 async def collect_rollcall_rows(
     control_plane,
     agent: str | None,
     *,
     excluded: frozenset[str] = frozenset(),
+    request_response_check: Callable[[str], Awaitable[object]] | None = None,
 ) -> tuple[list[str], str | None]:
-    """Return ``(rows, missing_message)``; ``rows`` is empty exactly when nothing matched."""
+    """Return ``(rows, missing_message)``; ``rows`` is empty exactly when nothing matched.
+
+    Always starts a real fixed-response self-check alongside the
+    reachability probe for every matched backend -- "status" is the phrase
+    people actually use for this, and a version probe alone answers "is it
+    installed," never "is it actually responding, busy, or rate-limited."
+    """
     results = await control_plane.list_agents(refresh=True)
     selected = _select(results, agent, excluded=excluded)
     if not selected:
@@ -90,7 +122,9 @@ async def collect_rollcall_rows(
             )
         )
         return [], missing
-    return [control_summary(backend, snapshot) for backend, snapshot in selected.items()], None
+    rows = [control_summary(backend, snapshot) for backend, snapshot in selected.items()]
+    await _append_response_check_rows(rows, selected, control_plane, request_response_check)
+    return rows, None
 
 
 def format_rollcall(rows: list[str], missing: str | None) -> str:
@@ -123,14 +157,7 @@ async def collect_diagnostic_rows(
         return [], missing
     rows = [control_summary(backend, snapshot) for backend, snapshot in selected.items()]
     if actual_response:
-        checker = request_response_check or control_plane.request_response_check
-        checks = await asyncio.gather(*(checker(backend) for backend in selected))
-        for backend, check in zip(selected, checks, strict=True):
-            if isinstance(check, JobHandle):
-                rows.append(f"{backend}: fixed-response self-check is pinging")
-            else:
-                detail = check.error.detail if check.error else "self-check was not started"
-                rows.append(f"{backend}: fixed-response self-check not started ({detail})")
+        await _append_response_check_rows(rows, selected, control_plane, request_response_check)
     return rows, None
 
 
