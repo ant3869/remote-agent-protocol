@@ -828,6 +828,14 @@ class IntentRouter:
         elif named and decision.action != ACTION_NONE and decision.agent != named:
             decision.agent = named
             decision.reason += " -- routed to the agent named in the request"
+            # The user named this agent, even in looser phrasing Tier 1's
+            # exact parse_delegation missed -- it outranks the hub's
+            # evidence-based reselection just as a Tier-1 explicit match
+            # would (see _dispatch_via_hub's explicit_agent_id rule). Not
+            # applied to the self-repair substitution above: that one is a
+            # static health guess, not the user's naming, and must keep
+            # deferring to the hub's real evidence (explicit_agent_id=None).
+            decision.source = "explicit"
         decision.elapsed_ms = int((time.perf_counter() - t0) * 1000)
         return decision
 

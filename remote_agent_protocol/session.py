@@ -12,8 +12,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict
-from datetime import UTC, datetime
-from uuid import uuid4
+from datetime import datetime
 
 from loguru import logger
 
@@ -38,6 +37,7 @@ from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransp
 from pipecat.workers.runner import WorkerRunner
 from remote_agent_protocol import (
     agent_bridge,
+    conversation_dispatch,
     intent_router,
     job_store,
     lifecycle_ws,
@@ -67,11 +67,12 @@ from remote_agent_protocol.control_plane.models import JobHandle  # noqa: F401 -
 from remote_agent_protocol.conversation import ConversationEvents
 from remote_agent_protocol.conversation_hub.events import BUTLER_INTERVENTION_STARTED
 from remote_agent_protocol.conversation_hub.floor import BUTLER_ID
-from remote_agent_protocol.conversation_hub.service import ConversationTurnRequest
+from remote_agent_protocol.conversation_hub.service import TurnDisposition
 from remote_agent_protocol.conversation_hub_wiring import build_app_conversation_hub
 from remote_agent_protocol.conversation_presentation import (
     present_butler_intervention,
     present_hub_result,
+    present_no_dispatch_explanation,
 )
 from remote_agent_protocol.orchestration import telemetry as orchestration_telemetry
 from remote_agent_protocol.orchestration.orchestrator import (
@@ -201,6 +202,11 @@ class VoiceSession:
         # dispatches never populate this -- they still call AgentBridge.start
         # directly and keep today's bridge-driven narration unchanged.
         self._hub_dispatched_jobs: dict[str, tuple[str, str]] = {}
+        # job_id -> the fire-and-forget handle_job_event task _on_agent_event
+        # spawned for it. _announce_agent_job awaits the matching entry
+        # before reading the hub's turns for a hub-dispatched job, so it
+        # never races that task's own append (task-8 review round 1, #5).
+        self._hub_job_event_tasks: dict[str, asyncio.Task] = {}
         self._agent_last_spoken: dict[str, tuple[float, str]] = {}
         # Serializes every agent/harness narration so two jobs finishing close
         # together can never interleave one job's voice-switch frame with
@@ -1103,26 +1109,13 @@ class VoiceSession:
     async def _route_chat_turn_through_hub(self, text: str) -> None:
         """Record a non-delegating turn with Butler so floor/transcript stay current.
 
-        Pure in-memory bookkeeping (no adapter I/O on this path): the hub's
-        ``_direct_decision`` recognizes BUTLER_ID and returns
-        ``return_to_butler`` deterministically, without running
-        ``FloorManager.resolve()``'s own smalltalk/follow-up classification.
-        Never allowed to break the ordinary chat pipeline that follows.
+        Shared with ``BrainSession`` (see ``conversation_dispatch``); pure
+        in-memory bookkeeping that must never break the ordinary chat
+        pipeline that follows.
         """
-        stripped = text.strip()
-        if not stripped:
-            return
-        request = ConversationTurnRequest(
-            text=stripped,
-            source=cfg.MEM0_USER_ID,
-            explicit_agent_id=BUTLER_ID,
-            correlation_id=uuid4().hex,
-            created_at=datetime.now(UTC),
+        await conversation_dispatch.route_chat_turn_through_hub(
+            self._conversation_hub, text, butler_id=BUTLER_ID
         )
-        try:
-            await self._conversation_hub.handle_turn(request)
-        except Exception as exc:  # noqa: BLE001 - bookkeeping must never break chat
-            logger.warning(f"Conversation hub chat-turn bookkeeping failed: {exc}")
 
     def _record_routing(self, decision: intent_router.RoutingDecision) -> None:
         """Log, emit, and retain one routing decision for inspection."""
@@ -1298,29 +1291,33 @@ class VoiceSession:
     ) -> None:
         """Route one already-admitted dispatch through the shared conversation hub.
 
-        ``cwd`` has no equivalent on ``ConversationTurnRequest`` -- the hub's
-        session adapters resolve working directory themselves (see Task 4);
-        it is accepted here only so callers keep a uniform signature and is
-        otherwise unused, matching the pre-hub call this replaces where a
-        per-task cwd was likewise rarely set.
+        No current caller supplies a non-``None`` cwd -- every path that
+        reaches here (``_delegate_ack_ex``, the GUI's "Delegate to X"
+        button, confirmation approval) defaults it to ``None``, and
+        ``ConversationTurnRequest`` has no field to carry one, so it is
+        dropped defensively rather than silently (see
+        ``conversation_dispatch.warn_if_cwd_unsupported``).
         """
-        del cwd
-        request = ConversationTurnRequest(
-            text=text,
-            source=cfg.MEM0_USER_ID,
-            explicit_agent_id=explicit_agent_id,
-            correlation_id=uuid4().hex,
-            created_at=datetime.now(UTC),
+        conversation_dispatch.warn_if_cwd_unsupported(cwd)
+        await conversation_dispatch.dispatch_via_hub(
+            self._conversation_hub,
+            self._hub_dispatched_jobs,
+            explicit_agent_id,
+            text,
+            on_no_dispatch=self._speak_no_dispatch,
         )
-        disposition = await self._conversation_hub.handle_turn(request)
-        if disposition.task_id is None:
-            return
-        task_ref = self._conversation_hub.task(disposition.task_id)
-        if task_ref is not None and task_ref.attempt_id:
-            self._hub_dispatched_jobs[task_ref.attempt_id] = (
-                disposition.channel_id,
-                disposition.task_id,
-            )
+
+    async def _speak_no_dispatch(self, disposition: TurnDisposition) -> None:
+        """Speak the hub's no-dispatch explanation instead of leaving it unsaid.
+
+        A dispatch that resolved to no dispatch after the ack already told
+        the user work was starting (see ``_dispatch_via_hub``) is spoken
+        directly, the same way ``_speak_hub_intervention`` speaks a hub
+        failure/stall, rather than going through the LLM (task-8 review
+        round 1, #1).
+        """
+        explanation = present_no_dispatch_explanation(disposition.spoken_acknowledgment)
+        await self._speak_agent_text(explanation)
 
     def _denial_repeat_note(self, agent: str, task: str) -> str:
         """Flag a proposal that closely resembles one the user denied this session."""
@@ -1938,6 +1935,15 @@ class VoiceSession:
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
         if hub_route is not None and job.status == agent_bridge.STATUS_DONE:
+            # _on_agent_event spawned handle_job_event fire-and-forget for
+            # this same terminal event; without awaiting it here, a fast
+            # path (e.g. persistence/commons disabled, so no earlier real
+            # await yielded the loop) can reach this lookup before that task
+            # has appended the agent turn, and silently fall back to raw
+            # job.result below (task-8 review round 1, #5).
+            pending = self._hub_job_event_tasks.get(job.job_id)
+            if pending is not None and not pending.done():
+                await pending
             channel_id, task_id = hub_route
             turn = next(
                 (
@@ -2062,10 +2068,18 @@ class VoiceSession:
             # the same bridge events: an internal (pre-Task-6 diagnostic)
             # job was never dispatched through the hub, so this is naturally
             # a no-op for it (_task_by_job_id finds nothing) -- not a bug.
-            self._spawn(
+            job_id = event.get("job_id")
+            hub_task = asyncio.create_task(
                 self._conversation_hub.handle_job_event(event),
-                name=f"conversation-hub-{event.get('job_id', 'event')}",
+                name=f"conversation-hub-{job_id or 'event'}",
             )
+            self._bg_tasks.add(hub_task)
+            hub_task.add_done_callback(self._background_task_done)
+            if job_id:
+                self._hub_job_event_tasks[job_id] = hub_task
+                hub_task.add_done_callback(
+                    lambda _task, jid=job_id: self._hub_job_event_tasks.pop(jid, None)
+                )
             if event.get("internal"):
                 return
         self._emit(event)

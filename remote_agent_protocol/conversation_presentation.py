@@ -96,3 +96,17 @@ def present_butler_intervention(
     candidate = data.get("candidate_agent_id") or "another agent"
     template = _RECOVERY_LINES.get(kind, _RECOVERY_LINES[RECOVERY_MANUAL])
     return template.format(agent=agent_id or "the agent", candidate=candidate, detail=detail)
+
+
+# A _NO_DISPATCH_KINDS decision (acknowledgment/clarification/unavailable/
+# return_to_butler) can leave TurnDisposition.spoken_acknowledgment unset --
+# e.g. plain smalltalk has no FloorDecision.spoken_text at all. This is what
+# a dispatch call relays instead of nothing, so a caller that already told
+# the user work was starting never leaves that promise silently unresolved
+# (task-8 review round 1, #1).
+NO_DISPATCH_FALLBACK = "There's nothing new to dispatch for that."
+
+
+def present_no_dispatch_explanation(spoken_acknowledgment: str | None) -> str:
+    """Return what to relay when a hub dispatch call resolves to no dispatch."""
+    return spoken_acknowledgment or NO_DISPATCH_FALLBACK

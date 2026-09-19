@@ -44,7 +44,7 @@ from remote_agent_protocol.conversation_hub.events import (
     BUTLER_INTERVENTION_STARTED,
     RESULT_AVAILABLE,
 )
-from remote_agent_protocol.conversation_hub.floor import BUTLER_ID, FloorManager
+from remote_agent_protocol.conversation_hub.floor import FloorManager
 from remote_agent_protocol.conversation_hub.memory import MemoryRepository
 from remote_agent_protocol.conversation_hub.models import (
     ResultKind,
@@ -383,31 +383,37 @@ def test_brain_result_presentation_marks_the_text_only_degradation():
 
 
 @pytest.mark.asyncio
-async def test_intent_router_dispatch_disagreeing_with_floor_classification_is_detected(world):
-    """Regression guard flagged in review: a router 'dispatch' must not silently
-    fall into a _NO_DISPATCH_KINDS floor decision without the caller noticing.
+async def test_no_dispatch_disposition_explanation_reaches_the_user_in_both_modes(world):
+    """Regression guard flagged in review (task-8 review round 1, #1): a router
+    'dispatch' can still land on a _NO_DISPATCH_KINDS floor decision (e.g. plain
+    smalltalk with no active task) after the caller already told the user work
+    is starting. The hub's explanation must reach the user through the real
+    ``_dispatch_via_hub`` chokepoint, not be silently dropped.
+
+    The previous version of this test called ``hub.handle_turn`` directly and
+    asserted ``target_id == BUTLER_ID or spoken_acknowledgment is not None`` --
+    true trivially for every _NO_DISPATCH_KINDS decision by construction, so it
+    never exercised ``_dispatch_via_hub`` or checked the user actually received
+    anything.
     """
-    from remote_agent_protocol.conversation_hub.service import (
-        _NO_DISPATCH_KINDS,
-        ConversationTurnRequest,
-    )
-
     await world.registry.observe(healthy_observation("openclaw"))
-    # A task string intent_router would classify as real work but that floor's
-    # own is_smalltalk/deictic heuristics could disagree with, per task-8-brief.md.
-    request = ConversationTurnRequest(
-        text="thanks",
-        source="ant",
-        explicit_agent_id=None,
-        correlation_id="corr-1",
-        created_at=NOW,
-    )
-    disposition = await world.hub.handle_turn(request)
 
-    if disposition.floor_decision.kind in _NO_DISPATCH_KINDS:
-        assert (
-            disposition.target_id == BUTLER_ID or disposition.spoken_acknowledgment is not None
-        ), (
-            "a dispatch the router intended must not be silently dropped without any "
-            "acknowledgment or Butler narration"
-        )
+    # "thanks" is classified as smalltalk ("acknowledgment") by the floor
+    # manager with no active task -- a _NO_DISPATCH_KINDS decision that
+    # carries no spoken_text, so _dispatch_via_hub must fall back to its own
+    # explanation rather than silently doing nothing.
+    _set_pending_decision(world.brain, source="heuristic", agent="hermes", task="thanks")
+    world.brain._delegate_ack("hermes", "thanks")
+    await _drain_spawned(world.brain)
+    assert world.brain._messages, "the hub's no-dispatch outcome must reach the user somehow"
+    last = world.brain._messages[-1]
+    assert last["role"] == "assistant"
+    assert last["content"].strip()
+
+    world.voice._speak_agent_text = AsyncMock()
+    _set_pending_decision(world.voice, source="heuristic", agent="hermes", task="thanks")
+    world.voice._delegate_ack("hermes", "thanks")
+    await _drain_spawned(world.voice)
+    world.voice._speak_agent_text.assert_awaited_once()
+    (spoken_text,), _kwargs = world.voice._speak_agent_text.call_args
+    assert spoken_text.strip()
