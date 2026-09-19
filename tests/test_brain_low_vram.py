@@ -109,7 +109,7 @@ async def test_a_roll_call_reports_an_unrunnable_backend_as_such(monkeypatch, tm
     monkeypatch.setattr(cfg, "AGENT_BACKENDS", {"ghost": ["definitely-not-installed", "{task}"]})
     session = brain.BrainSession(personas.PERSONAS[0])
 
-    content = session._handle_agent_rollcall()
+    content = await session._handle_agent_rollcall()
 
     assert "ghost" in content
     assert "not runnable here" in content
@@ -130,5 +130,5 @@ async def test_a_single_agent_ping_is_also_answered_locally(monkeypatch):
     content = await session._turn_content("ping code-puppy", None)
 
     assert started == []
-    assert "code-puppy" in content
+    assert "Code Puppy" in content
     assert "mock" not in content, "a named roll call reports only that agent"

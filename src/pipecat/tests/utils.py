@@ -186,8 +186,13 @@ async def run_test(
     )
 
     async def push_frames():
-        # Just give a little head start to the runner.
-        await asyncio.sleep(0.01)
+        # Frames queued downstream naturally wait behind StartFrame (both go
+        # through the same push queue), but an upstream frame is delivered
+        # straight to the sink, bypassing that queue entirely -- so without
+        # this, it can reach the sink before StartFrame does. Wait for the
+        # same internal signal the worker itself waits on before treating the
+        # pipeline as started, rather than guessing with a fixed sleep.
+        await worker._pipeline_start_event.wait()
         for frame in frames_to_send:
             if isinstance(frame, SleepFrame):
                 await asyncio.sleep(frame.sleep)

@@ -37,7 +37,10 @@ suite:
 class TestEvalManifestLoad(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.base = Path(self._tmp.name)
+        # Resolved to match EvalManifest.load's own path canonicalization --
+        # on Windows, .resolve() can rewrite an as-yet-nonexistent temp
+        # subpath to its 8.3 short form, which an unresolved base wouldn't.
+        self.base = Path(self._tmp.name).resolve()
         self.manifest_path = self.base / "manifest.yaml"
         self.manifest_path.write_text(MANIFEST)
 

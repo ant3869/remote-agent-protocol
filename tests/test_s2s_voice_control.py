@@ -438,6 +438,12 @@ def test_stack_shutdown_runs_the_real_web_app_cleanup_path(monkeypatch):
     monkeypatch.setattr(cfg, "RAP_MODE", "brain")
     monkeypatch.setattr(cfg, "S2S_BRIDGE_PORT", 0)
     monkeypatch.setattr(cfg, "S2S_BRIDGE_API_KEY", "test-secret")
+    # Pin cloud-LLM config so cloud_only_enabled() -- and therefore whether
+    # shutdown unloads local Ollama models -- doesn't depend on whatever a
+    # developer's own .env happens to have configured.
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", True)
     stopped = threading.Event()
     calls = []
 
