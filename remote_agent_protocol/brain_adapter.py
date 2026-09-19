@@ -446,7 +446,11 @@ class BrainSessionAdapter:
 
     async def _start_agent_task(self, agent: str, task: str, cwd: str | None) -> None:
         self._brain._last_user_text = task  # noqa: SLF001
-        ack = self._brain._delegate_ack(agent, task, cwd)  # noqa: SLF001
+        # explicit=True: the GUI's "Delegate to X" button already names a
+        # specific, certain target -- without this the hub's evidence-based
+        # selection (case 3) could silently pick a different agent than the
+        # one the user chose (see BrainSession._delegate_ack).
+        ack = self._brain._delegate_ack(agent, task, cwd, explicit=True)  # noqa: SLF001
         self._brain._messages.append({"role": "assistant", "content": ack})  # noqa: SLF001
         self._emit({"type": "transcript", "role": "assistant", "text": ack})
 
@@ -542,5 +546,16 @@ class BrainSessionAdapter:
             logger.info(f"Discarded {stale} announcement(s) queued before this run")
 
     def _emit(self, event: dict) -> None:
-        if self._on_event is not None:
-            self._on_event(self._brain._conversation.stamp(event))
+        if self._on_event is None:
+            return
+        # BrainSession's own __init__ constructs the conversation hub, which
+        # replays a CHANNEL_RESTORED event synchronously through this same
+        # on_event=_observe_event callback whenever the durable store already
+        # has channels -- reachable before `self._brain = BrainSession(...)`
+        # in __init__ has finished assigning. Stamping is only cosmetic
+        # (adds speaker/session identity); a pre-construction restore event
+        # carries no speaker of its own, so it is forwarded unstamped rather
+        # than dropped.
+        brain = getattr(self, "_brain", None)
+        stamped = brain._conversation.stamp(event) if brain is not None else event  # noqa: SLF001
+        self._on_event(stamped)

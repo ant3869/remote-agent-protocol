@@ -712,6 +712,14 @@ AGENT_COMPLETION_GRACE_SECS = float(_env("AGENT_COMPLETION_GRACE_SECS", "2"))
 # restart. Set AGENT_HISTORY_FILE="" to disable persistence entirely.
 AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_history.json"))
 
+# The AgentConversationHub's durable store -- one path shared by full voice
+# mode and Brain mode, so switching RAP_MODE between restarts never forks
+# conversation state into two independent histories. Overridable so the test
+# suite can sandbox it away from real application data (see tests/conftest.py).
+CONVERSATION_STORE_PATH = Path(
+    _env("CONVERSATION_STORE_PATH", str(DATA_DIR / "conversations.json"))
+)
+
 # Where delegated agents run when no explicit directory is given. Voice jobs
 # used to inherit Jess's own working directory -- this repo -- which is how a
 # mistranslated task ended with CodePuppy editing this codebase for five
@@ -988,6 +996,14 @@ DELEGATION_ACK_PROMPT = (
     "[Voice delegation dispatched -- you just sent this task to agent "
     "'{agent}': {task}. Tell the user in ONE short sentence that it's "
     "running and you'll speak up when it finishes.]"
+)
+# Used instead of DELEGATION_ACK_PROMPT when the conversation hub has not yet
+# picked a target agent (evidence-based selection happens after the ack is
+# already spoken) -- so the ack never claims a specific agent it can't name yet.
+DELEGATION_ACK_PENDING_SELECTION_PROMPT = (
+    "[Voice delegation dispatched -- you just sent this task: {task}. RAP is "
+    "finding the right agent for it now. Tell the user in ONE short sentence "
+    "that it's being sent and you'll speak up once an agent is on it.]"
 )
 # How the update is handed to the LLM. Keep it short so the spoken reply is short.
 AGENT_UPDATE_PROMPT = (

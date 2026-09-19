@@ -39,6 +39,17 @@ Every ``route()`` call returns a :class:`RoutingDecision` recording what was
 decided, by which tier, with what confidence and risk, and why. The session
 logs it, emits it to the GUI as a ``"routing"`` event, and keeps it in a
 diagnostics ring buffer.
+
+**Narrowed role (Task 8):** this module still decides whether a turn
+dispatches at all and extracts its task text; it is no longer the sole voice
+on WHICH agent runs it. ``decision.agent``/``RoutingDecision.source`` remain
+authoritative only when ``source == "explicit"`` (the user named the agent).
+For every other source -- including the ``_healthy_alternative`` self-repair
+substitution below, a static guess about which backend is healthy -- the
+dispatching session treats ``decision.agent`` as an admission-gate proxy only
+and defers the actual target to ``AgentConversationHub``'s evidence-based
+``AgentSelector``, which reads live control-plane observations this module
+has no access to (see task-8-brief.md's ``explicit_agent_id`` rule).
 """
 
 import asyncio

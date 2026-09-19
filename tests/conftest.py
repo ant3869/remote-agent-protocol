@@ -8,6 +8,7 @@ top level, by which point ``config.AGENT_BACKENDS`` is already frozen.
 """
 
 import os
+import tempfile
 
 # "mock" is disabled in a live session by default (see config.py) so it can
 # never silently swallow real work. The test suite is exactly the deliberate
@@ -17,3 +18,16 @@ import os
 # persistence, tool-user validation, voice_probe corpus runs) rather than
 # mock's own dispatch behavior.
 os.environ.setdefault("AGENT_MOCK_BACKEND_ENABLED", "1")
+
+# Many tests construct a real VoiceSession/BrainSession without mocking its
+# AgentConversationHub, which (Task 8) restores/saves a durable JSON store on
+# construction and real dispatch. Left at its default path, a test run
+# accumulates fictional test conversations in the developer's real data/
+# directory -- and a store with pre-existing channels replays a restored
+# event synchronously during __init__, which is exactly the scenario that
+# surfaced two separate construction-order bugs during Task 8's own
+# verification. Sandbox it the same way a real deployment never would.
+os.environ.setdefault(
+    "CONVERSATION_STORE_PATH",
+    os.path.join(tempfile.gettempdir(), "rap_test_conversations.json"),
+)

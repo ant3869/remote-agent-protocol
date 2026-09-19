@@ -12,7 +12,8 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
+from uuid import uuid4
 
 from loguru import logger
 
@@ -54,19 +55,24 @@ from remote_agent_protocol import (
     voicebox,
     wake_word,
 )
+from remote_agent_protocol import (
+    agent_status_reporting as agent_status,
+)
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import personas as persona_catalog
 from remote_agent_protocol.control_plane import AgentControlPlane, AgentRegistry
 from remote_agent_protocol.control_plane.adapters.base import AgentTask
 from remote_agent_protocol.control_plane.adapters.factory import build_adapters
-from remote_agent_protocol.control_plane.models import (
-    AgentSnapshot,
-    ControlError,
-    JobHandle,
-    ResponseState,
-    UpdateState,
-)
+from remote_agent_protocol.control_plane.models import JobHandle  # noqa: F401 -- test re-export
 from remote_agent_protocol.conversation import ConversationEvents
+from remote_agent_protocol.conversation_hub.events import BUTLER_INTERVENTION_STARTED
+from remote_agent_protocol.conversation_hub.floor import BUTLER_ID
+from remote_agent_protocol.conversation_hub.service import ConversationTurnRequest
+from remote_agent_protocol.conversation_hub_wiring import build_app_conversation_hub
+from remote_agent_protocol.conversation_presentation import (
+    present_butler_intervention,
+    present_hub_result,
+)
 from remote_agent_protocol.orchestration import telemetry as orchestration_telemetry
 from remote_agent_protocol.orchestration.orchestrator import (
     OrchestrationContext,
@@ -88,32 +94,6 @@ from remote_agent_protocol.session_processors import (
     looks_like_delegation_promise,
 )
 from remote_agent_protocol.speech_events import SpeechPlaybackTap
-
-
-def _control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str:
-    """Turn a control-plane result into concise, evidence-bound narration input."""
-    if isinstance(result, ControlError):
-        return f"{agent_id} could not be verified ({result.code})"
-    observation = result.observation
-    freshness = "stale" if result.is_stale() else "current"
-    work = f", {observation.current_work.summary}" if observation.current_work else ""
-    response = {
-        ResponseState.RESPONDED: "actual response confirmed",
-        ResponseState.PENDING: "actual response check pinging",
-        ResponseState.FAILED: "actual response check failed",
-        ResponseState.UNKNOWN: "no actual response evidence",
-    }[observation.response_state]
-    update = (
-        "CLI update available"
-        if observation.update_state is UpdateState.UPDATE_AVAILABLE
-        else "no CLI update evidence"
-    )
-    issues = f", issues: {', '.join(observation.issues)}" if observation.issues else ""
-    return (
-        f"{observation.display_name} on {observation.machine}: {observation.presence.value}, "
-        f"{observation.activity.value}, {observation.health.value} ({freshness}{work}); "
-        f"CLI probe is installation/reachability only; {response}; {update}{issues}"
-    )
 
 
 class VoiceSession:
@@ -167,9 +147,10 @@ class VoiceSession:
             host_repo=cfg.AGENT_HOST_REPO,
             remotes=self._remotes,
         )
+        agent_registry = AgentRegistry(cfg.DATA_DIR / "agent_registry.json")
         self._control_plane = AgentControlPlane(
             build_adapters(self._bridge, cfg.AGENT_BACKENDS, cfg.AGENT_MACHINES),
-            registry=AgentRegistry(cfg.DATA_DIR / "agent_registry.json"),
+            registry=agent_registry,
             on_event=self._on_agent_event,
         )
         # Local/Cloud/Hybrid orchestration layer, additive on top of the
@@ -199,6 +180,27 @@ class VoiceSession:
             if cfg.LIFECYCLE_WS_ENABLED
             else None
         )
+        # Deviation from task-8-brief.md's suggested placement ("right after
+        # self._control_plane = AgentControlPlane(...)"): build_conversation_hub
+        # synchronously replays CHANNEL_RESTORED through on_event=_on_agent_event
+        # when the durable store already has channels, and _on_agent_event/_emit
+        # unconditionally reference self._lifecycle_ws -- constructing the hub
+        # any earlier than this raised AttributeError on a non-empty store.
+        # The AgentConversationHub shares this exact AgentRegistry instance
+        # (not a second one at the same path) so its evidence-based selector
+        # reads the same staleness view the control plane just wrote.
+        self._conversation_hub = build_app_conversation_hub(
+            self._bridge, agent_registry, self._on_agent_event
+        )
+        self._pending_routing_source: str | None = None
+        # job_id -> (channel_id, task_id) for every dispatch routed through
+        # the conversation hub (see _dispatch_via_hub). _announce_agent_job
+        # consults this to narrate from the hub's own ResultPresenter
+        # envelope instead of raw bridge output for exactly those jobs, so a
+        # hub-routed completion is never narrated twice. Retry/model-switch
+        # dispatches never populate this -- they still call AgentBridge.start
+        # directly and keep today's bridge-driven narration unchanged.
+        self._hub_dispatched_jobs: dict[str, tuple[str, str]] = {}
         self._agent_last_spoken: dict[str, tuple[float, str]] = {}
         # Serializes every agent/harness narration so two jobs finishing close
         # together can never interleave one job's voice-switch frame with
@@ -1071,6 +1073,15 @@ class VoiceSession:
         self._record_routing(decision)
         if decision.action == intent_router.ACTION_NONE:
             self._pending_structured_decision = None
+            self._pending_routing_source = None
+            # Deviation from task-8-brief.md: the brief places this call in
+            # _send_text only. Voice input never reaches _send_text (it goes
+            # through DelegationTap, which also calls _resolve_delegation
+            # directly), so placing it here instead covers both entry points
+            # with one call -- required for acceptance scenarios 4 and 6
+            # ("Butler" spoken aloud must return the floor) to hold over
+            # voice, not just typed input.
+            await self._route_chat_turn_through_hub(text)
             return None
         self._force_confirm = decision.action == intent_router.ACTION_CONFIRM
         self._force_confirm_reason = decision.reason if self._force_confirm else ""
@@ -1082,11 +1093,36 @@ class VoiceSession:
             decision, OrchestrationContext(persona=self._persona.name)
         )
         self._pending_structured_decision = structured
+        self._pending_routing_source = decision.source
         logger.info(
             f"Orchestration[{structured.route}] risk={structured.risk_score:.2f}"
             f" harness={structured.target_harness} reason={structured.reason_summary!r}"
         )
         return structured.target_harness, structured.task
+
+    async def _route_chat_turn_through_hub(self, text: str) -> None:
+        """Record a non-delegating turn with Butler so floor/transcript stay current.
+
+        Pure in-memory bookkeeping (no adapter I/O on this path): the hub's
+        ``_direct_decision`` recognizes BUTLER_ID and returns
+        ``return_to_butler`` deterministically, without running
+        ``FloorManager.resolve()``'s own smalltalk/follow-up classification.
+        Never allowed to break the ordinary chat pipeline that follows.
+        """
+        stripped = text.strip()
+        if not stripped:
+            return
+        request = ConversationTurnRequest(
+            text=stripped,
+            source=cfg.MEM0_USER_ID,
+            explicit_agent_id=BUTLER_ID,
+            correlation_id=uuid4().hex,
+            created_at=datetime.now(UTC),
+        )
+        try:
+            await self._conversation_hub.handle_turn(request)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must never break chat
+            logger.warning(f"Conversation hub chat-turn bookkeeping failed: {exc}")
 
     def _record_routing(self, decision: intent_router.RoutingDecision) -> None:
         """Log, emit, and retain one routing decision for inspection."""
@@ -1194,6 +1230,7 @@ class VoiceSession:
         # with the StructuredDecision when there is one (so telemetry can
         # attribute the route), or by (agent, task) alone when there isn't.
         structured, self._pending_structured_decision = self._pending_structured_decision, None
+        source, self._pending_routing_source = self._pending_routing_source, None
         destructive = cfg.AGENT_CONFIRM_ENABLED and voice_commands.requires_confirmation(
             agent,
             task,
@@ -1228,16 +1265,62 @@ class VoiceSession:
             return cfg.DELEGATION_CONFIRM_PROMPT.format(agent=agent, task=task), True
         # Concurrency/duplicate admission belongs immediately before the real
         # dispatch, not before a hold -- a held task may never actually run,
-        # and admitting it here would falsely reserve a slot for it.
+        # and admitting it here would falsely reserve a slot for it. This
+        # still gates on the router's own resolved (agent, task) proxy even
+        # when the hub will end up choosing a different agent below (case 3)
+        # -- the same admission check that ran here before the hub existed.
         deny_reason = self._gate_dispatch(agent, task, structured)
         if deny_reason is not None:
             return (
                 f"[Not dispatched -- {deny_reason}. Tell the user in ONE short sentence "
                 "why this wasn't started.]"
             ), True
-        execution_task = self._with_delegation_context(task)
-        self._spawn(self._bridge.start(agent, execution_task, cwd), name=f"delegate-{agent}")
-        return cfg.DELEGATION_ACK_PROMPT.format(agent=agent, task=task), False
+        # The explicit_agent_id rule (task-8-brief.md): ACTION_NONE never
+        # reaches here (handled in _resolve_delegation); a fresh "explicit"
+        # routing decision keeps its resolved target; everything else
+        # (including a marker/self-repair guess with no fresh decision this
+        # turn) defers to the hub's evidence-based selection.
+        explicit_agent_id = (
+            structured.target_harness if source == "explicit" and structured is not None else None
+        )
+        dispatch_text = structured.task if structured is not None else task
+        execution_task = self._with_delegation_context(dispatch_text)
+        self._spawn(
+            self._dispatch_via_hub(explicit_agent_id, execution_task, cwd=cwd),
+            name=f"delegate-{agent}",
+        )
+        if explicit_agent_id is not None:
+            return cfg.DELEGATION_ACK_PROMPT.format(agent=agent, task=task), False
+        return cfg.DELEGATION_ACK_PENDING_SELECTION_PROMPT.format(task=task), False
+
+    async def _dispatch_via_hub(
+        self, explicit_agent_id: str | None, text: str, *, cwd: str | None = None
+    ) -> None:
+        """Route one already-admitted dispatch through the shared conversation hub.
+
+        ``cwd`` has no equivalent on ``ConversationTurnRequest`` -- the hub's
+        session adapters resolve working directory themselves (see Task 4);
+        it is accepted here only so callers keep a uniform signature and is
+        otherwise unused, matching the pre-hub call this replaces where a
+        per-task cwd was likewise rarely set.
+        """
+        del cwd
+        request = ConversationTurnRequest(
+            text=text,
+            source=cfg.MEM0_USER_ID,
+            explicit_agent_id=explicit_agent_id,
+            correlation_id=uuid4().hex,
+            created_at=datetime.now(UTC),
+        )
+        disposition = await self._conversation_hub.handle_turn(request)
+        if disposition.task_id is None:
+            return
+        task_ref = self._conversation_hub.task(disposition.task_id)
+        if task_ref is not None and task_ref.attempt_id:
+            self._hub_dispatched_jobs[task_ref.attempt_id] = (
+                disposition.channel_id,
+                disposition.task_id,
+            )
 
     def _denial_repeat_note(self, agent: str, task: str) -> str:
         """Flag a proposal that closely resembles one the user denied this session."""
@@ -1373,8 +1456,15 @@ class VoiceSession:
             deny_reason = self._gate_dispatch(agent, task)
             if deny_reason is not None:
                 return f"[Not dispatched -- {deny_reason}.]"
+            # The confirmation prompt already named this specific agent to the
+            # user, so approval dispatches to it directly (explicit_agent_id)
+            # rather than deferring to the hub's evidence-based selection --
+            # re-selecting a different agent after the user confirmed a named
+            # one would contradict what they just agreed to.
             execution_task = self._with_delegation_context(task)
-            self._spawn(self._bridge.start(agent, execution_task, cwd), name=f"delegate-{agent}")
+            self._spawn(
+                self._dispatch_via_hub(agent, execution_task, cwd=cwd), name=f"delegate-{agent}"
+            )
             return cfg.AGENT_CONFIRM_APPROVED_PROMPT.format(agent=agent, task=task)
         logger.info(f"Delegation denied by voice [{agent}]: {task}")
         self._remember_denial(agent, task)
@@ -1452,62 +1542,16 @@ class VoiceSession:
         the roll call is answered here and never delegated.
         """
         self._agent_ack_turn = True
-        results = await self._control_plane.list_agents(refresh=True)
-        rows = [
-            _control_summary(backend, snapshot)
-            for backend, snapshot in results.items()
-            if agent is None or backend == agent or backend.endswith(f":{agent}")
-        ]
-        if not rows:
-            missing = (
-                f"there is no agent backend named '{agent}'"
-                if agent
-                else "no agent backends are configured"
-            )
-            return f"[Agent roll call: {missing}. Answer from this; do not start any new work.]"
-        listed = "; ".join(rows)
-        return (
-            f"[Agent roll call: {listed}. This is Remote Agent Protocol's own check of each "
-            "backend -- whether it can be started here and whether its machine is answering -- "
-            "not a reply from the agents themselves. Report it as such, briefly, and do not "
-            "start any new work.]"
-        )
+        rows, missing = await agent_status.collect_rollcall_rows(self._control_plane, agent)
+        return agent_status.format_rollcall(rows, missing)
 
     async def _handle_agent_diagnostic(self, agent: str | None, actual_response: bool) -> str:
         """Keep evidence requests local to RAP's control plane."""
         self._agent_ack_turn = True
-        results = await self._control_plane.list_agents(refresh=True)
-        selected = {
-            backend: snapshot
-            for backend, snapshot in results.items()
-            if agent is None or backend == agent or backend.endswith(f":{agent}")
-        }
-        if not selected:
-            missing = (
-                f"there is no agent backend named '{agent}'"
-                if agent
-                else "no agents are configured"
-            )
-            return f"[Agent diagnostic: {missing}. Do not start any new work.]"
-        rows = [_control_summary(backend, snapshot) for backend, snapshot in selected.items()]
-        if actual_response:
-            checks = await asyncio.gather(
-                *(self._control_plane.request_response_check(backend) for backend in selected),
-            )
-            for backend, check in zip(selected, checks, strict=True):
-                if isinstance(check, JobHandle):
-                    rows.append(f"{backend}: fixed-response self-check is pinging")
-                else:
-                    detail = check.error.detail if check.error else "self-check was not started"
-                    rows.append(f"{backend}: fixed-response self-check not started ({detail})")
-        limitation = (
-            "Version probes prove only the installed CLI answered locally; they are not agent replies. "
-            "RAP cannot inspect unsupported external sessions."
+        rows, missing = await agent_status.collect_diagnostic_rows(
+            self._control_plane, agent, actual_response=actual_response
         )
-        return (
-            f"[Agent diagnostic: {'; '.join(rows)}. {limitation} "
-            "Answer from this; do not start any new work.]"
-        )
+        return agent_status.format_diagnostic(rows, missing)
 
     async def _handle_agent_status(self, status_request: tuple[str | None]) -> str:
         """Answer a progress question from live job state instead of delegating.
@@ -1522,14 +1566,15 @@ class VoiceSession:
         if agent is not None:
             snapshot = await self._control_plane.get_agent_status(agent, refresh=False)
             return (
-                f"[Agent status: {_control_summary(agent, snapshot)}. "
+                f"[Agent status: {agent_status.control_summary(agent, snapshot)}. "
                 "Answer from this; do not start any new work.]"
             )
         results = await self._control_plane.list_agents(refresh=False)
         return (
             "[Agent status: "
             + "; ".join(
-                _control_summary(backend, snapshot) for backend, snapshot in results.items()
+                agent_status.control_summary(backend, snapshot)
+                for backend, snapshot in results.items()
             )
             + ". Answer from this; do not start any new work.]"
         )
@@ -1634,7 +1679,9 @@ class VoiceSession:
             if deny_reason is not None:
                 await self._inject_and_run(f"[Not dispatched -- {deny_reason}.]")
                 return
-            await self._bridge.start(agent, self._with_delegation_context(task), cwd)
+            # Same reasoning as _maybe_consume_confirmation's approve branch:
+            # dispatch to the agent already named in the confirmation prompt.
+            await self._dispatch_via_hub(agent, self._with_delegation_context(task), cwd=cwd)
             await self._inject_and_run(
                 cfg.AGENT_CONFIRM_APPROVED_PROMPT.format(agent=agent, task=task)
             )
@@ -1880,8 +1927,32 @@ class VoiceSession:
                         ),
                     }
                 )
+        # A job routed through the conversation hub already has its result
+        # recorded as a ConversationTurn with the hub's own ResultPresenter
+        # envelope; narrate from that instead of re-deriving a presentation
+        # from raw bridge output here (the divergence Task 7 removed). Only
+        # jobs dispatched via _dispatch_via_hub populate this map, so a
+        # retry/model-switch dispatch (never routed through the hub) always
+        # falls through to the narration below, unchanged.
+        hub_route = self._hub_dispatched_jobs.pop(job.job_id, None)
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
+        if hub_route is not None and job.status == agent_bridge.STATUS_DONE:
+            channel_id, task_id = hub_route
+            turn = next(
+                (
+                    candidate
+                    for candidate in reversed(self._conversation_hub.turns(channel_id))
+                    if candidate.task_id == task_id and candidate.speaker_role == "agent"
+                ),
+                None,
+            )
+            if turn is not None:
+                presentation = present_hub_result(turn)
+                await self._speak_agent_text(
+                    presentation.voice_text, agent=presentation.agent_id, job_id=job.job_id
+                )
+                return
         moment, body = self._terminal_moment(job)
         if moment is None:
             await self._speak_agent_text(
@@ -1987,6 +2058,14 @@ class VoiceSession:
                 self._control_plane.ingest_bridge_event(event),
                 name=f"control-plane-{event.get('job_id', 'event')}",
             )
+            # Independent state machine from the control plane above, over
+            # the same bridge events: an internal (pre-Task-6 diagnostic)
+            # job was never dispatched through the hub, so this is naturally
+            # a no-op for it (_task_by_job_id finds nothing) -- not a bug.
+            self._spawn(
+                self._conversation_hub.handle_job_event(event),
+                name=f"conversation-hub-{event.get('job_id', 'event')}",
+            )
             if event.get("internal"):
                 return
         self._emit(event)
@@ -1995,6 +2074,13 @@ class VoiceSession:
         if not cfg.AGENT_ANNOUNCE or self._worker is None:
             return
 
+        if event.get("type") == "agent_conversation":
+            if event.get("event") == BUTLER_INTERVENTION_STARTED:
+                self._spawn(
+                    self._speak_hub_intervention(event),
+                    name=f"hub-intervention-{event.get('task_id', '')}",
+                )
+            return
         if event.get("type") == "agent_consult":
             self._announce_agent_consult(event)
             return
@@ -2007,6 +2093,21 @@ class VoiceSession:
         if event.get("event") != "progress":
             return
         self._maybe_announce_agent_progress(event)
+
+    async def _speak_hub_intervention(self, event: dict) -> None:
+        """Speak Butler's composed recovery line for a hub failure/stall.
+
+        The event's ``data`` is identifiers/classification only by design
+        (see conversation_hub.events); ``present_butler_intervention`` is the
+        one place that becomes narration, shared with Brain mode.
+        """
+        task_id = event.get("task_id") or None
+        task_ref = self._conversation_hub.task(task_id) if task_id else None
+        agent_id = task_ref.agent_id if task_ref is not None else ""
+        line = present_butler_intervention(
+            event.get("data") or {}, agent_id=agent_id, detail=event.get("detail", "")
+        )
+        await self._speak_agent_text(line, agent=agent_id or None, job_id=task_id)
 
     def _announce_all_agents_finished(self) -> None:
         """Narrate the aggregate idle event once active agent jobs finish."""

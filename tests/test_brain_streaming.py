@@ -601,6 +601,12 @@ async def test_a_dispatched_delegation_is_held_until_it_reaches_the_bridge(monke
     # by the garbage collector would leave the assistant claiming work that
     # never started.
     monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    # Dispatch now routes through the conversation hub's session adapters
+    # (task-8-brief.md), which only exist for Milestone-1 harness ids -- a
+    # synthetic "mock" backend name no longer reaches AgentBridge.start at
+    # all. Use a real adapter-eligible id and dispatch explicitly, so the
+    # strong-task-ref behavior under test is exercised the same as before.
+    monkeypatch.setattr(cfg, "AGENT_BACKENDS", {"hermes": {}})
     brain = BrainSession(PERSONAS[0])
     started = asyncio.Event()
 
@@ -610,7 +616,7 @@ async def test_a_dispatched_delegation_is_held_until_it_reaches_the_bridge(monke
         return "job-1"
 
     monkeypatch.setattr(brain._bridge, "start", slow_start)
-    brain._delegate_ack("mock", "check the printer")
+    brain._delegate_ack("hermes", "check the printer", explicit=True)
 
     assert brain._tasks, "the dispatch task must be referenced while it runs"
     import gc
