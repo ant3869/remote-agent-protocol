@@ -306,6 +306,52 @@ def needs_agent_selection(text: str, backends: dict, aliases: dict[str, str]) ->
     return named_backend(text, backends, aliases) is None
 
 
+def _transposed_edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance with adjacent transpositions counted as one edit.
+
+    No third-party dependency for one narrow use: catching a common
+    speech-to-text mis-transcription of an agent's name (e.g. "hemres" for
+    "hermes", a single adjacent-letter swap) that an exact word-boundary
+    match cannot, without also catching a genuinely different word like
+    "codexes" (two insertions from "codex", not a transposition).
+    """
+    prev2: list[int] | None = None
+    prev1 = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            curr[j] = min(prev1[j] + 1, curr[j - 1] + 1, prev1[j - 1] + cost)
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                curr[j] = min(curr[j], prev2[j - 2] + 1)
+        prev2, prev1 = prev1, curr
+    return prev1[len(b)]
+
+
+def _fuzzy_named_backend(
+    lowered: str, backends: dict, aliases: dict[str, str], excluded: set[str]
+) -> str | None:
+    """Catch a transcription slip that ``named_backend``'s exact match cannot (e.g. "hemres" for "hermes").
+
+    Deliberately narrow: single-word aliases only (a phrase like "code
+    puppy" has too many ways to garble to fuzzy-match safely), a length
+    floor on both sides (a one-edit match on a very short word is
+    coincidence, not recognition), and no guess at all when more than one
+    alias ties -- a wrong guess here would silently dispatch to the wrong
+    agent, exactly the failure mode this module exists to prevent.
+    """
+    words = re.findall(r"[a-z0-9]+", lowered)
+    candidates: set[str] = set()
+    for alias, backend in aliases.items():
+        if " " in alias or len(alias) < 5 or backend not in backends or backend in excluded:
+            continue
+        for word in words:
+            if len(word) >= 5 and _transposed_edit_distance(word, alias) <= 1:
+                candidates.add(backend)
+                break
+    return candidates.pop() if len(candidates) == 1 else None
+
+
 def named_backend(text: str, backends: dict, aliases: dict[str, str]) -> str | None:
     """Return a positively named backend, excluding negated agent references.
 
@@ -323,7 +369,7 @@ def named_backend(text: str, backends: dict, aliases: dict[str, str]) -> str | N
         backend = aliases[alias]
         if backend in backends and backend not in excluded:
             return backend
-    return None
+    return _fuzzy_named_backend(lowered, backends, aliases, excluded)
 
 
 def parse_delegation(

@@ -456,6 +456,29 @@ class NamedBackendTests(unittest.TestCase):
         aliases = {"ghost": "not-a-backend"}
         self.assertIsNone(voice_commands.named_backend("ask ghost to help", self.BACKENDS, aliases))
 
+    def test_single_transposition_typo_still_names_the_agent(self):
+        # Regression (2026-09-19 live session): the user said "hermes" and
+        # STT/the classifier's own echoed text rendered it as "hemres". The
+        # exact word-boundary match found nothing, select_marker_backend fell
+        # back to the default agent, and Butler then narrated "with Hermes"
+        # while a completely different agent actually ran.
+        self.assertEqual(self.named("try hemres on it"), "hermes")
+
+    def test_codexes_stays_a_non_match_even_with_fuzzy_fallback(self):
+        # The fuzzy fallback must not defeat the word-boundary guard above:
+        # "codexes" is two insertions from "codex", not one adjacent-letter
+        # transposition, so it must still be rejected.
+        self.assertIsNone(self.named("ancient codexes are fascinating"))
+
+    def test_fuzzy_fallback_never_guesses_between_two_close_aliases(self):
+        # "hermez" is one substitution from both "hermes" and a contrived
+        # second alias "hermex" for a different backend -- a tie must return
+        # None rather than silently picking one, since a wrong guess here
+        # would dispatch to the wrong agent.
+        backends = dict(self.BACKENDS, other={})
+        aliases = dict(self.ALIASES, hermex="other")
+        self.assertIsNone(voice_commands.named_backend("hermez wants this", backends, aliases))
+
 
 class AgentCancelPhrasingTests(unittest.TestCase):
     ALIASES = {"claude code": "claude-code", "code puppy": "code-puppy"}
