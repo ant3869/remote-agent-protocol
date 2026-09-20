@@ -4,6 +4,39 @@ import { createAvatarPanel } from "./avatar-panel.js";
 import { profileForPersona } from "./persona-profiles.js";
 import { SceneLoadGuard } from "./scene-load-guard.js";
 
+// A companion that never appears at all is silent -- nobody sees a console
+// error for it. Everything below runs inside one try/catch so that any
+// unexpected failure (a persisted setting this build doesn't recognize, a
+// browser quirk in one of the constructors above) still leaves the page with
+// a working `window.remoteAgentAvatar` stub and the static CSS fallback face
+// visible, instead of a permanently empty panel with no diagnostic trail.
+try {
+  bootstrapAvatar();
+} catch (error) {
+  console.error("Avatar module failed to initialize; showing the static fallback face.", error);
+  showStaticFallback();
+  window.remoteAgentAvatar = {
+    updateRuntime() {},
+    triggerGlitch: () => false,
+    getDiagnostics: () => null,
+    debug: {},
+    updateSettings() {},
+    setPanelVisible() {},
+    dispose() {},
+  };
+  window.dispatchEvent(new Event("rap:avatar-ready"));
+}
+
+function showStaticFallback() {
+  const fallback = document.getElementById("avatarFallback");
+  fallback?.classList.add("active");
+  fallback?.setAttribute("aria-hidden", "false");
+  fallback?.setAttribute("role", "img");
+  fallback?.setAttribute("aria-label", "Static assistant companion: renderer-unavailable");
+  document.getElementById("avatarCanvasHost")?.classList.add("has-fallback");
+}
+
+function bootstrapAvatar() {
 const panel = createAvatarPanel();
 const panelElement = document.getElementById("avatarPanel");
 const motionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)");
@@ -123,3 +156,4 @@ visibilityObserver?.observe(panelElement);
 window.remoteAgentAvatar = api;
 window.dispatchEvent(new Event("rap:avatar-ready"));
 window.addEventListener("beforeunload", () => api.dispose(), { once: true });
+}

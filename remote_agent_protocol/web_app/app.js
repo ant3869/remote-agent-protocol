@@ -1572,17 +1572,17 @@ function memoryScore(row) {
   return typeof row.score === "number" ? row.score.toFixed(2) : "local";
 }
 
+let hubForgetButton = null;
+
 function ensureHubForgetButton() {
-  let button = $("hubMemoryForgetBtn");
-  if (!button) {
-    button = document.createElement("button");
-    button.id = "hubMemoryForgetBtn";
-    button.type = "button";
-    button.className = "button destructive hub-memory-forget";
-    button.textContent = "Forget (clears full correction history)";
-    $("memoryDetailText")?.insertAdjacentElement("afterend", button);
+  if (!hubForgetButton) {
+    hubForgetButton = document.createElement("button");
+    hubForgetButton.type = "button";
+    hubForgetButton.className = "button destructive hub-memory-forget";
+    hubForgetButton.textContent = "Forget (clears full correction history)";
+    $("memoryDetailText")?.insertAdjacentElement("afterend", hubForgetButton);
   }
-  return button;
+  return hubForgetButton;
 }
 
 function renderMemoryDetail() {
