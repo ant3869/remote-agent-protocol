@@ -1789,8 +1789,14 @@ class AgentBridge:
         else:
             # No structured terminal marker arrived, so the exit code is the
             # only signal -- and agents that crash often still exit 0, so an
-            # error-shaped output tail also counts as failure.
-            error_line = error_tail(job.lines) if job.returncode == 0 else None
+            # error-shaped output tail also counts as failure. Look for that
+            # tail regardless of the exit code: a nonzero exit is the common
+            # failure shape, and skipping error_tail whenever the process
+            # *also* exited nonzero meant a real captured reason (an auth
+            # refusal, a locked-file cleanup failure, an OS command-line
+            # length limit) never reached the user -- only the fully generic
+            # "without reporting details" fallback below ever fired.
+            error_line = error_tail(job.lines)
             failed = job.returncode != 0 or error_line is not None
             job.status = STATUS_FAILED if failed else STATUS_DONE
             job.state = STATE_FAILED if failed else STATE_COMPLETED
@@ -1809,10 +1815,18 @@ class AgentBridge:
                     )
             if failed and job.failure_kind and not job.summary:
                 job.summary = job.failure_detail
+            if failed and not job.summary:
+                # The process said *something* that didn't match a known
+                # error shape or an interactive stall -- its own last line is
+                # still more useful than a content-free "exit code N".
+                last_line = next((line.strip() for line in reversed(job.lines) if line.strip()), "")
+                if last_line:
+                    job.summary = last_line[:300]
             if failed and not job.summary and job.returncode is not None:
                 job.summary = (
                     f"Agent failed with exit code {job.returncode} without reporting details"
                 )
+            if failed and job.summary and not job.failure_detail:
                 job.failure_detail = job.summary
         if job.status == STATUS_DONE and not job.result:
             job.result = fallback_result(job.lines)

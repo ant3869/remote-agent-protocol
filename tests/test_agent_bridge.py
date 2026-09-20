@@ -1379,6 +1379,35 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertIn("exit code 7", job.summary.lower())
         self.assertEqual(job.failure_detail, job.summary)
 
+    def test_nonzero_exit_with_unrecognized_output_reports_that_output(self):
+        # Regression: openclaw hit "The command line is too long." (an OS
+        # error with no recognized error shape) and exited nonzero. The job
+        # was reported as a content-free "exit code 1 without reporting
+        # details" even though the real reason was printed right there --
+        # error_tail() was only ever consulted when returncode == 0, so a
+        # captured, genuinely informative last line was discarded whenever
+        # the process *also* exited nonzero, which is the common case.
+        events: list[dict] = []
+        message = "The command line is too long."
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", f"print({message!r}); raise SystemExit(1)"]},
+                events.append,
+            )
+            job_id = await bridge.start("mock", "search my emails")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
+        self.assertEqual(job.returncode, 1)
+        self.assertEqual(job.summary, message)
+        self.assertEqual(job.failure_detail, message)
+
     def test_zero_exit_with_error_tail_reports_failed(self):
         # Regression: code-puppy hit a 429 usage limit, printed the error, and
         # exited 0 -- the job was announced as finished with the raw error JSON
