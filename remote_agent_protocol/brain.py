@@ -1186,23 +1186,31 @@ class BrainSession:
                 return ""
             if task and lowered not in dispatched:
                 dispatched.add(lowered)
-                agent = self._marker_backend(task)
+                agent, explicit = self._marker_backend(task)
                 logger.info(f"Brain LLM delegation marker -> [{agent}] {task}")
-                self._delegate_ack(agent, task)
+                self._delegate_ack(agent, task, explicit=explicit)
             return ""
 
         cleaned = _MARKER_RE.sub(replace, text).strip()
         return cleaned or "I sent that to the agent."
 
-    def _marker_backend(self, task: str) -> str:
+    def _marker_backend(self, task: str) -> tuple[str, bool]:
         """Prefer the agent the user actually named over the configured default.
 
         Markers carry a task but no agent, so "maybe code puppy can fix it"
         must not silently dispatch to whatever the default backend is.
         """
-        return intent_router.select_marker_backend(
+        agent = intent_router.select_marker_backend(
             self._last_user_text, task, self._default_agent_backend
         )
+        named = voice_commands.named_backend(
+            f"{self._last_user_text} {task}", cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
+        )
+        # A marker is generated after the normal router has already declined
+        # the spoken turn. Preserve a clear, named executor here; otherwise
+        # the conversation hub sees no target and may convert the promised
+        # dispatch into a no-op.
+        return agent, named == agent
 
 
 # Reserved prefix for app-initiated announce turns: the realtime frontend

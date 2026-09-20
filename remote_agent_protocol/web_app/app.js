@@ -935,7 +935,10 @@ function renderAgents(s) {
   const strip = $("agentStrip");
   strip.innerHTML = "";
   s.agentBackends.forEach((backend) => {
-    const job = s.agentStates?.[backend];
+    const eventJob = Object.values(state.agentJobs)
+      .filter((job) => job.agent === backend && agentIsActive(job))
+      .sort((left, right) => Date.parse(right.started_at || 0) - Date.parse(left.started_at || 0))[0];
+    const job = eventJob || s.agentStates?.[backend];
     const control = s.agentControl?.[backend]?.snapshot?.observation;
     const active = agentIsActive(job);
     const detail = active ? (job.action || job.state || job.status) : (control ? `${control.presence} / ${control.health}` : "unknown");
@@ -982,6 +985,7 @@ function storeAgentEvent(event) {
   if (move) moves = [...moves, move].slice(-80);
   state.agentJobs[jobId] = { ...old, ...event, lines, moves };
   state.selectedAgentJobId = state.selectedAgentJobId || jobId;
+  renderAgents(state.status || { agentBackends: [], agentStates: {} });
   renderAgentsPage();
 }
 

@@ -456,7 +456,8 @@ MEM0_SEARCH_THRESHOLD = 0.1
 # announces updates the moment they arrive (async through and through).
 #
 # AGENT_BACKENDS: name -> command template. Placeholders:
-#   {task}   -> the task text        {python} -> this venv's python
+#   {task}   -> the task text        {task_file} -> UTF-8 task-file path
+#   {python} -> this venv's python
 # Add real agents once installed, e.g.
 #   "hermes": ["hermes", "-p", "{task}"]
 # (exact flags depend on the installed CLI -- adjust after `hermes --help`).
@@ -485,7 +486,10 @@ AGENT_BACKENDS = {
     # Hermes Agent (NousResearch) -- installed at %LOCALAPPDATA%\hermes.
     # Single-query mode streams progress and persists a session ID that
     # AgentBridge resumes. --quiet would hide productive activity from the host.
-    "hermes": ["hermes", "chat", "-q", "{task}"],
+    # These CLIs are distributed through Windows command shims, which impose an
+    # 8191-character command-line limit. RAP's orchestration prompt can exceed
+    # that limit, so pass it through each CLI's native UTF-8 prompt-file option.
+    "hermes": ["hermes", "chat", "--query-file", "{task_file}"],
     # OpenClaw -- "agent exec" is a headless, isolated one-shot turn (no
     # gateway/messaging channel involved). Verified live 2026-09-13: it runs
     # tool calls without an interactive approval prompt, so like hermes-yolo
@@ -498,7 +502,8 @@ AGENT_BACKENDS = {
         "openclaw",
         "agent",
         "exec",
-        "{task}",
+        "--message-file",
+        "{task_file}",
         "--state-dir",
         str(DATA_DIR / "openclaw_state"),
     ],

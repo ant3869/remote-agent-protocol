@@ -37,7 +37,7 @@ class AgentConfigTests(unittest.TestCase):
     def test_hermes_uses_persistent_single_query_sessions(self):
         self.assertEqual(
             config.AGENT_BACKENDS["hermes"],
-            ["hermes", "chat", "-q", "{task}"],
+            ["hermes", "chat", "--query-file", "{task_file}"],
         )
 
     def test_openclaw_runs_a_headless_isolated_turn_with_a_persistent_state_dir(self):
@@ -46,7 +46,9 @@ class AgentConfigTests(unittest.TestCase):
         # EBUSY error on cleanup that turned a successful turn into a reported
         # failure (verified live, 2026-09-13).
         command = config.AGENT_BACKENDS["openclaw"]
-        self.assertEqual(command[:4], ["openclaw", "agent", "exec", "{task}"])
+        self.assertEqual(
+            command[:5], ["openclaw", "agent", "exec", "--message-file", "{task_file}"]
+        )
         self.assertIn("--state-dir", command)
         state_dir = config._ROOT / "data" / "openclaw_state"
         self.assertEqual(command[command.index("--state-dir") + 1], str(state_dir))

@@ -10,6 +10,7 @@ Backends are plain command templates (config.AGENT_BACKENDS), e.g.
     "hermes": ["hermes", "{task}"]
 Placeholders:
     {task}   -> the task text
+    {task_file} -> a UTF-8 file containing the task text
     {python} -> sys.executable (used by the built-in mock backend)
 
 Event shape (routed through VoiceSession._emit, same bus as transcripts):
@@ -26,6 +27,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -160,6 +162,13 @@ _ROLE_ECHO_RE = re.compile(
 )
 _MOCK_TASK_ECHO_RE = re.compile(
     r"^(?:\[mock-agent\]\s+)?(?:accepted task:|RESULT:\s+completed\s+')", re.IGNORECASE
+)
+_CONSULT_PROTOCOL_ECHO_RE = re.compile(
+    r"@@JESS_CONSULT"
+    r"|If another agent on this machine would know something you need"
+    r"|Then read the file named after your id"
+    r"|You may ask:\s*",
+    re.IGNORECASE,
 )
 _CLI_HOUSEKEEPING_RE = re.compile(
     r"^(?:🎯\s*)?Using model:"
@@ -316,8 +325,9 @@ def clean_session_template(template: list[str]) -> list[str]:
     options. Unknown wrappers and alternate command forms fail closed instead
     of guessing at their session semantics. The configured template is immutable.
     """
-    if not template or template.count("{task}") != 1:
-        raise ValueError("Clean sessions require a direct CLI and one task argument")
+    task_placeholders = template.count("{task}") + template.count("{task_file}")
+    if not template or task_placeholders != 1:
+        raise ValueError("Clean sessions require a direct CLI and one task placeholder")
     executable = Path(template[0]).stem.lower()
     selectors: dict[str, int]  # 0: flag only; 1: optional/required selector value
     if executable == "claude" and any(flag in template for flag in ("-p", "--print")):
@@ -382,11 +392,20 @@ def clean_session_template(template: list[str]) -> list[str]:
 
 
 def build_command(
-    template: list[str], task: str, *, extra_args: list[str] | None = None
+    template: list[str],
+    task: str,
+    *,
+    task_file: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> list[str]:
     """Substitute placeholders in a backend command template."""
+    if "{task_file}" in template and task_file is None:
+        raise ValueError("Backend command requires a task file")
     command = [
-        part.replace("{task}", task).replace("{python}", sys.executable) for part in template
+        part.replace("{task}", task)
+        .replace("{task_file}", task_file or "")
+        .replace("{python}", sys.executable)
+        for part in template
     ]
     if extra_args:
         insert_at = (
@@ -396,6 +415,21 @@ def build_command(
         )
         command[insert_at:insert_at] = extra_args
     return command
+
+
+def _write_agent_prompt(task: str) -> Path:
+    """Write a task outside the command line for a CLI that supports prompt files."""
+    prompt_dir = cfg.DATA_DIR / "agent_prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix="prompt-", suffix=".txt", dir=prompt_dir, text=True)
+    path = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as prompt_file:
+            prompt_file.write(task)
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
+    return path
 
 
 def detect_provider_failure(line: str) -> str | None:
@@ -658,6 +692,7 @@ def _unsafe_public_text(text: str) -> bool:
     """True when text is an echoed host prompt/context, not an agent answer."""
     return bool(
         _INTERNAL_ECHO_RE.search(text)
+        or _CONSULT_PROTOCOL_ECHO_RE.search(text)
         or _CLI_HOUSEKEEPING_RE.search(text)
         or _ROLE_ECHO_RE.search(text)
     )
@@ -689,6 +724,7 @@ class _LineSkipState:
     prompt: bool = False
     injected_message: bool = False
     status_protocol: bool = False
+    consult_protocol: bool = False
     role_echo: bool = False
     # Lowercased last line of what the host injects ahead of the task. An agent
     # that echoes its prompt has finished echoing once this goes past.
@@ -714,6 +750,10 @@ class _LineSkipState:
         if self.status_protocol:
             if "spoken start to finish" in lowered:
                 self.status_protocol = False
+            return True
+        if self.consult_protocol:
+            if lowered.startswith("ask only when their answer changes what you do."):
+                self.consult_protocol = False
             return True
         if self.role_echo and "Report meaningful task status" not in stripped:
             return True
@@ -744,6 +784,9 @@ def _user_facing_output_lines(lines: list[str]) -> list[str]:
             continue
         if "Report meaningful task status" in stripped:
             skip.status_protocol = True
+            continue
+        if stripped.startswith("If another agent on this machine would know something you need"):
+            skip.consult_protocol = True
             continue
         if _ORNAMENTAL_LINE_RE.fullmatch(stripped):
             continue
@@ -1359,9 +1402,17 @@ class AgentBridge:
                     command_task += "\n\n" + consult_protocol(
                         peers, str(folder), budget=cfg.AGENT_CONSULT_BUDGET
                     )
+        template = list(job._command_template) if job._command_template else self._backends[agent]
+        try:
+            prompt_file = _write_agent_prompt(command_task) if "{task_file}" in template else None
+        except OSError as e:
+            await self._fail_fast(job, f"could not write agent prompt file: {e}")
+            job._launch_done.set()
+            return
         command = build_command(
-            list(job._command_template) if job._command_template else self._backends[agent],
+            template,
             command_task,
+            task_file=str(prompt_file) if prompt_file else None,
             extra_args=self._model_overrides.get(agent),
         )
         if not job._clean_session and agent in _HERMES_SESSION_AGENTS:
@@ -1393,6 +1444,8 @@ class AgentBridge:
                 env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
         except (OSError, FileNotFoundError) as e:
+            if prompt_file:
+                prompt_file.unlink(missing_ok=True)
             await self._fail_fast(job, f"could not launch {command[0]}: {e}")
             job._launch_done.set()
             return
@@ -1405,7 +1458,11 @@ class AgentBridge:
         job._launch_done.set()
         self._emit_job(job, "started")
         logger.info(f"Agent job {job.job_id} [{job.agent}] started: {job.task}")
-        await self._stream(job, proc)
+        try:
+            await self._stream(job, proc)
+        finally:
+            if prompt_file:
+                prompt_file.unlink(missing_ok=True)
 
     async def cancel(self, job_id: str) -> None:
         """Cancel an active job if it exists."""

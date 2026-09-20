@@ -119,13 +119,17 @@ async def test_marker_delegation_honors_the_agent_named_in_the_request(monkeypat
     brain._default_agent_backend = "codex"
     calls = []
     monkeypatch.setattr(
-        brain, "_delegate_ack", lambda agent, task, cwd=None: calls.append((agent, task)) or "ack"
+        brain,
+        "_delegate_ack",
+        lambda agent, task, cwd=None, *, explicit=False: (
+            calls.append((agent, task, explicit)) or "ack"
+        ),
     )
     brain._last_user_text = "codex keeps failing, maybe code puppy can fix the tests"
 
     brain._handle_delegate_markers("Right away, sir. [[delegate: fix the tests]]")
 
-    assert calls == [("code-puppy", "fix the tests")]
+    assert calls == [("code-puppy", "fix the tests", True)]
 
 
 @pytest.mark.asyncio
@@ -136,13 +140,38 @@ async def test_marker_delegation_without_a_named_agent_uses_the_default(monkeypa
     brain._default_agent_backend = "codex"
     calls = []
     monkeypatch.setattr(
-        brain, "_delegate_ack", lambda agent, task, cwd=None: calls.append((agent, task)) or "ack"
+        brain,
+        "_delegate_ack",
+        lambda agent, task, cwd=None, *, explicit=False: (
+            calls.append((agent, task, explicit)) or "ack"
+        ),
     )
     brain._last_user_text = "someone should really fix the tests"
 
     brain._handle_delegate_markers("Right away, sir. [[delegate: fix the tests]]")
 
-    assert calls == [("codex", "fix the tests")]
+    assert calls == [("codex", "fix the tests", False)]
+
+
+@pytest.mark.asyncio
+async def test_marker_dispatch_preserves_a_clear_named_executor(monkeypatch):
+    brain = _brain(monkeypatch, ["On it. "])
+    monkeypatch.setattr(cfg, "AGENT_BACKENDS", {"codex": {}, "code-puppy": {}})
+    monkeypatch.setattr(cfg, "AGENT_SPOKEN_ALIASES", {"code puppy": "code-puppy", "codex": "codex"})
+    brain._default_agent_backend = "code-puppy"
+    calls = []
+    monkeypatch.setattr(
+        brain,
+        "_delegate_ack",
+        lambda agent, task, cwd=None, *, explicit=False: (
+            calls.append((agent, task, explicit)) or "ack"
+        ),
+    )
+    brain._last_user_text = "Uh here, have Codex try."
+
+    brain._handle_delegate_markers("[[delegate: search emails for anything from Miles's school]]")
+
+    assert calls == [("codex", "search emails for anything from Miles's school", True)]
 
 
 @pytest.mark.asyncio

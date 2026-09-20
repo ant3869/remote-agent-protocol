@@ -2,7 +2,9 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 from unittest.mock import AsyncMock
 
@@ -20,6 +22,38 @@ class PureHelperTests(unittest.TestCase):
     def test_build_command_substitutes_task_and_python(self):
         cmd = agent_bridge.build_command(["{python}", "run", "{task}"], "do a thing")
         self.assertEqual(cmd, [sys.executable, "run", "do a thing"])
+
+    def test_build_command_substitutes_task_file_without_putting_task_on_command_line(self):
+        task = "x" * 20_000
+        cmd = agent_bridge.build_command(
+            ["openclaw", "agent", "exec", "--message-file", "{task_file}"],
+            task,
+            task_file="H:/agent-prompts/prompt.txt",
+        )
+        self.assertEqual(
+            cmd,
+            ["openclaw", "agent", "exec", "--message-file", "H:/agent-prompts/prompt.txt"],
+        )
+        self.assertNotIn(task, cmd)
+
+    def test_prompt_file_is_utf8_and_can_be_removed_after_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(cfg, "DATA_DIR", Path(directory)):
+                path = agent_bridge._write_agent_prompt("find Miles's school events")
+            self.assertEqual(path.read_text(encoding="utf-8"), "find Miles's school events")
+            self.assertTrue(path.is_relative_to(Path(directory)))
+            path.unlink()
+            self.assertFalse(path.exists())
+
+    def test_default_windows_shim_backends_use_native_prompt_file_flags(self):
+        self.assertEqual(cfg.AGENT_BACKENDS["hermes"][-2:], ["--query-file", "{task_file}"])
+        self.assertEqual(cfg.AGENT_BACKENDS["openclaw"][3:5], ["--message-file", "{task_file}"])
+
+    def test_clean_session_template_accepts_a_task_file_placeholder(self):
+        self.assertEqual(
+            agent_bridge.clean_session_template(["hermes", "chat", "--query-file", "{task_file}"]),
+            ["hermes", "chat", "--oneshot", "--query-file", "{task_file}"],
+        )
 
     def test_build_command_inserts_model_override_after_executable(self):
         cmd = agent_bridge.build_command(
@@ -331,6 +365,26 @@ class PureHelperTests(unittest.TestCase):
         text = agent_bridge.announcement(job)
         self.assertIn("returned no result", text)
         self.assertNotIn("Do not pad", text)
+
+    def test_consult_protocol_echo_is_not_promoted_over_the_agent_answer(self):
+        lines = [
+            "If another agent on this machine would know something you need, you may ask ONE",
+            "of them one question. Print a single line shaped like this, with the agent name",
+            "and your real question substituted in place of the two placeholders -- never",
+            "print the placeholders themselves:",
+            '@@JESS_CONSULT {"id":"q1","agent":"the agent name","question":"the question"}',
+            "Then read the file named after your id, with a .json suffix, in this folder:",
+            "Check it every few seconds until it appears.",
+            "You may ask: code-puppy.",
+            "Ask only when their answer changes what you do. You get 2 question(s).",
+            "Hermes could not access the inbox directly, so no newer school emails were found.",
+        ]
+
+        self.assertEqual(
+            agent_bridge.fallback_result(lines),
+            "Hermes could not access the inbox directly, so no newer school emails were found.",
+        )
+        self.assertNotIn("@@JESS_CONSULT", agent_bridge.summarize_output(lines))
 
     def test_diff_style_answer_lines_survive_footer_fallback(self):
         job = agent_bridge.AgentJob(job_id="j", agent="hermes", task="find useful repos")
