@@ -563,6 +563,18 @@ class VoiceSession:
         if exc is not None:
             logger.opt(exception=exc).error("Session control call failed")
 
+    def run_conversation_hub_coro(self, coro, *, timeout: float = 10.0):
+        """Run one coroutine on the session loop and block for its result.
+
+        Unlike :meth:`_schedule`, which is fire-and-forget, this is for the
+        HTTP handler thread's conversation-hub reads/writes, which need to
+        distinguish success from a specific error (unknown channel, no
+        adapter, unknown memory id) rather than a logged-and-forgotten
+        exception.
+        """
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result(timeout=timeout)
+
     def set_muted(self, muted: bool) -> None:
         """Hard-mute / unmute the microphone. Cheap, thread-safe.
 

@@ -93,7 +93,7 @@ body { min-width: 320px; }
 /* Control cockpit */
 #controlView.active { grid-template: "confirm confirm" auto "conversation activity" minmax(0,1fr) / minmax(0,1fr) 286px; }
 #controlView .confirm-bar { grid-area: confirm; margin: 12px 14px 0; }
-.conversation-workbench { grid-area: conversation; display: grid; grid-template-rows: auto minmax(0,1fr) auto; min-width: 0; min-height: 0; background: var(--surface-field); }
+.conversation-workbench { grid-area: conversation; display: grid; grid-template-rows: auto minmax(0,1fr) auto auto; min-width: 0; min-height: 0; background: var(--surface-field); }
 .transcript-toolbar, .activity-head, .queue-header, .trace-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 54px; padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); background: var(--surface-panel); }
 .transcript-toolbar h3, .activity-head h3, .queue-header h3, .trace-header h3 { margin: 0; font-size: 14px; }
 .conversation-workbench .chat-log { height: auto; min-height: 0; padding: 22px clamp(16px,3vw,42px); background: var(--surface-field); }

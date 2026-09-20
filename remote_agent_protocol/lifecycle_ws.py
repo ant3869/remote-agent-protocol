@@ -11,6 +11,27 @@ from loguru import logger
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
+from remote_agent_protocol.conversation_hub import events as hub_events
+
+_HUB_EVENT_NAMES = frozenset(
+    {
+        hub_events.FLOOR_CHANGED,
+        hub_events.CHANNEL_CREATED,
+        hub_events.CHANNEL_RESTORED,
+        hub_events.CHANNEL_ARCHIVED,
+        hub_events.CHANNEL_REOPENED,
+        hub_events.SESSION_BOUND,
+        hub_events.SESSION_RESET,
+        hub_events.TASK_ASSIGNED,
+        hub_events.TASK_REASSIGNED,
+        hub_events.RESULT_AVAILABLE,
+        hub_events.BUTLER_HANDOFF_STARTED,
+        hub_events.BUTLER_HANDOFF_COMPLETED,
+        hub_events.BUTLER_INTERVENTION_STARTED,
+        hub_events.MEMORY_FORGOTTEN,
+    }
+)
+
 _FIELDS = (
     "job_id",
     "agent",
@@ -44,8 +65,39 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
+def _normalize_conversation_event(event: dict, *, sequence: int, received_at: str) -> dict | None:
+    """Return the stable public v1 envelope for an allowlisted hub event.
+
+    Hub events carry only identifiers and classification (see
+    ``conversation_hub.events.ConversationEvent`` -- never a hidden prompt,
+    memory value, or raw harness output), so every field but ``detail`` (free
+    text) is safe to forward as-is.
+    """
+    name = event.get("event")
+    channel = event.get("channel")
+    if name not in _HUB_EVENT_NAMES or not channel:
+        return None
+    payload = {
+        "schema_version": 1,
+        "sequence": sequence,
+        "type": "agent_conversation",
+        "event": name,
+        "channel": channel,
+        # The v1 envelope had no family discriminator before this branch --
+        # `type` was never in `_FIELDS` because there was only one family.
+        "timestamp": event.get("at") or received_at,
+    }
+    if event.get("task_id"):
+        payload["task_id"] = event["task_id"]
+    if event.get("data"):
+        payload["data"] = event["data"]
+    return payload
+
+
 def normalize_event(event: dict, *, sequence: int, received_at: str) -> dict | None:
     """Return the stable public v1 envelope, excluding raw agent output."""
+    if event.get("type") == "agent_conversation":
+        return _normalize_conversation_event(event, sequence=sequence, received_at=received_at)
     if event.get("type") != "agent_job" or not all(
         event.get(field) for field in ("job_id", "agent", "task")
     ):

@@ -2,7 +2,7 @@ const state = {
   latest: 0,
   status: null,
   messages: [],
-  memories: { short: [], semantic: [] },
+  memories: { short: [], semantic: [], hub: null },
   attachments: [],
   voiceDraft: "",
   activeConfirm: null,
@@ -148,14 +148,14 @@ function wakeLabel(phase) {
   }[phase] || "Wake word idle";
 }
 
-async function post(action, payload = {}) {
-  const response = await fetch("/api/action", {
+async function postJson(url, payload) {
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Session-Token": window.__CSRF_TOKEN__ || "",
     },
-    body: JSON.stringify({ action, ...payload }),
+    body: JSON.stringify(payload),
   });
   let data;
   try {
@@ -164,6 +164,11 @@ async function post(action, payload = {}) {
     throw new Error(`RAP returned HTTP ${response.status} without JSON.`);
   }
   if (!response.ok) throw new Error(data.error || `RAP returned HTTP ${response.status}.`);
+  return data;
+}
+
+async function post(action, payload = {}) {
+  const data = await postJson("/api/action", { action, ...payload });
   if (data.status) {
     // Same merge as the poll: an action response carries live state only, so
     // assigning it raw would drop the cached catalogs the UI renders from.
@@ -172,6 +177,128 @@ async function post(action, payload = {}) {
     renderStatus();
   }
   return data;
+}
+
+// -- Task 9: unified conversation-hub transcript and controls ---------------
+
+let historyView = null;
+
+function ensureHistoryPanel() {
+  if (historyView || !window.RapConversation) return historyView;
+  const workbench = document.querySelector(".conversation-workbench");
+  if (!workbench) return null;
+  const panel = document.createElement("details");
+  panel.id = "conversationHistoryPanel";
+  panel.className = "conversation-history-panel";
+  panel.append(Object.assign(document.createElement("summary"), { textContent: "Full conversation history & channels" }));
+  const controls = document.createElement("div");
+  controls.className = "history-controls";
+  const select = document.createElement("select");
+  select.id = "conversationChannelFilter";
+  select.setAttribute("aria-label", "Filter conversation history by channel");
+  const search = document.createElement("input");
+  search.id = "conversationHistorySearch";
+  search.type = "search";
+  search.placeholder = "Search conversation history";
+  search.setAttribute("aria-label", "Search conversation history");
+  controls.append(select, search);
+  const actions = document.createElement("div");
+  actions.id = "conversationChannelActions";
+  actions.className = "history-channel-actions-row";
+  const list = document.createElement("div");
+  list.id = "conversationHistoryList";
+  list.className = "history-list";
+  panel.append(controls, actions, list);
+  workbench.append(panel);
+
+  historyView = window.RapConversation.createHistoryView({
+    list,
+    channelSelect: select,
+    search,
+    actions,
+    onAction: runConversationControl,
+    onMemoryClick: openHubMemory,
+  });
+  select.addEventListener("change", refreshConversationHistory);
+  let searchTimer = null;
+  search.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(refreshConversationHistory, 250);
+  });
+  return historyView;
+}
+
+async function refreshConversationChannels() {
+  const view = ensureHistoryPanel();
+  if (!view) return;
+  try {
+    const response = await fetch("/api/conversation-channels");
+    if (!response.ok) return;
+    const data = await response.json();
+    view.setChannels(data.channels || []);
+  } catch (_error) {
+    // Best-effort: the live activity feed above still works without this.
+  }
+}
+
+async function refreshConversationHistory() {
+  const view = ensureHistoryPanel();
+  if (!view) return;
+  try {
+    const params = new URLSearchParams();
+    if (view.channelId) params.set("channel_id", view.channelId);
+    if (view.query) params.set("query", view.query);
+    const response = await fetch(`/api/conversation-history?${params}`);
+    if (!response.ok) return;
+    const data = await response.json();
+    view.render(data.entries || []);
+  } catch (_error) {
+    // Best-effort: the live activity feed above still works without this.
+  }
+}
+
+async function postConversationControl(action, payload = {}) {
+  return postJson("/api/conversation-control", { action, ...payload });
+}
+
+async function runConversationControl(action, channelId) {
+  if (action === "session_reset" && !confirm("Reset this agent's physical session? The conversation history is kept.")) {
+    return;
+  }
+  try {
+    await postConversationControl(action, { channel_id: channelId });
+    await Promise.all([refreshConversationChannels(), refreshConversationHistory()]);
+  } catch (error) {
+    $("conversationLive").textContent = error.message;
+  }
+}
+
+async function openHubMemory(memoryId) {
+  document.querySelector('[data-view="memory"]')?.click();
+  try {
+    const response = await fetch(`/api/conversation-memory?memory_id=${encodeURIComponent(memoryId)}`);
+    if (!response.ok) return;
+    const memory = await response.json();
+    state.memories.hub = memory;
+    state.selectedMemory = { ...memory, source: "hub" };
+    renderMemory();
+  } catch (_error) {
+    // Best-effort: the memory tab still opens even if this fetch fails.
+  }
+}
+
+async function forgetHubMemory(memoryId) {
+  if (!confirm("Forget this fact? This clears its whole correction history, including any earlier corrected values.")) {
+    return;
+  }
+  try {
+    const result = await postConversationControl("forget_memory", { memory_id: memoryId });
+    state.memories.hub = result.memory;
+    state.selectedMemory = { ...result.memory, source: "hub" };
+    renderMemory();
+  } catch (error) {
+    $("conversationLive").textContent = error.message;
+  }
 }
 
 function renderInputControlState(view) {
@@ -1363,7 +1490,11 @@ function renderMemory() {
   $("nodeCount").textContent = state.memories.semantic.length;
   const list = $("memoryList");
   list.innerHTML = "";
-  if (state.selectedMemory && !rows.some((row) => row.id === state.selectedMemory?.id && row.scope === state.selectedMemory?.scope)) {
+  if (
+    state.selectedMemory &&
+    state.selectedMemory.source !== "hub" &&
+    !rows.some((row) => row.id === state.selectedMemory?.id && row.scope === state.selectedMemory?.scope)
+  ) {
     state.selectedMemory = null;
   }
   $("memoryLayout")?.classList.toggle("has-selection", Boolean(state.selectedMemory));
@@ -1437,7 +1568,39 @@ function memoryScore(row) {
   return typeof row.score === "number" ? row.score.toFixed(2) : "local";
 }
 
+function ensureHubForgetButton() {
+  let button = $("hubMemoryForgetBtn");
+  if (!button) {
+    button = document.createElement("button");
+    button.id = "hubMemoryForgetBtn";
+    button.type = "button";
+    button.className = "button destructive hub-memory-forget";
+    button.textContent = "Forget (clears full correction history)";
+    $("memoryDetailText")?.insertAdjacentElement("afterend", button);
+  }
+  return button;
+}
+
 function renderMemoryDetail() {
+  const hubForgetBtn = ensureHubForgetButton();
+  if (state.selectedMemory?.source === "hub") {
+    const memory = state.selectedMemory;
+    $("memoryDetailTitle").textContent = memory.subject || "Memory";
+    const nodes = [document.createTextNode(memory.value || "(no value recorded -- forgotten)")];
+    for (const [label, value] of window.RapConversation.memoryDetailFields(memory)) {
+      nodes.push(document.createElement("br"));
+      const field = document.createElement("span");
+      field.textContent = `${label}: ${value}`;
+      nodes.push(field);
+    }
+    $("memoryDetailText").replaceChildren(...nodes);
+    $("memoryDeleteBtn").disabled = true;
+    hubForgetBtn.hidden = false;
+    hubForgetBtn.disabled = memory.status === "forgotten";
+    hubForgetBtn.onclick = () => forgetHubMemory(memory.memory_id);
+    return;
+  }
+  hubForgetBtn.hidden = true;
   if (!state.selectedMemory) {
     $("memoryDetailTitle").textContent = "Memory";
     $("memoryDetailText").textContent = "Select a row to inspect its source, scope, and text.";
@@ -2075,5 +2238,7 @@ function bind() {
 
 bind();
 poll();
+refreshConversationChannels();
+refreshConversationHistory();
 setInterval(renderWakeStatus, 250);
 fetchCliDiagnostics();

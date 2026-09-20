@@ -1,10 +1,25 @@
 import asyncio
 import json
 import unittest
+from datetime import UTC, datetime
 
 from websockets.asyncio.client import connect
 
 from remote_agent_protocol import lifecycle_ws
+from remote_agent_protocol.conversation_hub import events as hub_events
+
+
+def conversation_event(name=hub_events.RESULT_AVAILABLE, **overrides):
+    row = hub_events.ConversationEvent(
+        event=name,
+        channel_id="agent:hermes",
+        task_id="task_7",
+        detail="Hermes reported: the invoice totals do not match.",
+        at=datetime(2026, 9, 19, 12, tzinfo=UTC),
+        data={"result_kind": "partial", "attempt_id": "job-3"},
+    ).to_payload()
+    row.update(overrides)
+    return row
 
 
 def event(kind="started", **overrides):
@@ -58,6 +73,60 @@ class LifecyclePayloadTests(unittest.TestCase):
         self.assertIsNone(
             lifecycle_ws.normalize_event({"type": "sys"}, sequence=1, received_at="now")
         )
+
+    def test_hub_events_are_published_with_their_own_family_discriminator(self):
+        payload = lifecycle_ws.normalize_event(
+            conversation_event(), sequence=5, received_at="server-time"
+        )
+
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["sequence"], 5)
+        # v1 consumers switch on `event`; without a family tag a second
+        # family's names would be read as unrecognized agent_job states.
+        self.assertEqual(payload["type"], "agent_conversation")
+        self.assertEqual(payload["event"], hub_events.RESULT_AVAILABLE)
+        self.assertEqual(payload["channel"], "agent:hermes")
+        self.assertEqual(payload["task_id"], "task_7")
+        self.assertEqual(payload["data"], {"result_kind": "partial", "attempt_id": "job-3"})
+        self.assertEqual(payload["timestamp"], "2026-09-19T12:00:00+00:00")
+        json.dumps(payload)
+
+    def test_hub_event_free_text_detail_is_never_published(self):
+        payload = lifecycle_ws.normalize_event(conversation_event(), sequence=1, received_at="now")
+
+        self.assertNotIn("detail", payload)
+        self.assertNotIn("summary", payload)
+
+    def test_an_unallowlisted_hub_event_name_is_dropped(self):
+        for name in ("conversation_context_assembled", "conversation_memory_promoted", "made_up"):
+            self.assertIsNone(
+                lifecycle_ws.normalize_event(
+                    conversation_event(name), sequence=1, received_at="now"
+                ),
+                name,
+            )
+
+    def test_a_hub_event_without_a_channel_or_timestamp_is_dropped_or_stamped(self):
+        self.assertIsNone(
+            lifecycle_ws.normalize_event(
+                conversation_event(channel=""), sequence=1, received_at="now"
+            )
+        )
+        stamped = lifecycle_ws.normalize_event(
+            conversation_event(at=""), sequence=1, received_at="fallback-time"
+        )
+        self.assertEqual(stamped["timestamp"], "fallback-time")
+
+    def test_an_empty_hub_task_id_is_omitted_rather_than_published_blank(self):
+        payload = lifecycle_ws.normalize_event(
+            conversation_event(hub_events.FLOOR_CHANGED, task_id="", data={}),
+            sequence=1,
+            received_at="now",
+        )
+
+        self.assertEqual(payload["event"], hub_events.FLOOR_CHANGED)
+        self.assertNotIn("task_id", payload)
+        self.assertNotIn("data", payload)
 
 
 class LifecycleServerTests(unittest.IsolatedAsyncioTestCase):

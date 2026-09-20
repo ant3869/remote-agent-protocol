@@ -15,6 +15,7 @@ import time
 import webbrowser
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +29,7 @@ from remote_agent_protocol import (
     __version__,
     agent_bridge,
     app_state,
+    conversation_projection,
     coqui_tts,
     dashboard,
     diagnostics,
@@ -1052,6 +1054,130 @@ class WebVoiceApp:
             self._event_log.clear()
             self._publish({"type": "conversation_reset"})
 
+    # -- Task 9: unified conversation projection and controls ---------------
+
+    _CONVERSATION_CONTROL_ACTIONS = frozenset(
+        {"archive", "new_chapter", "session_reset", "forget_memory"}
+    )
+    _CONVERSATION_CONTROL_TIMEOUT = 10.0
+
+    def _conversation_hub(self):
+        """Reach the shared hub in either mode, degrading to None, never raising.
+
+        Brain mode holds a ``BrainSessionAdapter`` facade here, which has no
+        ``_conversation_hub`` of its own -- the hub lives on the ``BrainSession``
+        it wraps, mirroring the existing two-step ``_conversation`` fallback in
+        ``_clear_conversation`` above.
+        """
+        session = getattr(self, "_session", None)
+        hub = getattr(session, "_conversation_hub", None)
+        if hub is None:
+            hub = getattr(getattr(session, "_brain", None), "_conversation_hub", None)
+        return hub
+
+    def _gather_hub_snapshot(self, hub) -> conversation_projection.HubSnapshot:
+        """Fetch an already-detached snapshot, safe for the HTTP thread to read."""
+        if hub is None:
+            return conversation_projection.HubSnapshot(channels=(), turns=(), available=False)
+        return self._session.run_conversation_hub_coro(
+            conversation_projection.gather_hub_snapshot(hub)
+        )
+
+    def _conversation_channels_payload(self) -> dict:
+        snapshot = self._gather_hub_snapshot(self._conversation_hub())
+        return {
+            "available": snapshot.available,
+            "channels": conversation_projection.channel_summaries(snapshot),
+        }
+
+    def _conversation_history_payload(self, channel_id: str, query: str) -> dict:
+        snapshot = self._gather_hub_snapshot(self._conversation_hub())
+        entries = conversation_projection.unified_history(
+            snapshot, self._conversation.snapshot(), channel_id=channel_id or None, query=query
+        )
+        return {"available": snapshot.available, "entries": entries}
+
+    def _conversation_memory_payload(self, memory_id: str) -> dict | None:
+        if not memory_id:
+            return None
+        hub = self._conversation_hub()
+        if hub is None:
+            return None
+        memory = self._session.run_conversation_hub_coro(
+            conversation_projection.gather_memory(hub, memory_id)
+        )
+        return conversation_projection.memory_detail(memory)
+
+    def _conversation_control(self, action: str, payload: dict) -> tuple[HTTPStatus, dict]:
+        """Archive/reopen a channel, reset its session, or forget a memory.
+
+        Every hub call here runs through the session's cross-thread bridge
+        (never a direct read of the hub's live dicts from this HTTP thread)
+        and returns ``(status, body)`` so the caller never needs to guess how
+        to translate a hub-level failure into an HTTP response.
+        """
+        if action not in self._CONVERSATION_CONTROL_ACTIONS:
+            return HTTPStatus.BAD_REQUEST, {"error": f"Unknown conversation action: {action!r}"}
+        hub = self._conversation_hub()
+        if hub is None:
+            return HTTPStatus.CONFLICT, {"error": "conversation hub unavailable"}
+        try:
+            if action == "forget_memory":
+                return self._forget_memory_control(hub, payload)
+            return self._channel_control(hub, action, payload)
+        except FutureTimeoutError:
+            return HTTPStatus.SERVICE_UNAVAILABLE, {
+                "error": "conversation control action timed out"
+            }
+
+    def _forget_memory_control(self, hub, payload: dict) -> tuple[HTTPStatus, dict]:
+        memory_id = str(payload.get("memory_id") or "")
+        try:
+            forgotten = self._session.run_conversation_hub_coro(
+                hub.forget_memory(memory_id), timeout=self._CONVERSATION_CONTROL_TIMEOUT
+            )
+        except KeyError:
+            return HTTPStatus.NOT_FOUND, {"error": f"Unknown memory id: {memory_id!r}"}
+        return HTTPStatus.OK, {"memory": conversation_projection.memory_detail(forgotten)}
+
+    def _channel_control(self, hub, action: str, payload: dict) -> tuple[HTTPStatus, dict]:
+        channel_id = str(payload.get("channel_id") or "")
+        try:
+            channel = self._run_channel_action(hub, action, channel_id)
+        except ValueError as exc:
+            message = str(exc)
+            # archive_channel/new_chapter raise "Unknown channel: ..." for a
+            # missing channel (404); reset_session raises "No configured
+            # session adapter for ..." when the channel has none, e.g.
+            # coordinator:butler, which is never a harness backend (409).
+            status = (
+                HTTPStatus.NOT_FOUND
+                if message.startswith("Unknown channel")
+                else HTTPStatus.CONFLICT
+            )
+            return status, {"error": message}
+        summary = conversation_projection.channel_summaries(
+            conversation_projection.HubSnapshot(channels=(channel,), turns=(), available=True)
+        )[0]
+        return HTTPStatus.OK, {"channel": summary}
+
+    def _run_channel_action(self, hub, action: str, channel_id: str):
+        """Run one channel-scoped hub action on the session loop and return the channel."""
+        if action == "archive":
+            coro = hub.archive_channel(channel_id)
+        elif action == "new_chapter":
+            coro = hub.new_chapter(channel_id)
+        else:  # session_reset
+
+            async def _reset_and_reread():
+                await hub.reset_session(channel_id)
+                return hub.channel(channel_id)
+
+            coro = _reset_and_reread()
+        return self._session.run_conversation_hub_coro(
+            coro, timeout=self._CONVERSATION_CONTROL_TIMEOUT
+        )
+
     def _speech_fallback(self, text: str) -> SpeechText:
         """Publish the exact bridge error reply before handing it to external TTS."""
         utterance = self._conversation_events.utterance(
@@ -1953,6 +2079,26 @@ class WebVoiceApp:
                 if parsed.path == "/api/cli-diagnostics":
                     self._send_json(app._cli_diagnostics_payload())
                     return
+                if parsed.path == "/api/conversation-channels":
+                    self._send_json(app._conversation_channels_payload())
+                    return
+                if parsed.path == "/api/conversation-history":
+                    params = parse_qs(parsed.query)
+                    channel_id = params.get("channel_id", [""])[0]
+                    query = params.get("query", [""])[0]
+                    self._send_json(app._conversation_history_payload(channel_id, query))
+                    return
+                if parsed.path == "/api/conversation-memory":
+                    memory_id = parse_qs(parsed.query).get("memory_id", [""])[0]
+                    memory_payload = app._conversation_memory_payload(memory_id)
+                    if memory_payload is None:
+                        self._send_json(
+                            {"error": f"Unknown memory id: {memory_id!r}"},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+                    self._send_json(memory_payload)
+                    return
                 self._send_static(parsed.path)
 
             def do_POST(self) -> None:
@@ -2122,6 +2268,18 @@ class WebVoiceApp:
                         {"ok": accepted},
                         status=HTTPStatus.OK if accepted else HTTPStatus.CONFLICT,
                     )
+                    return
+                if parsed.path == "/api/conversation-control":
+                    if not secrets.compare_digest(
+                        self.headers.get("X-Session-Token", ""), app._csrf_token
+                    ):
+                        self.send_error(HTTPStatus.FORBIDDEN)
+                        return
+                    control_payload = self._read_json()
+                    status, body = app._conversation_control(
+                        str(control_payload.get("action", "")), control_payload
+                    )
+                    self._send_json(body, status=status)
                     return
                 if parsed.path != "/api/action":
                     self.send_error(HTTPStatus.NOT_FOUND)

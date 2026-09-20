@@ -438,6 +438,14 @@ class BrainSessionAdapter:
             raise RuntimeError("Brain session is not running yet")
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
+    def run_conversation_hub_coro(self, coro, *, timeout: float = 10.0):
+        """Run one coroutine on the brain loop and block for its result.
+
+        Symmetric with ``VoiceSession.run_conversation_hub_coro`` so
+        ``web_gui.py``'s conversation routes call one name regardless of mode.
+        """
+        return self._submit(coro).result(timeout=timeout)
+
     async def _complete_with_activity(self, text: str, *, llm_content: str | None = None) -> str:
         self._emit({"type": "turn", "event": "user_stopped"})
         self._emit({"type": "speaking", "value": False})

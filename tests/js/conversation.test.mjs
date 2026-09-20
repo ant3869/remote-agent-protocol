@@ -57,3 +57,48 @@ test("transcript omits narration telemetry and routing duplicates but retains er
   ];
   assert.deepEqual(conversation.visibleRows(rows), rows.slice(3));
 });
+
+// -- Task 9: unified conversation-hub transcript and controls ---------------
+
+test("the channel filter keeps a still-known selection and resets an unknown one", () => {
+  const channels = [{channel_id: "agent:openclaw"}, {channel_id: "coordinator:butler"}];
+  assert.equal(conversation.resolveChannelSelection(channels, "agent:openclaw"), "agent:openclaw");
+  assert.equal(conversation.resolveChannelSelection(channels, "agent:archived-and-gone"), "");
+  assert.equal(conversation.resolveChannelSelection(channels, ""), "");
+  assert.equal(conversation.resolveChannelSelection([], "agent:openclaw"), "");
+});
+
+test("memory detail fields report scope, confidence, and status without reconstructing a forgotten value", () => {
+  const fields = conversation.memoryDetailFields({
+    scope: "channel", confidence: "user_stated", status: "active",
+    observed_at: "2026-09-19T12:00:00+00:00", source_turn_ids: ["turn_a"],
+    supersedes: null, eligibility: "Eligible for agent:openclaw (channel-scoped).",
+  });
+  assert.deepEqual(fields, [
+    ["Scope", "channel"], ["Confidence", "user_stated"], ["Status", "active"],
+    ["Observed", "2026-09-19T12:00:00+00:00"], ["Source turns", "turn_a"],
+    ["Eligibility", "Eligible for agent:openclaw (channel-scoped)."],
+  ]);
+});
+
+test("memory detail fields include a supersession link only when one exists", () => {
+  const withSupersession = conversation.memoryDetailFields({
+    scope: "channel", confidence: "user_stated", status: "superseded",
+    observed_at: "now", source_turn_ids: [], supersedes: "memory_0", eligibility: "",
+  });
+  assert.ok(withSupersession.some(([label, value]) => label === "Supersedes" && value === "memory_0"));
+
+  const withoutSupersession = conversation.memoryDetailFields({
+    scope: "channel", confidence: "user_stated", status: "active",
+    observed_at: "now", source_turn_ids: [], supersedes: null, eligibility: "",
+  });
+  assert.ok(!withoutSupersession.some(([label]) => label === "Supersedes"));
+});
+
+test("memory detail fields report no source turns rather than an empty string", () => {
+  const fields = conversation.memoryDetailFields({
+    scope: "shared", confidence: "verified", status: "active",
+    observed_at: "now", source_turn_ids: [], supersedes: null, eligibility: "",
+  });
+  assert.deepEqual(fields.find(([label]) => label === "Source turns"), ["Source turns", "none"]);
+});

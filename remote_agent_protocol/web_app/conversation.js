@@ -324,7 +324,137 @@
       },
     };
   }
-  const api = { createStore, createView, outcome, deliveryLabels, progress, visibleRows };
+  // -- Task 9: unified conversation-hub transcript and controls --------------
+  // A second, independent store/view: different data shape (server-merged
+  // hub+live entries, not raw pipeline events) and different refresh cadence
+  // (fetched wholesale on demand, not polled incrementally).
+
+  function resolveChannelSelection(channels, requestedId) {
+    if (!requestedId) return "";
+    return (channels || []).some((channel) => channel.channel_id === requestedId) ? requestedId : "";
+  }
+
+  function memoryDetailFields(memory) {
+    const fields = [
+      ["Scope", memory.scope],
+      ["Confidence", memory.confidence],
+      ["Status", memory.status],
+      ["Observed", memory.observed_at],
+      ["Source turns", (memory.source_turn_ids || []).join(", ") || "none"],
+    ];
+    if (memory.supersedes) fields.push(["Supersedes", memory.supersedes]);
+    if (memory.eligibility) fields.push(["Eligibility", memory.eligibility]);
+    return fields;
+  }
+
+  function historyEntryNode(entry, { onMemoryClick } = {}) {
+    const article = el("article", "conversation-row history-entry");
+    article.dataset.key = entry.entry_id;
+    article.dataset.source = entry.source;
+    const header = el("header", "conversation-header");
+    header.append(el("strong", "conversation-name", entry.speaker_id || "Unknown"));
+    if (entry.result_kind) header.append(el("span", "conversation-state history-result", entry.result_kind));
+    if (entry.playback_state) {
+      header.append(el("span", "conversation-state conversation-delivery", deliveryLabels[entry.playback_state] || entry.playback_state));
+    }
+    if (entry.occurred_at) {
+      const time = el("time", "conversation-time", new Date(entry.occurred_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      time.dateTime = entry.occurred_at;
+      header.append(time);
+    }
+    article.append(header);
+    article.append(formatted(entry.full_text || ""));
+    if (entry.spoken_text != null && entry.spoken_text !== entry.full_text) {
+      const spoken = el("details");
+      spoken.dataset.detail = "spoken";
+      spoken.append(el("summary", "", "Reported spoken text"), formatted(entry.spoken_text));
+      article.append(spoken);
+    }
+    if (entry.memory_id && onMemoryClick) {
+      const link = el("button", "conversation-action history-memory-link", "Related memory");
+      link.type = "button";
+      link.addEventListener("click", () => onMemoryClick(entry.memory_id));
+      article.append(link);
+    }
+    return article;
+  }
+
+  function channelActionsNode(channel, { onAction } = {}) {
+    const row = el("div", "history-channel-actions");
+    row.dataset.channel = channel.channel_id;
+    // Archiving is one-way -- the hub has no "unarchive" action -- so an
+    // already-archived channel gets a disabled button rather than a label
+    // that implies re-clicking it would reopen the channel.
+    const archive = el("button", "conversation-action history-archive", channel.archived ? "Archived" : "Archive");
+    archive.type = "button";
+    archive.disabled = channel.archived;
+    archive.addEventListener("click", () => onAction?.("archive", channel.channel_id));
+    const chapter = el("button", "conversation-action history-new-chapter", "New chapter");
+    chapter.type = "button";
+    chapter.addEventListener("click", () => onAction?.("new_chapter", channel.channel_id));
+    row.append(archive, chapter);
+    if (channel.resettable) {
+      const reset = el("button", "conversation-action history-reset destructive", "Reset session");
+      reset.type = "button";
+      reset.addEventListener("click", () => onAction?.("session_reset", channel.channel_id));
+      row.append(reset);
+    }
+    return row;
+  }
+
+  function createHistoryView({ list, channelSelect, search, actions, onAction, onMemoryClick }) {
+    let channels = [];
+    function renderChannelOptions() {
+      if (!channelSelect) return;
+      const requested = channelSelect.value;
+      channelSelect.innerHTML = "";
+      const allOption = document.createElement("option");
+      allOption.value = "";
+      allOption.textContent = "All channels";
+      channelSelect.append(allOption);
+      for (const channel of channels) {
+        const option = document.createElement("option");
+        option.value = channel.channel_id;
+        option.textContent = `${channel.channel_id} (ch. ${channel.chapter_id})${channel.archived ? " · archived" : ""}`;
+        channelSelect.append(option);
+      }
+      channelSelect.value = resolveChannelSelection(channels, requested);
+    }
+    return {
+      get channelId() { return channelSelect ? channelSelect.value : ""; },
+      get query() { return search ? search.value.trim() : ""; },
+      setChannels(nextChannels) {
+        channels = nextChannels || [];
+        renderChannelOptions();
+        if (actions) {
+          actions.innerHTML = "";
+          for (const channel of channels) {
+            actions.append(channelActionsNode(channel, { onAction }));
+          }
+        }
+      },
+      render(entries) {
+        list.innerHTML = "";
+        if (!entries.length) {
+          list.append(el("div", "empty-state", "No conversation history matches."));
+          return;
+        }
+        for (const entry of entries) list.append(historyEntryNode(entry, { onMemoryClick }));
+      },
+    };
+  }
+
+  const api = {
+    createStore,
+    createView,
+    outcome,
+    deliveryLabels,
+    progress,
+    visibleRows,
+    createHistoryView,
+    resolveChannelSelection,
+    memoryDetailFields,
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.RapConversation = api;
 })(typeof window === "undefined" ? globalThis : window);

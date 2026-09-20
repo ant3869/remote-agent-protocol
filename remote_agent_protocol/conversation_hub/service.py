@@ -174,6 +174,18 @@ class AgentConversationHub:
         """Return the persisted turns for one channel, oldest first."""
         return tuple(turn for turn in self._turns if turn.channel_id == channel_id)
 
+    def channels(self) -> tuple[AgentChannel, ...]:
+        """Return every known channel, most-recently-created order not guaranteed."""
+        return tuple(self._channels.values())
+
+    def memory(self, memory_id: str) -> ScopedMemory:
+        """Return one memory record, including superseded/forgotten tombstones.
+
+        Raises ``KeyError`` if ``memory_id`` is unknown, matching
+        :meth:`MemoryRepository.get`.
+        """
+        return self._memories.get(memory_id)
+
     def restore(self, result: ConversationLoadResult) -> None:
         """Hydrate logical state from the durable store at application start.
 

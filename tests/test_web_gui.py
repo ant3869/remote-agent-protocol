@@ -1,8 +1,10 @@
+import asyncio
 import inspect
 import json
 import threading
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -16,7 +18,25 @@ from remote_agent_protocol import (
     web_gui,
 )
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol.conversation_hub.models import (
+    MemoryConfidence,
+    MemoryScope,
+    MemoryStatus,
+    ScopedMemory,
+)
+from remote_agent_protocol.conversation_hub.service import ConversationTurnRequest
 from remote_agent_protocol.web_gui import WebVoiceApp, _bundle_from_payload
+
+
+def _turn_request(text: str) -> ConversationTurnRequest:
+    return ConversationTurnRequest(
+        text=text,
+        source="ant",
+        explicit_agent_id=None,
+        correlation_id="corr-1",
+        created_at=datetime.now(UTC),
+    )
+
 
 WEB_APP = Path("remote_agent_protocol/web_app")
 
@@ -670,6 +690,14 @@ def test_agents_page_explains_agent_moves():
     assert "Execution timeline" in (WEB_APP / "index.html").read_text(encoding="utf-8")
     assert ".agent-move-timeline" in css
     assert ".agent-now-card" in css
+
+
+def test_agent_tape_updates_from_lifecycle_events_without_waiting_for_a_poll():
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+
+    assert "const eventJob = Object.values(state.agentJobs)" in script
+    assert "eventJob || s.agentStates?.[backend]" in script
+    assert "renderAgents(state.status || { agentBackends: [], agentStates: {} });" in script
 
 
 def test_agents_payload_preserves_live_output_lines_and_prompts(monkeypatch, tmp_path):
@@ -1739,3 +1767,280 @@ def test_checking_machines_asks_the_session_to_rediscover(monkeypatch):
 
     assert result["ok"] is True
     assert checked == [True]
+
+
+# -- Task 9: unified conversation projection and controls --------------------
+
+
+@pytest.fixture
+def session_loop(monkeypatch, tmp_path):
+    """Run a real event loop on its own thread, the way a live session does.
+
+    The conversation routes deliberately marshal every hub read and write onto
+    the session's loop thread, so a test that skipped that boundary would not
+    exercise the code the browser actually reaches.
+
+    Also sandboxes the durable conversation store to a per-test file: the
+    module-level ``CONVERSATION_STORE_PATH`` env var conftest.py sets is only
+    unique per pytest *process*, so two real-session tests in the same run
+    would otherwise share -- and leak turns into -- the same store.
+    """
+    monkeypatch.setattr(cfg, "CONVERSATION_STORE_PATH", tmp_path / "conversations.json")
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+
+def _hub_app(session_loop):
+    app = WebVoiceApp()
+    app._session._loop = session_loop
+    return app, app._conversation_hub()
+
+
+def _run(app, coro):
+    return app._session.run_conversation_hub_coro(coro)
+
+
+def _memory(memory_id, *, subject, value, channel_id="agent:openclaw", source="turn_a"):
+    return ScopedMemory(
+        memory_id=memory_id,
+        scope=MemoryScope.CHANNEL,
+        subject=subject,
+        value=value,
+        source_turn_ids=[source],
+        confidence=MemoryConfidence.USER_STATED,
+        observed_at=datetime(2026, 9, 19, 12, tzinfo=UTC),
+        channel_id=channel_id,
+    )
+
+
+def test_conversation_channels_payload_lists_the_hubs_channels(session_loop):
+    app, hub = _hub_app(session_loop)
+    _run(app, hub.handle_turn(_turn_request("what is the weather")))
+
+    payload = app._conversation_channels_payload()
+
+    assert payload["available"] is True
+    assert [row["channel_id"] for row in payload["channels"]] == ["coordinator:butler"]
+    assert payload["channels"][0]["resettable"] is False
+
+
+def test_conversation_history_payload_includes_the_hubs_user_turn(session_loop):
+    app, hub = _hub_app(session_loop)
+    _run(app, hub.handle_turn(_turn_request("check the invoice totals")))
+
+    payload = app._conversation_history_payload("", "")
+
+    assert payload["available"] is True
+    texts = [entry["full_text"] for entry in payload["entries"]]
+    assert "check the invoice totals" in texts
+    assert all(entry["source"] in {"hub", "live", "hub+live"} for entry in payload["entries"])
+
+
+def test_conversation_history_query_filters_server_side(session_loop):
+    app, hub = _hub_app(session_loop)
+    _run(app, hub.handle_turn(_turn_request("check the invoice totals")))
+    _run(app, hub.handle_turn(_turn_request("what is the weather")))
+
+    filtered = app._conversation_history_payload("", "INVOICE")
+
+    assert [entry["full_text"] for entry in filtered["entries"]] == ["check the invoice totals"]
+
+
+def test_conversation_memory_payload_is_none_for_an_unknown_id(session_loop):
+    app, _hub = _hub_app(session_loop)
+
+    assert app._conversation_memory_payload("memory_missing") is None
+    assert app._conversation_memory_payload("") is None
+
+
+def test_conversation_memory_payload_describes_a_known_record(session_loop):
+    app, hub = _hub_app(session_loop)
+    hub._memories.add(_memory("memory_1", subject="preferred mailbox", value="work inbox"))
+
+    payload = app._conversation_memory_payload("memory_1")
+
+    assert payload["memory_id"] == "memory_1"
+    assert payload["value"] == "work inbox"
+    assert "agent:openclaw" in payload["eligibility"]
+
+
+def test_archiving_a_channel_keeps_every_turn_it_holds(session_loop):
+    app, hub = _hub_app(session_loop)
+    _run(app, hub.handle_turn(_turn_request("check the invoice totals")))
+    before = [turn.turn_id for turn in hub.turns("coordinator:butler")]
+
+    status, body = app._conversation_control("archive", {"channel_id": "coordinator:butler"})
+
+    assert status == 200
+    assert body["channel"]["archived"] is True
+    assert [turn.turn_id for turn in hub.turns("coordinator:butler")] == before
+
+
+def test_a_new_chapter_bumps_the_chapter_without_dropping_transcript(session_loop):
+    app, hub = _hub_app(session_loop)
+    _run(app, hub.handle_turn(_turn_request("check the invoice totals")))
+    before = [turn.turn_id for turn in hub.turns("coordinator:butler")]
+
+    status, body = app._conversation_control("new_chapter", {"channel_id": "coordinator:butler"})
+
+    assert status == 200
+    assert body["channel"]["chapter_id"] == 2
+    assert [turn.turn_id for turn in hub.turns("coordinator:butler")] == before
+
+
+def test_resetting_butlers_session_is_a_conflict_not_a_missing_channel(session_loop):
+    app, hub = _hub_app(session_loop)
+    _run(app, hub.handle_turn(_turn_request("check the invoice totals")))
+
+    status, body = app._conversation_control("session_reset", {"channel_id": "coordinator:butler"})
+
+    # Butler is never a harness backend, so it has no adapter to rotate --
+    # that is a conflict with the request, not an unknown channel.
+    assert status == 409
+    assert "adapter" in body["error"].lower()
+
+
+def test_forgetting_a_memory_tombstones_its_whole_correction_family(session_loop):
+    app, hub = _hub_app(session_loop)
+    hub._memories.add(_memory("memory_1", subject="preferred mailbox", value="work inbox"))
+    corrected = hub._memories.correct(
+        "memory_1", "personal inbox", "turn_b", datetime(2026, 9, 19, 13, tzinfo=UTC)
+    )
+
+    status, body = app._conversation_control("forget_memory", {"memory_id": corrected.memory_id})
+
+    assert status == 200
+    assert body["memory"]["status"] == "forgotten"
+    for memory_id in ("memory_1", corrected.memory_id):
+        record = hub.memory(memory_id)
+        assert record.status is MemoryStatus.FORGOTTEN
+        assert record.value == ""
+        assert record.subject == ""
+
+
+def test_an_unknown_channel_control_is_not_found(session_loop):
+    app, _hub = _hub_app(session_loop)
+
+    for action in ("archive", "new_chapter"):
+        status, body = app._conversation_control(action, {"channel_id": "agent:nobody"})
+        assert status == 404, action
+        assert "error" in body
+
+
+def test_an_unknown_memory_control_is_not_found(session_loop):
+    app, _hub = _hub_app(session_loop)
+
+    status, body = app._conversation_control("forget_memory", {"memory_id": "memory_missing"})
+
+    assert status == 404
+
+
+def test_an_unknown_conversation_control_action_is_rejected(session_loop):
+    app, _hub = _hub_app(session_loop)
+
+    status, body = app._conversation_control("delete_everything", {"channel_id": "x"})
+
+    assert status == 400
+    assert "error" in body
+
+
+def test_conversation_surfaces_degrade_without_a_hub():
+    app = WebVoiceApp()
+    app._session = FakeSession([])
+
+    assert app._conversation_hub() is None
+    assert app._conversation_channels_payload() == {"available": False, "channels": []}
+    assert app._conversation_history_payload("", "")["available"] is False
+    assert app._conversation_memory_payload("memory_1") is None
+    status, body = app._conversation_control("archive", {"channel_id": "agent:openclaw"})
+    assert status == 409
+    assert "unavailable" in body["error"]
+
+
+def test_brain_mode_reaches_the_hub_through_the_brain_facade(monkeypatch, session_loop):
+    monkeypatch.setattr(cfg, "RAP_MODE", "brain")
+    app = WebVoiceApp()
+    app._session._loop = session_loop
+
+    hub = app._conversation_hub()
+
+    # The web server holds a BrainSessionAdapter in this mode, never a
+    # BrainSession, so a one-step attribute lookup would always be None.
+    assert hub is not None
+    assert hub is app._session._brain._conversation_hub
+    _run(app, hub.handle_turn(_turn_request("check the invoice totals")))
+    assert app._conversation_channels_payload()["available"] is True
+
+
+def test_conversation_control_requires_a_matching_csrf_token(session_loop):
+    app, _hub = _hub_app(session_loop)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        for bad_token in (None, "", "wrong-token"):
+            try:
+                _post_conversation_control(port, {"action": "archive"}, token=bad_token)
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 403
+            else:
+                raise AssertionError(f"expected 403 for token={bad_token!r}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_conversation_routes_are_served_over_http(session_loop):
+    app, hub = _hub_app(session_loop)
+    _run(app, hub.handle_turn(_turn_request("check the invoice totals")))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), app._handler_class())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        channels = _get_json(port, "/api/conversation-channels")
+        assert [row["channel_id"] for row in channels["channels"]] == ["coordinator:butler"]
+
+        history = _get_json(port, "/api/conversation-history?channel_id=&query=invoice")
+        assert [entry["full_text"] for entry in history["entries"]] == ["check the invoice totals"]
+
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            _get_json(port, "/api/conversation-memory?memory_id=memory_missing")
+        assert caught.value.code == 404
+
+        response = _post_conversation_control(
+            port,
+            {"action": "archive", "channel_id": "coordinator:butler"},
+            token=app._csrf_token,
+        )
+        assert response.status == 200
+        assert json.loads(response.read())["channel"]["archived"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _get_json(port, path):
+    response = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+    return json.loads(response.read())
+
+
+def _post_conversation_control(port, payload, token=None):
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-Session-Token"] = token
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/conversation-control",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    return urllib.request.urlopen(req, timeout=5)
