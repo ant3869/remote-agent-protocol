@@ -1,7 +1,10 @@
 import { AvatarEnvelopeStream } from "./lip-sync.js";
 
 const ASSET_BASE = "/assets/avatars/butler/runtime_512_v1/";
-const ASSET_REVISION = "20260917";
+// Asset responses are immutable for a year.  Advance this whenever a delivery
+// fix changes their availability so a running browser cannot reuse a failed
+// (for example, previously wrong-MIME) response from an earlier server.
+const ASSET_REVISION = "20260920";
 const FRAME_LOAD_TIMEOUT_MS = 6000;
 const MATERIALIZE_DURATIONS = [55, 55, 55, 55, 55, 72, 72, 72, 72, 72, 95, 110, 220];
 const FAILURE_DURATIONS = [80, 65, 65, 75, 70, 75, 80, 100, 650];
@@ -109,7 +112,20 @@ export async function createAvatarScene(host, settings) {
   const context = canvas.getContext("2d", { alpha: true });
   if (!context) throw new Error("2D canvas is unavailable");
   const urls = frameUrls();
-  const images = await preloadFrames(urls, CRITICAL_FRAMES);
+  // A companion that has already loaded its base portrait is useful even if a
+  // secondary expression was evicted from cache or arrives late.  Keeping the
+  // base frame mandatory preserves the static fallback for a genuinely broken
+  // asset path without holding first paint hostage to every animation frame.
+  const images = await preloadFrames(urls, ["base"]);
+  const optionalFrames = await Promise.allSettled(
+    CRITICAL_FRAMES.filter((name) => name !== "base").map(async (name) => {
+      const loaded = await preloadFrames(urls, [name]);
+      return [name, loaded[name]];
+    }),
+  );
+  for (const result of optionalFrames) {
+    if (result.status === "fulfilled") images[result.value[0]] = result.value[1];
+  }
   host.classList.add("avatar-frame-butler");
   host.replaceChildren(canvas);
   let currentSettings = settings;

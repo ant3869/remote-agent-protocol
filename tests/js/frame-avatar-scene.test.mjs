@@ -144,7 +144,7 @@ test("all frame URLs are same-origin RAP assets", () => {
 
   assert.deepEqual(Object.keys(urls), FRAME_NAMES);
   assert.ok(Object.values(urls).every((url) => url.startsWith("/assets/avatars/butler/runtime_512_v1/")));
-  assert.ok(Object.values(urls).every((url) => url.includes("?v=20260917")));
+  assert.ok(Object.values(urls).every((url) => url.includes("?v=20260920")));
   assert.ok(Object.values(urls).every((url) => !url.includes("4188")));
 });
 
