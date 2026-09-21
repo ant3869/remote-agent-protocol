@@ -316,7 +316,7 @@ def test_voice_stack_passes_input_mode_and_live_timing_bridges(monkeypatch, tmp_
     assert args[args.index("--external-mode-file") + 1] == str(mode_file.resolve())
     assert args[args.index("--external-mode-status-file") + 1] == str(status_file.resolve())
     assert args[args.index("--turn-timing-url") + 1] == "http://127.0.0.1:9123/api/turn-timing"
-    assert args[args.index("--turn-timing-api-key") + 1] == "secret"
+    assert "--turn-timing-api-key=secret" in args
 
 
 def test_brain_ui_keeps_real_input_modes_enabled():

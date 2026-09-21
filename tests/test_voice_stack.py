@@ -634,8 +634,25 @@ def test_server_receives_authoritative_network_and_brain_settings(monkeypatch, t
     assert args[args.index("--ws_host") + 1] == "127.0.0.1"
     assert args[args.index("--ws_port") + 1] == "9777"
     assert args[args.index("--responses_api_base_url") + 1] == "http://127.0.0.1:9888/v1"
-    assert args[args.index("--responses_api_api_key") + 1] == "secret"
+    # =value, not a separate token: a token-urlsafe API key can start with
+    # "-", which argparse would otherwise mistake for a new flag.
+    assert "--responses_api_api_key=secret" in args
     assert args[args.index("--model_name") + 1] == "rap-test-model"
+
+
+def test_a_bridge_api_key_starting_with_a_dash_is_never_split_from_its_flag(tmp_path):
+    """secrets.token_urlsafe's alphabet includes "-"; a token starting with
+    one must still parse as this flag's value, not look like a new flag.
+    """
+    dashy_key = "-looks-like-a-flag-but-is-really-the-random-token"
+
+    server_args = voice_stack.build_stages(tmp_path, bridge_api_key=dashy_key)[1].args
+    client_args = voice_stack.build_stages(tmp_path, bridge_api_key=dashy_key)[2].args
+
+    assert f"--responses_api_api_key={dashy_key}" in server_args
+    assert f"--avatar-envelope-api-key={dashy_key}" in client_args
+    assert f"--turn-timing-api-key={dashy_key}" in client_args
+    assert f"--input-state-api-key={dashy_key}" in client_args
 
 
 def test_server_streams_sentence_by_sentence_for_realtime_speech(tmp_path):
@@ -684,9 +701,9 @@ def test_client_receives_authoritative_paths_not_the_scripts_hardcoded_ones(monk
     assert (
         args[args.index("--avatar-envelope-url") + 1] == "http://127.0.0.1:9999/api/avatar-envelope"
     )
-    assert args[args.index("--avatar-envelope-api-key") + 1] == "secret"
+    assert "--avatar-envelope-api-key=secret" in args
     assert args[args.index("--input-state-url") + 1] == "http://127.0.0.1:9999/api/input-state"
-    assert args[args.index("--input-state-api-key") + 1] == "secret"
+    assert "--input-state-api-key=secret" in args
 
 
 def _kokoro_frontend(tmp_path, launcher_text="--tts kokoro"):

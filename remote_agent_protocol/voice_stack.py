@@ -485,8 +485,12 @@ def build_stages(
                 str(ws_port),
                 "--responses_api_base_url",
                 f"http://127.0.0.1:{bridge_port}/v1",
-                "--responses_api_api_key",
-                bridge_api_key,
+                # =value, not two tokens: secrets.token_urlsafe's alphabet
+                # includes "-", so a token that happens to start with one
+                # would otherwise look like a new flag to argparse and fail
+                # with "expected one argument" -- an intermittent, unlucky
+                # bug that only shows up on some launches, not others.
+                f"--responses_api_api_key={bridge_api_key}",
                 "--model_name",
                 cfg.S2S_BRIDGE_MODEL,
                 # Speak after ONE finished sentence; the upstream default of 3
@@ -543,20 +547,19 @@ def build_stages(
                 str(Path(cfg.S2S_VOICE_MODE_STATUS_FILE).resolve()),
                 "--avatar-envelope-url",
                 f"http://127.0.0.1:{bridge_port}/api/avatar-envelope",
-                "--avatar-envelope-api-key",
-                bridge_api_key,
+                # =value: see the matching comment on --responses_api_api_key
+                # above -- same random token, same leading-dash hazard.
+                f"--avatar-envelope-api-key={bridge_api_key}",
                 "--announce-file",
                 str(Path(cfg.S2S_ANNOUNCE_FILE).resolve()),
                 "--timing-file",
                 str((cfg.DATA_DIR / "s2s_turn_timings.jsonl").resolve()),
                 "--turn-timing-url",
                 f"http://127.0.0.1:{bridge_port}/api/turn-timing",
-                "--turn-timing-api-key",
-                bridge_api_key,
+                f"--turn-timing-api-key={bridge_api_key}",
                 "--input-state-url",
                 f"http://127.0.0.1:{bridge_port}/api/input-state",
-                "--input-state-api-key",
-                bridge_api_key,
+                f"--input-state-api-key={bridge_api_key}",
                 "--ready-file",
                 str(client_ready_file),
                 *device_args,
