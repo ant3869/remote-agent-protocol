@@ -49,7 +49,12 @@ from .models import (
     SessionBinding,
     TaskReference,
 )
-from .results import COMMUNICATION_CONTRACT, ResultPresenter, classify_recovery
+from .results import (
+    COMMUNICATION_CONTRACT,
+    DEFAULT_SPEECH_SEGMENT_CHARS,
+    ResultPresenter,
+    classify_recovery,
+)
 from .selection import AgentSelector, CapabilityRequirement
 from .sessions import SessionBindingManager
 from .store import ConversationLoadResult, ConversationStore
@@ -135,6 +140,7 @@ class AgentConversationHub:
         adapters: Mapping[str, ConversationSessionAdapter],
         registry: AgentRegistry,
         communication_contract: str = COMMUNICATION_CONTRACT,
+        segment_chars: int = DEFAULT_SPEECH_SEGMENT_CHARS,
         on_event: EventListener | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -153,8 +159,9 @@ class AgentConversationHub:
         self._turns: list[ConversationTurn] = []
         self._tasks: dict[str, TaskReference] = {}
         self._floor_state = FloorState.new(now=self._now())
+        self._metadata: dict[str, Any] = {}
         self._sessions = SessionBindingManager(persist=self._persist_binding)
-        self._presenter = ResultPresenter()
+        self._presenter = ResultPresenter(segment_chars=segment_chars)
         self._lock = asyncio.Lock()
 
     @property
@@ -196,6 +203,7 @@ class AgentConversationHub:
         self._turns = list(result.turns)
         self._tasks = {task.task_id: task for task in result.task_references}
         self._floor_state = result.floor_state or FloorState.new(now=self._now())
+        self._metadata = dict(result.metadata)
         self._memories = MemoryRepository(result.memories, policy=self._memories.policy)
         self._context_assembler = ContextAssembler(self._memories, self._context_assembler.budget)
         self._sessions = SessionBindingManager(
@@ -862,6 +870,7 @@ class AgentConversationHub:
             bindings=list(self._sessions.bindings),
             task_references=list(self._tasks.values()),
             floor_state=self._floor_state,
+            metadata=self._metadata,
         )
 
     def _emit(

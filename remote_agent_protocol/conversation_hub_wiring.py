@@ -15,6 +15,7 @@ from remote_agent_protocol import agent_bridge
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol.control_plane.adapters.factory import build_adapters
 from remote_agent_protocol.control_plane.registry import AgentRegistry
+from remote_agent_protocol.conversation_hub.context import ContextBudget
 from remote_agent_protocol.conversation_hub.factory import build_conversation_hub
 from remote_agent_protocol.conversation_hub.service import AgentConversationHub, EventListener
 
@@ -44,5 +45,7 @@ def build_app_conversation_hub(
         backends=cfg.AGENT_BACKENDS if backends is None else backends,
         aliases=cfg.AGENT_SPOKEN_ALIASES,
         default_agent_id=None,
+        context_budget=ContextBudget(total_chars=cfg.CONVERSATION_CONTEXT_CHAR_BUDGET),
+        segment_chars=cfg.CONVERSATION_SPEECH_SEGMENT_CHARS,
         on_event=on_event,
     )

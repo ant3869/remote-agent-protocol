@@ -723,6 +723,15 @@ CONVERSATION_STORE_PATH = Path(
     _env("CONVERSATION_STORE_PATH", str(DATA_DIR / "conversations.json"))
 )
 
+# Context-assembly and retention defaults for the conversation hub (Task 10).
+# CONVERSATION_RECENT_TURN_LIMIT is reserved for a future turn-count cap in
+# ContextAssembler -- context.py's ContextBudget is char-budgeted only today.
+CONVERSATION_CONTEXT_CHAR_BUDGET = int(_env("CONVERSATION_CONTEXT_CHAR_BUDGET", "48000"))
+CONVERSATION_RECENT_TURN_LIMIT = int(_env("CONVERSATION_RECENT_TURN_LIMIT", "40"))
+CONVERSATION_CHANNEL_TURN_RETENTION = int(_env("CONVERSATION_CHANNEL_TURN_RETENTION", "5000"))
+CONVERSATION_PROGRESS_RETENTION = int(_env("CONVERSATION_PROGRESS_RETENTION", "500"))
+CONVERSATION_SPEECH_SEGMENT_CHARS = int(_env("CONVERSATION_SPEECH_SEGMENT_CHARS", "1200"))
+
 # Where delegated agents run when no explicit directory is given. Voice jobs
 # used to inherit Jess's own working directory -- this repo -- which is how a
 # mistranslated task ended with CodePuppy editing this codebase for five
