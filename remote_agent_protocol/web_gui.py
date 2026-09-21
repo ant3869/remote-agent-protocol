@@ -1317,9 +1317,27 @@ class WebVoiceApp:
     def _write_s2s_mute_command(self, muted: bool) -> int | None:
         if not cfg.S2S_MIC_MUTE_FILE:
             return None
-        self._s2s_mute_generation += 1
-        body = {"generation": self._s2s_mute_generation, "muted": muted}
         path = Path(cfg.S2S_MIC_MUTE_FILE)
+        # The realtime client only applies a strictly newer command.  A second
+        # RAP process can write an acknowledgement after this instance starts,
+        # so a counter seeded at construction may otherwise remain permanently
+        # behind the client's high-water mark and every later unmute times out.
+        generations = [self._s2s_mute_generation]
+        for candidate in (path, Path(cfg.S2S_MIC_MUTE_STATUS_FILE)):
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8-sig"))
+                generation = int(payload.get("generation", -1))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if generation >= 0:
+                generations.append(generation)
+        high_water_mark = max(generations)
+        self._s2s_mute_generation = (
+            high_water_mark + 1
+            if self._s2s_mute_generation <= 0
+            else max(high_water_mark + 1, time.time_ns())
+        )
+        body = {"generation": self._s2s_mute_generation, "muted": muted}
         staged = path.with_suffix(f"{path.suffix}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -151,12 +151,14 @@ async def test_cancel_reports_actual_local_result_without_model_claims(
 @pytest.mark.asyncio
 async def test_rollcall_reports_probe_failure_without_model_health_claims(monkeypatch):
     brain = _brain(monkeypatch, ["All agents are healthy. [[delegate: ping]]"])
-    brain._control_plane.list_agents = AsyncMock(
-        return_value={
-            "codex": ControlError("timeout", "Probe timed out.", "codex"),
-        }
+    brain._control_plane.get_agent_status = AsyncMock(
+        return_value=ControlError("timeout", "Probe timed out.", "codex")
     )
+    brain._control_plane.list_agents = AsyncMock(side_effect=AssertionError("must not probe peers"))
     response = "".join(await _collect(brain, "Ping Codex"))
+    calls = brain._control_plane.get_agent_status.await_args_list
+    assert [call.args for call in calls] == [("codex",), ("codex",)]
+    assert all(call.kwargs == {"refresh": True} for call in calls)
     assert "I checked" in response
     assert "could not be verified (timeout)" in response
     assert "healthy" not in response
@@ -176,8 +178,49 @@ async def test_actual_response_diagnostic_stays_local_and_starts_fixed_check(mon
     brain._control_plane.list_agents.assert_awaited_once_with(refresh=True)
     brain._control_plane.request_response_check.assert_awaited_once_with("codex")
     assert "self-check is pinging" in response
-    assert "Version probes prove only" in response
+    assert "fixed-response evidence" in response
     assert "[[delegate" not in response
+
+
+@pytest.mark.asyncio
+async def test_named_response_check_refreshes_and_checks_only_that_agent(monkeypatch):
+    brain = _brain(monkeypatch, ["I will delegate this."])
+    monkeypatch.setattr(cfg, "AGENT_SPOKEN_ALIASES", {"hermes": "hermes"})
+    brain._control_plane.get_agent_status = AsyncMock(return_value=_control_snapshot())
+    brain._control_plane.list_agents = AsyncMock(side_effect=AssertionError("must not probe peers"))
+    brain._control_plane.request_response_check = AsyncMock(
+        return_value=JobHandle("check-1", "hermes")
+    )
+    brain._resolve_delegation = AsyncMock(side_effect=AssertionError("must stay local"))
+
+    response = "".join(await _collect(brain, "Is Hermes actually responding?"))
+
+    brain._control_plane.get_agent_status.assert_awaited_once_with("hermes", refresh=True)
+    brain._control_plane.request_response_check.assert_awaited_once_with("hermes")
+    assert "Hermes" in response
+    assert "self-check is pinging" in response
+
+
+@pytest.mark.asyncio
+async def test_openclaw_reauthentication_command_stays_local(monkeypatch):
+    brain = _brain(monkeypatch, ["I will delegate this."])
+    monkeypatch.setattr(
+        cfg,
+        "AGENT_SPOKEN_ALIASES",
+        {"openclaw": "openclaw", "open claw": "openclaw"},
+    )
+    brain._resolve_delegation = AsyncMock(side_effect=AssertionError("must stay local"))
+    brain._handle_agent_diagnostic = AsyncMock(side_effect=AssertionError("must not probe"))
+
+    response = "".join(
+        await _collect(
+            brain, "Uh can you find what the open claw line would be to re-auth Chat GPT?"
+        )
+    )
+
+    assert response == voice_commands.OPENCLAW_OPENAI_REAUTH_GUIDANCE
+    brain._resolve_delegation.assert_not_awaited()
+    brain._handle_agent_diagnostic.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

@@ -612,6 +612,12 @@ class AgentConversationHub:
             task = self._task_by_job_id(job_id)
             if task is None:
                 return
+            # Bridge job counters restart with the process.  A durable task
+            # from a prior run can therefore have the same short job ID as a
+            # new, unrelated harness event; ownership must agree before that
+            # event can alter a channel or trigger result recovery.
+            if str(event.get("agent") or "") != task.agent_id:
+                return
             status = str(event.get("status", ""))
             now = self._now()
             if status in _NON_TERMINAL_JOB_STATUSES:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import re
 import shutil
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,20 +21,18 @@ from ..models import (
     LaunchResult,
     ObservedWork,
     Presence,
-    UpdateState,
     WorkOwnership,
 )
 from .base import AgentTask
-
-_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 
 
 class BridgeCliAdapter:
     """Probes a configured CLI and delegates execution to ``AgentBridge``.
 
-    These harnesses are one-shot CLIs, not daemon processes.  A successful
-    ``--version`` therefore proves contactability, not external-session
-    activity.  RAP-owned work is read from the bridge's structured lifecycle.
+    These harnesses are one-shot CLIs, not daemon processes.  Installation
+    discovery therefore never stands in for a health check or an external
+    account/session claim. RAP-owned work is read from the bridge's structured
+    lifecycle and a fixed-response check supplies live readiness evidence.
     """
 
     executable: str
@@ -120,58 +116,25 @@ class BridgeCliAdapter:
         )
 
     async def probe(self) -> AgentObservation:
-        """Run the CLI's verified version command under a strict timeout."""
+        """Report installation and RAP-owned work without executing ``--version``.
+
+        Operators asking whether a harness is healthy need task-response
+        evidence, not a version string they already know.  The control plane
+        follows this observation with its fixed-response check when status is
+        requested.
+        """
         initial = await self.discover()
         if initial.presence == Presence.STOPPED:
             return initial
-        try:
-            process = await asyncio.create_subprocess_exec(
-                self.executable,
-                "--version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self._probe_timeout_secs
-            )
-        except TimeoutError:
-            return self._observation(
-                datetime.now(UTC),
-                presence=Presence.UNKNOWN,
-                activity=Activity.UNKNOWN,
-                health=Health.UNKNOWN,
-                detail="Version probe timed out.",
-                issues=("timeout",),
-            )
-        except OSError as exc:
-            return self._observation(
-                datetime.now(UTC),
-                presence=Presence.UNKNOWN,
-                activity=Activity.UNKNOWN,
-                health=Health.UNKNOWN,
-                detail=f"Version probe could not start: {exc}",
-                issues=("probe_failed",),
-            )
-        detail = _clean_output(stdout or stderr)
-        if process.returncode:
-            return self._observation(
-                datetime.now(UTC),
-                presence=Presence.UNREACHABLE,
-                activity=Activity.UNKNOWN,
-                health=Health.UNKNOWN,
-                detail=f"Version probe exited with code {process.returncode}: {detail}",
-                issues=("probe_failed",),
-            )
         jobs = await self.inspect_jobs()
         active = jobs[0] if jobs else None
         return self._observation(
             datetime.now(UTC),
-            presence=Presence.REACHABLE,
-            activity=active.state if active else Activity.IDLE,
-            health=Health.HEALTHY,
-            detail=detail or "CLI responded to the version probe.",
+            presence=Presence.UNKNOWN,
+            activity=active.state if active else Activity.UNKNOWN,
+            health=Health.UNKNOWN,
+            detail="Executable is installed; task and account readiness are unverified.",
             current_work=active,
-            update_state=_update_state(detail),
         )
 
     async def launch(self) -> LaunchResult:
@@ -260,7 +223,6 @@ class BridgeCliAdapter:
         detail: str,
         current_work: ObservedWork | None = None,
         issues: tuple[str, ...] = (),
-        update_state: UpdateState = UpdateState.UNKNOWN,
     ) -> AgentObservation:
         return AgentObservation(
             agent_id=self.agent_id,
@@ -283,25 +245,7 @@ class BridgeCliAdapter:
             expires_at=now + timedelta(seconds=self._freshness_secs),
             current_work=current_work,
             issues=issues,
-            update_state=update_state,
         )
-
-
-def _clean_output(raw: bytes) -> str:
-    return (
-        _ANSI_ESCAPE.sub("", raw.decode("utf-8", errors="replace"))
-        .strip()
-        .replace("\x00", " ")[:500]
-    )
-
-
-def _update_state(detail: str) -> UpdateState:
-    """Report an update only when the CLI emitted its own concrete signal."""
-    if re.search(
-        r"(?:update available|new version .* available|please consider updating)", detail, re.I
-    ):
-        return UpdateState.UPDATE_AVAILABLE
-    return UpdateState.UNKNOWN
 
 
 def _as_datetime(raw: Any) -> datetime | None:

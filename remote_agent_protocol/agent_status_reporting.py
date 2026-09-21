@@ -19,14 +19,14 @@ from collections.abc import Awaitable, Callable, Mapping
 from remote_agent_protocol.control_plane.models import (
     AgentSnapshot,
     ControlError,
+    Health,
     JobHandle,
     ResponseState,
-    UpdateState,
 )
 
 DIAGNOSTIC_LIMITATION = (
-    "Version probes prove only the installed CLI answered locally; they are not agent replies. "
-    "RAP cannot inspect unsupported external sessions."
+    "RAP reports only installation, bridge, and fixed-response evidence. "
+    "It cannot inspect unsupported external sessions or accounts."
 )
 
 
@@ -36,24 +36,43 @@ def control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str:
         return f"{agent_id} could not be verified ({result.code})"
     observation = result.observation
     freshness = "stale" if result.is_stale() else "current"
+    if observation.response_state is ResponseState.RESPONDED:
+        return f"{observation.display_name}: answered RAP's fixed response check ({freshness})"
+    if observation.response_state is ResponseState.FAILED:
+        detail = observation.evidence[0].detail
+        return f"{observation.display_name}: fixed response check failed ({freshness}; {detail})"
+    if observation.response_state is ResponseState.PENDING:
+        return f"{observation.display_name}: RAP's fixed response check is running now"
     work = f", {observation.current_work.summary}" if observation.current_work else ""
     response = {
         ResponseState.RESPONDED: "actual response confirmed",
-        ResponseState.PENDING: "actual response check pinging",
+        ResponseState.PENDING: "actual response check running now",
         ResponseState.FAILED: "actual response check failed",
         ResponseState.UNKNOWN: "no actual response evidence",
     }[observation.response_state]
-    update = (
-        "CLI update available"
-        if observation.update_state is UpdateState.UPDATE_AVAILABLE
-        else "no CLI update evidence"
-    )
     issues = f", issues: {', '.join(observation.issues)}" if observation.issues else ""
+    if observation.health is Health.UNKNOWN and observation.response_state is ResponseState.UNKNOWN:
+        return f"{observation.display_name}: no verified response yet ({freshness}{work}){issues}"
     return (
         f"{observation.display_name} on {observation.machine}: {observation.presence.value}, "
         f"{observation.activity.value}, {observation.health.value} ({freshness}{work}); "
-        f"CLI probe is installation/reachability only; {response}; {update}{issues}"
+        f"{response}{issues}"
     )
+
+
+def explain_response_check(agent_id: str, result: AgentSnapshot | ControlError) -> str:
+    """Answer a follow-up about one fixed-response check without inference."""
+    if isinstance(result, ControlError):
+        return f"RAP cannot read {agent_id}'s response-check state ({result.code})."
+    observation = result.observation
+    name = observation.display_name
+    if observation.response_state is ResponseState.PENDING:
+        return f"Yes. RAP's fixed response check for {name} is running now and awaiting its exact reply."
+    if observation.response_state is ResponseState.RESPONDED:
+        return f"No further check is running: {name} already returned RAP's exact fixed reply."
+    if observation.response_state is ResponseState.FAILED:
+        return f"No. No response check is running now; {name}'s last fixed response check failed."
+    return f"No response check is running for {name}, and RAP has not received a verified reply."
 
 
 def _select(
@@ -75,24 +94,32 @@ async def _append_response_check_rows(
     selected: Mapping[str, AgentSnapshot | ControlError],
     control_plane,
     request_response_check: Callable[[str], Awaitable[object]] | None,
-) -> None:
-    """Start a fixed-response self-check for every selected backend and report it.
-
-    ``request_response_check`` starts an async job; its terminal result
-    (RESPONDED/FAILED) is reported on a later query, once the harness's
-    lifecycle event lands -- this call can only ever report that the check
-    is pinging, was refused (already busy or unreachable -- itself real
-    evidence), or could not be started. There is no way to make this
-    synchronous without misrepresenting a probe as an actual reply.
-    """
+) -> dict[str, AgentSnapshot | ControlError]:
+    """Run bounded fixed-response checks and return their evidence snapshots."""
     checker = request_response_check or control_plane.request_response_check
     checks = await asyncio.gather(*(checker(backend) for backend in selected))
+    resolved = dict(selected)
     for backend, check in zip(selected, checks, strict=True):
         if isinstance(check, JobHandle):
-            rows.append(f"{backend}: fixed-response self-check is pinging")
+            outcome = await control_plane.wait_for_response_check(check.job_id)
+            # A non-live test/double handle has no waiter. Preserve the
+            # established pending wording and do not replace the selected
+            # snapshot with unrelated registry state.
+            if outcome is None:
+                rows.append(f"{backend}: fixed-response self-check is pinging")
+                continue
+            # The selected snapshot predates the new check. Re-read control
+            # state once it settles so the user sees this result, never an old
+            # stale failure. Test doubles may not retain the live handle.
+            current = await control_plane.get_agent_status(backend, refresh=False)
+            if isinstance(current, AgentSnapshot):
+                resolved[backend] = current
+            elif isinstance(outcome, ControlError):
+                rows.append(f"{backend}: response check is still pending after its timeout")
         else:
             detail = check.error.detail if check.error else "self-check was not started"
             rows.append(f"{backend}: fixed-response self-check not started ({detail})")
+    return resolved
 
 
 async def collect_rollcall_rows(
@@ -104,12 +131,14 @@ async def collect_rollcall_rows(
 ) -> tuple[list[str], str | None]:
     """Return ``(rows, missing_message)``; ``rows`` is empty exactly when nothing matched.
 
-    Always starts a real fixed-response self-check alongside the
-    reachability probe for every matched backend -- "status" is the phrase
-    people actually use for this, and a version probe alone answers "is it
-    installed," never "is it actually responding, busy, or rate-limited."
+    Always starts a real fixed-response self-check for every matched backend
+    -- "status" is the phrase people actually use for this, and installation
+    discovery alone answers neither readiness nor account health.
     """
-    results = await control_plane.list_agents(refresh=True)
+    # A named question must not refresh, display, or launch checks for every
+    # configured harness.  ``list_agents`` is only appropriate when the user
+    # explicitly asks about the group.
+    results = await _fresh_results(control_plane, agent)
     selected = _select(results, agent, excluded=excluded)
     if not selected:
         missing = (
@@ -122,8 +151,12 @@ async def collect_rollcall_rows(
             )
         )
         return [], missing
+    check_rows: list[str] = []
+    selected = await _append_response_check_rows(
+        check_rows, selected, control_plane, request_response_check
+    )
     rows = [control_summary(backend, snapshot) for backend, snapshot in selected.items()]
-    await _append_response_check_rows(rows, selected, control_plane, request_response_check)
+    rows.extend(check_rows)
     return rows, None
 
 
@@ -133,9 +166,7 @@ def format_rollcall(rows: list[str], missing: str | None) -> str:
         return f"[Agent roll call: {missing}. Answer from this; do not start any new work.]"
     listed = "; ".join(rows)
     return (
-        f"[Agent roll call: {listed}. This is Remote Agent Protocol's own check of each "
-        "backend -- whether it can be started here and whether its machine is answering -- "
-        "not a reply from the agents themselves. Report it as such, briefly, and do not "
+        f"[Agent roll call: {listed}. Report only the response evidence, briefly, and do not "
         "start any new work.]"
     )
 
@@ -148,17 +179,31 @@ async def collect_diagnostic_rows(
     request_response_check: Callable[[str], Awaitable[object]] | None = None,
 ) -> tuple[list[str], str | None]:
     """Return ``(rows, missing_message)`` for an agent diagnostic report."""
-    results = await control_plane.list_agents(refresh=True)
+    results = await _fresh_results(control_plane, agent)
     selected = _select(results, agent)
     if not selected:
         missing = (
             f"there is no agent backend named '{agent}'" if agent else "no agents are configured"
         )
         return [], missing
+    check_rows: list[str] = []
+    # Diagnostics are status requests too. A successful executable lookup is
+    # never enough to answer whether an agent can perform useful work.
+    selected = await _append_response_check_rows(
+        check_rows, selected, control_plane, request_response_check
+    )
     rows = [control_summary(backend, snapshot) for backend, snapshot in selected.items()]
-    if actual_response:
-        await _append_response_check_rows(rows, selected, control_plane, request_response_check)
+    rows.extend(check_rows)
     return rows, None
+
+
+async def _fresh_results(
+    control_plane, agent: str | None
+) -> dict[str, AgentSnapshot | ControlError]:
+    """Refresh one named agent or the configured group the user requested."""
+    if agent is None:
+        return await control_plane.list_agents(refresh=True)
+    return {agent: await control_plane.get_agent_status(agent, refresh=True)}
 
 
 def format_diagnostic(rows: list[str], missing: str | None) -> str:

@@ -258,7 +258,12 @@ def _strip_fillers(lowered: str) -> str:
         if stripped != lowered:
             lowered = stripped.lstrip(", ")
             changed = True
-    return lowered
+    # Whisper-style transcripts commonly put a hesitation between the command
+    # verb and its object ("check uh the status of Hermes").  For command
+    # matching it carries no meaning, but leaving it in breaks otherwise
+    # anchored local-control grammar and sends a health question to the LLM.
+    lowered = re.sub(r"\b(?:uh|um|erm|er|ah)\b", "", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
 
 
 def is_local_runtime_time_query(text: str) -> bool:
@@ -565,6 +570,19 @@ _ACTUAL_RESPONSE_TERMS = re.compile(
     r"\b(?:actually respond(?:ing)?|actual response|confirm (?:an )?response|"
     r"self[ -]?check)\b"
 )
+_OPENCLAW_AUTH_TERMS = re.compile(
+    r"\b(?:re[ -]?auth(?:enticate|entication)?|auth(?:enticate|entication)?|"
+    r"log[ -]?in|sign[ -]?in)\b"
+)
+_COMMAND_REQUEST_TERMS = re.compile(r"\b(?:command|line|what|which|how|run)\b")
+
+# This command is verified against the installed OpenClaw CLI.  ``--force``
+# is intentionally absent: reauthentication should not remove an existing
+# profile unless the operator explicitly asks to replace it.
+OPENCLAW_OPENAI_REAUTH_GUIDANCE = (
+    "Run `openclaw models auth login --provider openai --device-code`. "
+    "If you need to replace a stuck or cached profile, append `--force`."
+)
 
 
 # Liveness asked about one named agent: the agent is the *object* of the check,
@@ -587,8 +605,9 @@ _LIVENESS_STATES = (
     # "running" is how people actually ask this out loud, and its absence sent
     # "tell me if it was running" to an agent instead of answering it here.
     r"(?:online|offline|up|alive|awake|available|responding|responsive|working"
-    r"|running|live|ok|okay|ready|there|active)"
+    r"|running|live|ok|okay|ready|there|active|functioning|operational)"
 )
+_LIVENESS_QUALIFIER = r"(?:\s+(?:correctly|properly|normally|as\s+expected))?"
 
 
 def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None] | None:
@@ -621,6 +640,23 @@ def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None
         if _ROLLCALL_VERBS.search(lowered):
             return (None,)
         return None
+    # "Check if Hermes and OpenClaw are currently working" is a status read
+    # about two peers, not an instruction for either peer to investigate the
+    # other.  Use the full roll call here; this parser intentionally returns
+    # one target or the all-agents sentinel, and the coordinator owns the
+    # evidence for every configured harness.
+    named_agents = {
+        aliases[alias] for alias in aliases if re.search(rf"\b{re.escape(alias)}\b", lowered)
+    }
+    multi_target_liveness = re.fullmatch(
+        rf"(?:(?:is|are)\s+|check(?:\s+(?:if|whether))?\s+|"
+        rf"(?:tell me|let me know)(?:\s+(?:if|whether))?\s+)"
+        rf".+?(?:\s+(?:is|are))?(?:\s+(?:still|currently))?\s+{_LIVENESS_STATES}"
+        rf"{_LIVENESS_QUALIFIER}",
+        lowered,
+    )
+    if len(named_agents) > 1 and multi_target_liveness:
+        return (None,)
     for alias in sorted(aliases, key=len, reverse=True):
         name = re.escape(alias)
         patterns = (
@@ -632,7 +668,10 @@ def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None
             # "and make sure it still works" is the same question restated, not
             # a second errand -- the usual way people ask for a liveness check.
             rf"(?:\s+and\s+(?:confirm|report|tell me|let me know|see|make sure)\b.*)?$",
-            rf"^(?:is|are)\s+(?:the\s+)?{name}\s+(?:still\s+)?{_LIVENESS_STATES}$",
+            rf"^(?:is|are)\s+(?:the\s+)?{name}\s+(?:still\s+)?{_LIVENESS_STATES}"
+            rf"{_LIVENESS_QUALIFIER}$",
+            rf"^check\s+(?:if|whether)\s+(?:the\s+)?{name}\s+(?:is\s+)?"
+            rf"(?:still\s+)?{_LIVENESS_STATES}{_LIVENESS_QUALIFIER}$",
             rf"^(?:tell me|let me know)\s+(?:if|whether)\s+(?:the\s+)?{name}\s+"
             rf"(?:is|was)\s+(?:still\s+)?{_LIVENESS_STATES}\b.*$",
             rf"^{name}(?:'s)?\s+{_LIVENESS_NOUNS}$",
@@ -642,6 +681,51 @@ def parse_agent_rollcall(text: str, aliases: dict[str, str]) -> tuple[str | None
         if any(re.fullmatch(pattern, lowered) for pattern in patterns):
             return (aliases[alias],)
     return None
+
+
+def is_agent_liveness_followup(text: str) -> bool:
+    """Recognize a correction of the immediately preceding liveness request.
+
+    This is deliberately context-free: callers must require a remembered
+    named target before acting on it.  That lets "check again" remain a RAP
+    control-plane request without turning an unrelated later sentence into a
+    health check.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    lowered = re.sub(r"[-_]+", " ", lowered)
+    lowered = re.sub(r"[,;]+", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    return any(
+        re.fullmatch(pattern, lowered) is not None
+        for pattern in (
+            r"(?:please\s+)?(?:check|test|try|verify|confirm)(?:\s+(?:it|that|them))?\s+again",
+            r"(?:no\s+)?(?:i\s+)?(?:need|want)\s+(?:you|rap|the\s+(?:app|system))\s+to\s+"
+            r"(?:check|test|verify|confirm)\b.*",
+            r"(?:(?:jesus\s+christ|no)\s+)*(?:you|rap|the\s+(?:app|system))\s+"
+            r"(?:do|check|test|verify)(?:\s+(?:it|that|them))?",
+        )
+    )
+
+
+def is_agent_response_check_followup(text: str) -> bool:
+    """Whether a short follow-up asks what the remembered response check means.
+
+    Callers must pair this with a named liveness target. It keeps questions
+    such as "is it returning an all-clear?" grounded in RAP's recorded state
+    instead of asking the chat model to interpret it.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    lowered = re.sub(r"[-_]+", " ", lowered)
+    lowered = re.sub(r"[,;]+", " ", lowered)
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    return any(
+        re.fullmatch(pattern, lowered) is not None
+        for pattern in (
+            r"(?:what does (?:that|it) mean|what does that tell (?:us|you)|explain (?:that|it))",
+            r"(?:is|are) (?:it|they|the check) (?:still )?(?:in (?:the )?process|running|pending)\b.*",
+            r"(?:is|are) (?:it|they|the check)\b.*(?:returning|all clear|response)\b.*",
+        )
+    )
 
 
 def parse_agent_diagnostic(text: str, aliases: dict[str, str]) -> tuple[str | None, bool] | None:
@@ -678,6 +762,25 @@ def parse_agent_diagnostic(text: str, aliases: dict[str, str]) -> tuple[str | No
     if named is None and not _AGENT_NOUNS.search(lowered):
         return None
     return named, actual_response
+
+
+def is_openclaw_auth_command_request(text: str, aliases: dict[str, str]) -> bool:
+    """Whether the user wants the local OpenClaw sign-in command, not a probe.
+
+    An authentication word is otherwise a useful diagnostic signal, but a
+    request for the *command* to sign in must stay local.  Treating it as a
+    health check both avoids the answer and can launch an unrelated agent job.
+    """
+    lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
+    lowered = re.sub(r"[-_]+", " ", lowered)
+    names = [
+        alias
+        for alias, backend in aliases.items()
+        if backend == "openclaw" and re.search(rf"\b{re.escape(alias)}\b", lowered)
+    ]
+    return bool(
+        names and _OPENCLAW_AUTH_TERMS.search(lowered) and _COMMAND_REQUEST_TERMS.search(lowered)
+    )
 
 
 _STATUS_PHRASES = re.compile(

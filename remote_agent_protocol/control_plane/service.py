@@ -67,6 +67,7 @@ class AgentControlPlane:
         probe_timeout_secs: float = 4.0,
         overall_timeout_secs: float = 8.0,
         freshness_secs: float = 45.0,
+        response_check_timeout_secs: float = 45.0,
     ):
         self._adapters = dict(adapters)
         self.registry = registry or AgentRegistry()
@@ -74,11 +75,13 @@ class AgentControlPlane:
         self._probe_timeout_secs = probe_timeout_secs
         self._overall_timeout_secs = overall_timeout_secs
         self._freshness_secs = freshness_secs
+        self._response_check_timeout_secs = response_check_timeout_secs
         self._refresh_tasks: dict[str, asyncio.Task[AgentSnapshot | ControlError]] = {}
         self._jobs: dict[str, ObservedWork] = {}
         self._job_agents: dict[str, str] = {}
         self._self_checks: dict[str, str] = {}
         self._self_check_agents: set[str] = set()
+        self._response_check_waiters: dict[str, asyncio.Future[ResponseState]] = {}
 
     @property
     def agent_ids(self) -> tuple[str, ...]:
@@ -239,9 +242,9 @@ class AgentControlPlane:
     async def request_response_check(self, agent_id: str) -> JobHandle | ControlResult:
         """Ask one idle harness for a fixed response through ``AgentBridge``.
 
-        A version probe only proves that the installed executable answered a
-        local command. This check is deliberately separate and its terminal
-        lifecycle event is the sole source of ``response_state`` evidence.
+        Installation discovery does not establish readiness. This check is
+        deliberately separate and its terminal lifecycle event is the sole
+        source of ``response_state`` evidence.
         """
         adapter = self._adapters.get(agent_id)
         if adapter is None:
@@ -271,13 +274,13 @@ class AgentControlPlane:
             if isinstance(snapshot, ControlError):
                 return ControlResult(False, agent_id, error=snapshot)
             observation = snapshot.observation
-            if observation.presence is not Presence.REACHABLE:
+            if observation.presence in {Presence.STOPPED, Presence.UNREACHABLE}:
                 return ControlResult(
                     False,
                     agent_id,
                     error=ControlError(
                         "unreachable",
-                        "The installation probe did not reach this harness; no response check was sent.",
+                        "The harness is unavailable; no response check was sent.",
                         agent_id,
                     ),
                 )
@@ -319,6 +322,9 @@ class AgentControlPlane:
                 )
                 return dispatched
             self._self_checks[dispatched.job_id] = agent_id
+            self._response_check_waiters[dispatched.job_id] = (
+                asyncio.get_running_loop().create_future()
+            )
             reserved_job_id = dispatched.job_id
             now = datetime.now(UTC)
             await self._record_response_result(
@@ -341,6 +347,33 @@ class AgentControlPlane:
                 if reserved_job_id:
                     self._self_checks.pop(reserved_job_id, None)
                 self._self_check_agents.discard(agent_id)
+
+    async def wait_for_response_check(self, job_id: str) -> ResponseState | ControlError | None:
+        """Wait a bounded interval for one fixed-response check to finish.
+
+        ``None`` means the caller supplied a non-live test/double handle. A
+        timeout is explicit evidence, not a claim that the harness replied.
+        """
+        waiter = self._response_check_waiters.get(job_id)
+        if waiter is None:
+            return None
+        try:
+            return await asyncio.wait_for(asyncio.shield(waiter), self._response_check_timeout_secs)
+        except TimeoutError:
+            return ControlError(
+                "response_timeout",
+                "The fixed response check did not finish before its timeout.",
+                self._self_checks.get(job_id, ""),
+                retryable=True,
+            )
+        finally:
+            # This is the sole real consumer of a dispatched waiter (every
+            # JobHandle path in _append_response_check_rows calls this
+            # exactly once), so once it has been claimed -- resolved or
+            # timed out -- nothing else needs the entry. Popped here rather
+            # than in _complete_response_check, which can otherwise race
+            # ahead of this call and discard the result before it is read.
+            self._response_check_waiters.pop(job_id, None)
 
     async def cancel_job(self, job_id: str, *, external_confirmed: bool = False) -> ControlResult:
         work = self._jobs.get(job_id)
@@ -424,7 +457,17 @@ class AgentControlPlane:
         previous = await self.registry.get(agent_id)
         previous_observation = previous.observation if previous else None
         failure_kind = str(event.get("failure_kind") or "")
-        health = Health.DEGRADED if failure_kind in _DEGRADED_FAILURE_KINDS else Health.HEALTHY
+        health = (
+            Health.DEGRADED
+            if failure_kind in _DEGRADED_FAILURE_KINDS
+            else Health.FAILED
+            if status == "failed"
+            else Health.HEALTHY
+            if status == "done"
+            else previous_observation.health
+            if previous_observation
+            else Health.UNKNOWN
+        )
         observation = AgentObservation(
             agent_id=agent_id,
             display_name=previous_observation.display_name if previous_observation else agent_id,
@@ -503,6 +546,7 @@ class AgentControlPlane:
                 ResponseState.RESPONDED,
                 "RAP received the exact fixed response from this harness.",
             )
+            self._complete_response_check(job_id, ResponseState.RESPONDED)
             return
         reason = _response_failure_reason(failure_kind)
         await self._record_response_result(
@@ -511,6 +555,20 @@ class AgentControlPlane:
             reason,
             failure_kind=failure_kind or "unexpected_response",
         )
+        self._complete_response_check(job_id, ResponseState.FAILED)
+
+    def _complete_response_check(self, job_id: str, state: ResponseState) -> None:
+        """Release any diagnostic turn waiting for this exact terminal result.
+
+        Does not pop the dict entry: a bridge event can arrive before
+        wait_for_response_check has been called for this job_id (a fast
+        harness, or the test double timing this exercises), and that call
+        must still find the already-resolved future. wait_for_response_check
+        itself pops once it has claimed the result.
+        """
+        waiter = self._response_check_waiters.get(job_id)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(state)
 
     async def _record_response_result(
         self,
@@ -521,7 +579,7 @@ class AgentControlPlane:
         current_work: ObservedWork | None = None,
         failure_kind: str = "",
     ) -> None:
-        """Persist a bounded self-check fact while retaining CLI probe evidence."""
+        """Persist a bounded self-check fact while retaining discovery evidence."""
         now = datetime.now(UTC)
         previous = await self.registry.get(agent_id)
         base = (
@@ -534,6 +592,8 @@ class AgentControlPlane:
             if failure_kind in _DEGRADED_FAILURE_KINDS
             else Health.FAILED
             if response_state is ResponseState.FAILED
+            else Health.HEALTHY
+            if response_state is ResponseState.RESPONDED
             else base.health
         )
         observation = replace(

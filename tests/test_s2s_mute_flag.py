@@ -27,6 +27,7 @@ def make_app(muted=False):
 def test_mute_command_is_atomic_and_generation_tagged(monkeypatch, tmp_path):
     command = tmp_path / "mute.json"
     monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(command))
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_STATUS_FILE", str(tmp_path / "mute-status.json"))
     app = make_app()
 
     assert app._write_s2s_mute_command(True) == 1
@@ -34,9 +35,27 @@ def test_mute_command_is_atomic_and_generation_tagged(monkeypatch, tmp_path):
     assert list(tmp_path.glob("*.tmp")) == []
 
 
-def test_startup_ack_reconciles_readiness_without_changing_confirmed_state(
-    monkeypatch, tmp_path
-):
+def test_mute_command_advances_past_a_newer_external_acknowledgement(monkeypatch, tmp_path):
+    command = tmp_path / "mute.json"
+    status = tmp_path / "mute-status.json"
+    status.write_text(
+        json.dumps({"generation": 9001, "muted": True, "state": "ready"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(command))
+    monkeypatch.setattr(cfg, "S2S_MIC_MUTE_STATUS_FILE", str(status))
+    app = make_app()
+
+    generation = app._write_s2s_mute_command(False)
+
+    assert generation > 9001
+    assert json.loads(command.read_text(encoding="utf-8")) == {
+        "generation": generation,
+        "muted": False,
+    }
+
+
+def test_startup_ack_reconciles_readiness_without_changing_confirmed_state(monkeypatch, tmp_path):
     status = tmp_path / "mute-status.json"
     status.write_text(
         json.dumps({"generation": 42, "muted": True, "state": "ready"}),

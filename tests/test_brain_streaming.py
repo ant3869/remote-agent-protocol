@@ -5,7 +5,9 @@ sentence boundaries. Delegation markers must never reach the speakers.
 """
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -21,6 +23,7 @@ from remote_agent_protocol.control_plane.models import (
     JobHandle,
     ObservedWork,
     Presence,
+    ResponseState,
     WorkOwnership,
 )
 from remote_agent_protocol.personas import PERSONAS
@@ -86,6 +89,107 @@ def _control_snapshot(*, activity=Activity.IDLE, current_work=None):
 
 async def _collect(brain, text="hello"):
     return [piece async for piece in brain.complete_stream(text)]
+
+
+@pytest.mark.asyncio
+async def test_internal_response_check_never_reaches_durable_conversation_hub(monkeypatch):
+    brain = _brain(monkeypatch, [])
+    brain._control_plane.ingest_bridge_event = AsyncMock()
+    brain._conversation_hub.handle_job_event = AsyncMock()
+    event = {
+        "type": "agent_job",
+        "event": "finished",
+        "job_id": "job-1",
+        "agent": "hermes",
+        "status": "done",
+        "result": "RAP_SELF_CHECK_OK",
+        "internal": True,
+    }
+
+    brain._on_agent_event(event)
+    await asyncio.sleep(0)
+
+    brain._control_plane.ingest_bridge_event.assert_awaited_once_with(event)
+    brain._conversation_hub.handle_job_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text",
+    (
+        "is hermes working correctly?",
+        "Can you check uh the status of Hermes?",
+        "check again",
+        "no i need you to check they cant check themselves",
+        "jesus christ, no, you do it",
+    ),
+)
+async def test_liveness_requests_and_corrections_stay_in_rap(monkeypatch, text):
+    brain = _brain(monkeypatch, ["Ignored."])
+    checks = []
+
+    async def local_check(agent=None, *, excluded=None):
+        checks.append((agent, excluded))
+        return "[RAP local response check; do not start any new work.]"
+
+    async def delegation_must_not_run(_text):
+        raise AssertionError("liveness controls must never enter delegation routing")
+
+    monkeypatch.setattr(brain, "_handle_agent_rollcall", local_check)
+    monkeypatch.setattr(brain, "_resolve_delegation", delegation_must_not_run)
+    if text != "is hermes working correctly?":
+        brain._last_liveness_agent = "hermes"
+
+    await _collect(brain, text)
+
+    assert checks == [("hermes", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_liveness_followup_only_applies_to_the_very_next_turn(monkeypatch):
+    """An unrelated intervening turn must clear the remembered agent.
+
+    Left sticky for the rest of the session, an ordinary later request that
+    happens to resemble the followup phrasing -- "I need you to verify this
+    address for me" -- would be silently hijacked into re-checking whatever
+    agent was last asked about, turns later and on an unrelated topic.
+    """
+    brain = _brain(monkeypatch, ["Ignored."])
+    rollcalls = []
+
+    async def local_check(agent=None, *, excluded=None):
+        rollcalls.append(agent)
+        return "[RAP local response check; do not start any new work.]"
+
+    monkeypatch.setattr(brain, "_handle_agent_rollcall", local_check)
+    brain._last_liveness_agent = "hermes"
+
+    await _collect(brain, "what's the weather like today")
+    assert brain._last_liveness_agent is None
+
+    await _collect(brain, "i need you to verify this address for me")
+
+    assert rollcalls == []
+
+
+@pytest.mark.asyncio
+async def test_response_check_clarification_uses_recorded_control_plane_state(monkeypatch):
+    brain = _brain(monkeypatch, ["Ignored."])
+    brain._last_liveness_agent = "hermes"
+    pending = _control_snapshot()
+    pending = AgentSnapshot(replace(pending.observation, response_state=ResponseState.PENDING))
+    brain._control_plane.get_agent_status = AsyncMock(return_value=pending)
+    brain._resolve_delegation = AsyncMock(side_effect=AssertionError("must stay local"))
+
+    response = "".join(
+        await _collect(brain, "is it in the process of returning an all clear message?")
+    )
+
+    assert (
+        response
+        == "Yes. RAP's fixed response check for Hermes is running now and awaiting its exact reply."
+    )
+    brain._control_plane.get_agent_status.assert_awaited_once_with("hermes", refresh=False)
 
 
 @pytest.mark.asyncio

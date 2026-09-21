@@ -172,6 +172,10 @@ class BrainSession:
             self._bridge, agent_registry, self._on_agent_event
         )
         self._pending_routing_source: str | None = None
+        # A bare correction such as "check again" is meaningful only after a
+        # named local liveness request. Keep the target in this session so the
+        # correction cannot fall through to model-generated delegation.
+        self._last_liveness_agent: str | None = None
         # job_id -> (channel_id, task_id) for every dispatch routed through
         # the conversation hub (see _dispatch_via_hub). _announce_agent_job
         # consults this to relay the hub's own ResultPresenter envelope
@@ -409,8 +413,33 @@ class BrainSession:
             self._direct_reply = datetime.now().strftime("It is %I:%M %p on %A, %B %d, %Y, sir.")
             return "[Current local time supplied by the host; do not start any new work.]"
 
+        if voice_commands.is_openclaw_auth_command_request(text, cfg.AGENT_SPOKEN_ALIASES):
+            self._control_turn = True
+            self._direct_reply = voice_commands.OPENCLAW_OPENAI_REAUTH_GUIDANCE
+            return "[OpenClaw authentication command supplied by RAP; do not start any new work.]"
+
+        if self._last_liveness_agent is not None and voice_commands.is_agent_liveness_followup(
+            text
+        ):
+            return await self._handle_agent_rollcall(self._last_liveness_agent)
+
+        if (
+            self._last_liveness_agent is not None
+            and voice_commands.is_agent_response_check_followup(text)
+        ):
+            return await self._handle_agent_response_check_followup(self._last_liveness_agent)
+
+        # A followup is only recognized in the turn immediately after a
+        # liveness/diagnostic/roll-call question (docstring contract on
+        # is_agent_liveness_followup). Anything else consumes the slot so an
+        # unrelated later turn -- "I need you to verify this address" -- can
+        # never be hijacked into re-checking a stale remembered agent.
+        self._last_liveness_agent = None
+
         diagnostic = voice_commands.parse_agent_diagnostic(text, cfg.AGENT_SPOKEN_ALIASES)
         if diagnostic is not None:
+            if diagnostic[0] is not None:
+                self._last_liveness_agent = diagnostic[0]
             return await self._handle_agent_diagnostic(*diagnostic)
 
         # A selection correction must not approve the old backend merely
@@ -447,6 +476,8 @@ class BrainSession:
         # check, not approval of an unrelated pending delegation.
         rollcall = voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES)
         if rollcall is not None:
+            if rollcall[0] is not None:
+                self._last_liveness_agent = rollcall[0]
             return await self._handle_agent_rollcall(rollcall[0])
         status_request = voice_commands.parse_agent_status(text, cfg.AGENT_SPOKEN_ALIASES)
         if status_request is not None:
@@ -593,6 +624,13 @@ class BrainSession:
         )
         self._direct_reply = f"{summary}."
         return f"[Agent status: {summary}. Answer from this; do not start any new work.]"
+
+    async def _handle_agent_response_check_followup(self, agent: str) -> str:
+        """Answer a check-state clarification from RAP's recorded evidence."""
+        self._control_turn = True
+        snapshot = await self._control_plane.get_agent_status(agent, refresh=False)
+        self._direct_reply = agent_status.explain_response_check(agent, snapshot)
+        return "[RAP supplied the current fixed-response-check state; do not start any new work.]"
 
     def _take_direct_reply(self) -> str | None:
         """Return one evidence-bound reply without giving the chat model room to alter it."""
@@ -1121,10 +1159,14 @@ class BrainSession:
                 self._control_plane.ingest_bridge_event(event),
                 name=f"control-plane-{event.get('job_id', 'event')}",
             )
+            if event.get("internal"):
+                # A fixed response check is control-plane evidence, never a
+                # conversation result.  In particular, fresh bridge job IDs
+                # can resemble persisted IDs after a restart, so sending an
+                # internal check through the hub could revive unrelated work.
+                return
             # Independent state machine from the control plane above, over
-            # the same bridge events: an internal (pre-Task-6 diagnostic)
-            # job was never dispatched through the hub, so this is naturally
-            # a no-op for it (_task_by_job_id finds nothing) -- not a bug.
+            # the same bridge events.
             job_id = event.get("job_id")
             hub_task = asyncio.create_task(
                 self._conversation_hub.handle_job_event(event),
@@ -1137,8 +1179,6 @@ class BrainSession:
                 hub_task.add_done_callback(
                     lambda _task, jid=job_id: self._hub_job_event_tasks.pop(jid, None)
                 )
-            if event.get("internal"):
-                return
         self._emit(event)
         if event.get("type") == "agent_conversation" and event.get("event") == (
             BUTLER_INTERVENTION_STARTED

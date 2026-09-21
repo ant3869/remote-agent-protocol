@@ -476,6 +476,7 @@ MEM0_SEARCH_THRESHOLD = 0.1
 # GUI/brain session. Automated tests build their own backend dicts rather
 # than reading this one, so they are unaffected either way.
 AGENT_MOCK_BACKEND_ENABLED = _env_bool("AGENT_MOCK_BACKEND_ENABLED", False)
+OPENCLAW_AGENT_ID = _env("OPENCLAW_AGENT_ID", "jax").strip() or "jax"
 
 AGENT_BACKENDS = {
     **(
@@ -490,22 +491,20 @@ AGENT_BACKENDS = {
     # 8191-character command-line limit. RAP's orchestration prompt can exceed
     # that limit, so pass it through each CLI's native UTF-8 prompt-file option.
     "hermes": ["hermes", "chat", "--query-file", "{task_file}"],
-    # OpenClaw -- "agent exec" is a headless, isolated one-shot turn (no
-    # gateway/messaging channel involved). Verified live 2026-09-13: it runs
-    # tool calls without an interactive approval prompt, so like hermes-yolo
-    # before it, nothing gates its file/shell calls -- powerful and DANGEROUS,
-    # pick it knowingly. --state-dir points at a persistent directory instead
-    # of OpenClaw's default per-run temp dir, whose delete-on-cleanup step hit
-    # a Windows EBUSY error and turned an otherwise-successful turn into a
-    # reported failure (same live check); that directory must already exist.
+    # OpenClaw -- use the configured gateway agent, which exercises the same
+    # provider, credentials, and runtime as the interactive OpenClaw session.
+    # The isolated ``agent exec`` path keeps separate state and can fail even
+    # while the real gateway agent is answering normally. OpenClaw can run
+    # tool calls without an interactive approval prompt, so it remains an
+    # elevated backend. The native prompt-file option avoids Windows' command
+    # length limit.
     "openclaw": [
         "openclaw",
         "agent",
-        "exec",
+        "--agent",
+        OPENCLAW_AGENT_ID,
         "--message-file",
         "{task_file}",
-        "--state-dir",
-        str(DATA_DIR / "openclaw_state"),
     ],
     # Code Puppy -- best for CODING tasks in a repo (pair with a working dir).
     # Deliberately stateless. --quick-resume looks up the newest session for the
@@ -530,7 +529,6 @@ AGENT_BACKENDS = {
     ],
     **_parse_command_map(_env("AGENT_BACKENDS_JSON", ""), "AGENT_BACKENDS_JSON"),
 }
-(DATA_DIR / "openclaw_state").mkdir(parents=True, exist_ok=True)
 
 # AGENT_HERMES_SESSION_MAX_TURNS: every "hermes" job resumes the SAME shared
 # on-disk session (agent_bridge.py's _HERMES_SESSION_AGENTS), so its context
@@ -738,7 +736,7 @@ AGENT_WORKSPACE_DIR = _env("AGENT_WORKSPACE_DIR", str(DATA_DIR / "agent_workspac
 # processes stop rediscovering the same facts. Borrowed notes are always
 # labelled untrusted -- another agent wrote them.
 AGENT_COMMONS_ENABLED = _env_bool("AGENT_COMMONS_ENABLED", True)
-# Backends whose command line disables tool approval -- openclaw agent exec,
+# Backends whose command line or runtime policy permits unattended tools -- OpenClaw,
 # codex --sandbox danger-full-access, claude -p --dangerously-skip-permissions.
 # Nothing gates their file and shell calls, so another agent's notes are never
 # pasted into their prompt (collab.briefing); they are told where the commons

@@ -750,13 +750,25 @@ class AgentRollCallTests(unittest.TestCase):
             "check code claude responsiveness": "claude-code",
             "is code puppy responding": "code-puppy",
             "is hermes still up": "hermes",
+            "is hermes working correctly": "hermes",
+            "is hermes functioning properly": "hermes",
             "hermes status": "hermes",
             "check on claude code": "claude-code",
+            "Can you check uh the status of Hermes?": "hermes",
+            "check whether Hermes is working correctly": "hermes",
         }
         for text, expected in cases.items():
             self.assertEqual(
                 voice_commands.parse_agent_rollcall(text, self.ALIASES), (expected,), text
             )
+
+    def test_multiple_named_agent_liveness_check_is_a_local_rollcall(self):
+        self.assertEqual(
+            voice_commands.parse_agent_rollcall(
+                "Check if Hermes and OpenClaw are currently working", self.ALIASES
+            ),
+            (None,),
+        )
 
     def test_real_work_is_never_mistaken_for_a_roll_call(self):
         for text in (
@@ -770,6 +782,22 @@ class AgentRollCallTests(unittest.TestCase):
             "",
         ):
             self.assertIsNone(voice_commands.parse_agent_rollcall(text, self.ALIASES), text)
+
+    def test_liveness_corrections_remain_local_only_with_a_remembered_target(self):
+        for text in (
+            "check again",
+            "no i need you to check they cant check themselves",
+            "jesus christ, no, you do it",
+        ):
+            self.assertTrue(voice_commands.is_agent_liveness_followup(text), text)
+
+    def test_response_check_clarifications_remain_local_with_a_remembered_target(self):
+        for text in (
+            "what does that mean?",
+            "is it in the process of returning an all clear message?",
+            "is the check still running?",
+        ):
+            self.assertTrue(voice_commands.is_agent_response_check_followup(text), text)
 
 
 class AgentDiagnosticPhrasingTests(unittest.TestCase):
@@ -799,6 +827,25 @@ class AgentDiagnosticPhrasingTests(unittest.TestCase):
             "Tell code puppy to check whether the website is rate limited",
         ):
             self.assertIsNone(voice_commands.parse_agent_diagnostic(text, self.ALIASES), text)
+
+
+class OpenClawAuthenticationCommandTests(unittest.TestCase):
+    ALIASES = {"openclaw": "openclaw", "open claw": "openclaw"}
+
+    def test_reauthentication_command_request_is_not_an_agent_diagnostic(self):
+        text = "Uh can you find what the open claw line would be to re-auth Chat GPT?"
+
+        self.assertTrue(voice_commands.is_openclaw_auth_command_request(text, self.ALIASES))
+        self.assertEqual(
+            voice_commands.parse_agent_diagnostic(text, self.ALIASES), ("openclaw", False)
+        )
+
+    def test_authentication_status_question_is_not_mistaken_for_command_help(self):
+        self.assertFalse(
+            voice_commands.is_openclaw_auth_command_request(
+                "is OpenClaw authentication working", self.ALIASES
+            )
+        )
 
 
 class AgentCancelVerbTests(unittest.TestCase):

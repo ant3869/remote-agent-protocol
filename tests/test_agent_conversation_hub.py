@@ -254,6 +254,30 @@ async def test_job_progress_updates_task_without_creating_a_turn(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_job_id_collision_from_another_agent_cannot_touch_a_durable_task(tmp_path):
+    """A restarted bridge must not revive old work with a reused short job ID."""
+    hub, _registry, adapters = make_hub(tmp_path)
+    disposition = await hub.handle_turn(turn_request("OpenClaw, check my email"))
+    task = hub.task(disposition.task_id)
+    before = len(hub.turns("agent:openclaw"))
+
+    await hub.handle_job_event(
+        {
+            "type": "agent_job",
+            "agent": "hermes",
+            "job_id": task.attempt_id,
+            "status": "done",
+            "result": "RAP_SELF_CHECK_OK",
+            "result_is_fallback": True,
+        }
+    )
+
+    assert hub.task(disposition.task_id).status == "active"
+    assert len(hub.turns("agent:openclaw")) == before
+    assert adapters["openclaw"].dispatch_in_session.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_background_completion_does_not_steal_the_active_floor(tmp_path):
     """A finished background task is recorded under its owner without moving the floor."""
     hub, registry, adapters = make_hub(tmp_path)

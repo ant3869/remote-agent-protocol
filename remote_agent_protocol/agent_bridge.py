@@ -319,7 +319,7 @@ class AgentJob:
 
 
 def clean_session_template(template: list[str]) -> list[str]:
-    """Remove terminal resume selectors from verified headless CLI command forms.
+    """Remove terminal resume selectors from verified non-interactive command forms.
 
     Operate before task substitution, so user text is never interpreted as CLI
     options. Unknown wrappers and alternate command forms fail closed instead
@@ -359,12 +359,18 @@ def clean_session_template(template: list[str]) -> list[str]:
         selectors = {"--resume": 1, "-r": 1, "--quick-resume": 1, "-qr": 1}
         extra = []
         offset = 1
-    elif executable == "openclaw" and template[1:3] == ["agent", "exec"]:
-        selectors = {}
-        extra = []
-        offset = 3
+    elif (
+        executable == "openclaw"
+        and template[1:2] == ["agent"]
+        and template[1:3] != ["agent", "exec"]
+    ):
+        selectors = {"--session-id": 1, "--session-key": 1, "--to": 1}
+        # Keep health probes out of the operator's main conversation while
+        # exercising the same gateway, agent configuration, and provider.
+        extra = ["--session-key", "rap-self-check"]
+        offset = 2
     else:
-        raise ValueError("Clean sessions require a verified headless CLI command form")
+        raise ValueError("Clean sessions require a verified non-interactive CLI command form")
     cleaned = template[:offset]
     index = offset
     while index < len(template):

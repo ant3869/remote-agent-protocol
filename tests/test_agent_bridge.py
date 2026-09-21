@@ -26,13 +26,20 @@ class PureHelperTests(unittest.TestCase):
     def test_build_command_substitutes_task_file_without_putting_task_on_command_line(self):
         task = "x" * 20_000
         cmd = agent_bridge.build_command(
-            ["openclaw", "agent", "exec", "--message-file", "{task_file}"],
+            ["openclaw", "agent", "--agent", "jax", "--message-file", "{task_file}"],
             task,
             task_file="H:/agent-prompts/prompt.txt",
         )
         self.assertEqual(
             cmd,
-            ["openclaw", "agent", "exec", "--message-file", "H:/agent-prompts/prompt.txt"],
+            [
+                "openclaw",
+                "agent",
+                "--agent",
+                "jax",
+                "--message-file",
+                "H:/agent-prompts/prompt.txt",
+            ],
         )
         self.assertNotIn(task, cmd)
 
@@ -47,12 +54,38 @@ class PureHelperTests(unittest.TestCase):
 
     def test_default_windows_shim_backends_use_native_prompt_file_flags(self):
         self.assertEqual(cfg.AGENT_BACKENDS["hermes"][-2:], ["--query-file", "{task_file}"])
-        self.assertEqual(cfg.AGENT_BACKENDS["openclaw"][3:5], ["--message-file", "{task_file}"])
+        self.assertEqual(cfg.AGENT_BACKENDS["openclaw"][-2:], ["--message-file", "{task_file}"])
 
     def test_clean_session_template_accepts_a_task_file_placeholder(self):
         self.assertEqual(
             agent_bridge.clean_session_template(["hermes", "chat", "--query-file", "{task_file}"]),
             ["hermes", "chat", "--oneshot", "--query-file", "{task_file}"],
+        )
+
+    def test_clean_openclaw_session_uses_a_dedicated_gateway_session(self):
+        self.assertEqual(
+            agent_bridge.clean_session_template(
+                [
+                    "openclaw",
+                    "agent",
+                    "--agent",
+                    "jax",
+                    "--session-key",
+                    "agent:jax:main",
+                    "--message-file",
+                    "{task_file}",
+                ]
+            ),
+            [
+                "openclaw",
+                "agent",
+                "--session-key",
+                "rap-self-check",
+                "--agent",
+                "jax",
+                "--message-file",
+                "{task_file}",
+            ],
         )
 
     def test_build_command_inserts_model_override_after_executable(self):

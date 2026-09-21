@@ -8,12 +8,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from remote_agent_protocol import agent_status_reporting
 from remote_agent_protocol.control_plane.adapters.base import AgentTask
 from remote_agent_protocol.control_plane.adapters.cli import BridgeCliAdapter
 from remote_agent_protocol.control_plane.adapters.fake import FakeAgentAdapter
 from remote_agent_protocol.control_plane.models import (
     Activity,
     AgentObservation,
+    AgentSnapshot,
     ControlError,
     ControlResult,
     Evidence,
@@ -176,6 +178,7 @@ async def test_response_check_tracks_only_the_fixed_sentinel_as_actual_evidence(
     ]
     pending = await plane.get_agent_status("codex")
     assert pending.observation.response_state is ResponseState.PENDING
+    waiting = asyncio.create_task(plane.wait_for_response_check("self-check-1"))
     await plane.ingest_bridge_event(
         {
             "type": "agent_job",
@@ -192,6 +195,7 @@ async def test_response_check_tracks_only_the_fixed_sentinel_as_actual_evidence(
     assert confirmed.observation.evidence[0].detail == (
         "RAP received the exact fixed response from this harness."
     )
+    assert await waiting is ResponseState.RESPONDED
 
 
 @pytest.mark.asyncio
@@ -222,6 +226,34 @@ async def test_response_check_reports_rate_limit_without_persisting_agent_output
     assert result.observation.health is Health.DEGRADED
     assert "rate_limit" in result.observation.evidence[0].detail
     assert "provider prose" not in result.observation.evidence[0].detail
+
+
+@pytest.mark.asyncio
+async def test_rollcall_reports_the_result_of_its_new_response_check() -> None:
+    adapter = FakeAgentAdapter(
+        "codex",
+        probe=make_observation("codex"),
+        dispatch=JobHandle("self-check-rollcall", "codex"),
+    )
+    plane = AgentControlPlane({"codex": adapter})
+    rows_task = asyncio.create_task(agent_status_reporting.collect_rollcall_rows(plane, "codex"))
+    while not adapter.tasks:
+        await asyncio.sleep(0)
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "self-check-rollcall",
+            "agent": "codex",
+            "status": "done",
+            "result": SELF_CHECK_SENTINEL,
+        }
+    )
+
+    rows, missing = await rows_task
+
+    assert missing is None
+    assert rows == ["Codex: answered RAP's fixed response check (current)"]
 
 
 @pytest.mark.asyncio
@@ -355,3 +387,57 @@ async def test_bridge_cli_dispatch_forwards_internal_clean_session_flags() -> No
         clean_session=True,
         internal=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_cli_probe_reports_only_discovery_without_a_version_or_health_claim(
+    monkeypatch,
+) -> None:
+    bridge = SimpleNamespace(active_jobs=lambda _agent_id: ())
+    adapter = BridgeCliAdapter("hermes", bridge, display_name="Hermes", machine="Main PC")
+    adapter.executable = "hermes"
+    monkeypatch.setattr(
+        "remote_agent_protocol.control_plane.adapters.cli.shutil.which",
+        lambda _name: "C:/hermes.exe",
+    )
+
+    observation = await adapter.probe()
+
+    assert observation.presence is Presence.UNKNOWN
+    assert observation.activity is Activity.UNKNOWN
+    assert observation.health is Health.UNKNOWN
+    assert "version" not in observation.evidence[0].detail.lower()
+    assert "unverified" in observation.evidence[0].detail
+
+
+@pytest.mark.asyncio
+async def test_response_check_can_verify_an_installed_but_unverified_harness() -> None:
+    unverified = replace(
+        make_observation("codex"),
+        presence=Presence.UNKNOWN,
+        activity=Activity.UNKNOWN,
+        health=Health.UNKNOWN,
+    )
+    adapter = FakeAgentAdapter(
+        "codex", probe=unverified, dispatch=JobHandle("self-check-unverified", "codex")
+    )
+    plane = AgentControlPlane({"codex": adapter})
+
+    result = await plane.request_response_check("codex")
+
+    assert result == JobHandle("self-check-unverified", "codex")
+    assert adapter.calls == ["probe", "dispatch"]
+
+
+def test_unverified_discovery_never_formats_as_healthy() -> None:
+    unverified = replace(
+        make_observation("codex"),
+        presence=Presence.UNKNOWN,
+        activity=Activity.UNKNOWN,
+        health=Health.UNKNOWN,
+    )
+
+    summary = agent_status_reporting.control_summary("codex", AgentSnapshot(unverified))
+
+    assert "no verified response" in summary
+    assert "healthy" not in summary

@@ -212,6 +212,10 @@ class AgentVoiceStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_internal_diagnostic_lifecycle_is_control_plane_only(self):
         emitted = []
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA, on_event=emitted.append)
+        # Durable conversation channels are restored during construction. They
+        # are unrelated baseline lifecycle events, so this assertion observes
+        # only the internal response-check event below.
+        emitted.clear()
         lifecycle = RecordingLifecycleServer()
         voice_session._lifecycle_ws = lifecycle
         voice_session._control_plane.ingest_bridge_event = AsyncMock()

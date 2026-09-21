@@ -252,6 +252,9 @@ class VoiceSession:
         # talks about the agent because it answers an injected ack/update.
         self._agent_ack_turn = False
         self._last_user_text = ""
+        # A bare correction such as "check again" is meaningful only after a
+        # named local liveness request; otherwise it remains ordinary speech.
+        self._last_liveness_agent: str | None = None
         # Delegations the user denied this session (agent, normalized task),
         # newest last -- lets a repeated proposal be flagged in logs/GUI
         # instead of silently re-asking as if nothing happened.
@@ -1491,14 +1494,44 @@ class VoiceSession:
         if cancel_request is not None:
             return await self._handle_agent_cancel_command(cancel_request)
 
+        if voice_commands.is_openclaw_auth_command_request(text, cfg.AGENT_SPOKEN_ALIASES):
+            self._agent_ack_turn = True
+            return (
+                f"[OpenClaw authentication guidance: "
+                f"{voice_commands.OPENCLAW_OPENAI_REAUTH_GUIDANCE} "
+                "State this directly; do not start any new work.]"
+            )
+
+        if self._last_liveness_agent is not None and voice_commands.is_agent_liveness_followup(
+            text
+        ):
+            return await self._handle_agent_rollcall(self._last_liveness_agent)
+
+        if (
+            self._last_liveness_agent is not None
+            and voice_commands.is_agent_response_check_followup(text)
+        ):
+            return await self._handle_agent_response_check_followup(self._last_liveness_agent)
+
+        # A followup is only recognized in the turn immediately after a
+        # liveness/diagnostic/roll-call question (docstring contract on
+        # is_agent_liveness_followup). Anything else consumes the slot so an
+        # unrelated later turn -- "I need you to verify this address" -- can
+        # never be hijacked into re-checking a stale remembered agent.
+        self._last_liveness_agent = None
+
         diagnostic = voice_commands.parse_agent_diagnostic(text, cfg.AGENT_SPOKEN_ALIASES)
         if diagnostic is not None:
+            if diagnostic[0] is not None:
+                self._last_liveness_agent = diagnostic[0]
             return await self._handle_agent_diagnostic(*diagnostic)
 
         # Before the per-agent progress question: "is hermes up" asks whether
         # an agent can take work, not how an existing job is going.
         rollcall = voice_commands.parse_agent_rollcall(text, cfg.AGENT_SPOKEN_ALIASES)
         if rollcall is not None:
+            if rollcall[0] is not None:
+                self._last_liveness_agent = rollcall[0]
             return await self._handle_agent_rollcall(rollcall[0])
         status_request = voice_commands.parse_agent_status(text, cfg.AGENT_SPOKEN_ALIASES)
         if status_request is not None:
@@ -1587,6 +1620,13 @@ class VoiceSession:
             )
             + ". Answer from this; do not start any new work.]"
         )
+
+    async def _handle_agent_response_check_followup(self, agent: str) -> str:
+        """Keep a response-check clarification bound to recorded RAP evidence."""
+        self._agent_ack_turn = True
+        snapshot = await self._control_plane.get_agent_status(agent, refresh=False)
+        explanation = agent_status.explain_response_check(agent, snapshot)
+        return f"[RAP response-check explanation: {explanation} State this directly; do not start new work.]"
 
     async def _handle_task_correction(self, text: str, correction: str) -> str | None:
         if self._pending_confirmations:
@@ -2076,10 +2116,12 @@ class VoiceSession:
                 self._control_plane.ingest_bridge_event(event),
                 name=f"control-plane-{event.get('job_id', 'event')}",
             )
+            if event.get("internal"):
+                # A fixed response check is control-plane evidence, not user
+                # work. Keep it out of durable channels and transcript events.
+                return
             # Independent state machine from the control plane above, over
-            # the same bridge events: an internal (pre-Task-6 diagnostic)
-            # job was never dispatched through the hub, so this is naturally
-            # a no-op for it (_task_by_job_id finds nothing) -- not a bug.
+            # the same bridge events.
             job_id = event.get("job_id")
             hub_task = asyncio.create_task(
                 self._conversation_hub.handle_job_event(event),
@@ -2092,8 +2134,6 @@ class VoiceSession:
                 hub_task.add_done_callback(
                     lambda _task, jid=job_id: self._hub_job_event_tasks.pop(jid, None)
                 )
-            if event.get("internal"):
-                return
         self._emit(event)
         if self._lifecycle_ws is not None:
             self._lifecycle_ws.publish(event)
