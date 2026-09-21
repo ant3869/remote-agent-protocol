@@ -1,7 +1,13 @@
 """
-Mock agent backend -- pretends to be Hermes/OpenClaw for testing the bridge.
+Mock agent backend -- pretends to be Hermes/OpenClaw/Codex for testing the bridge.
 
 Usage: python scripts/mock_agent.py "<task text>"
+       python scripts/mock_agent.py -          # reads the task from stdin instead
+
+The "-" form mirrors codex's own convention (`codex exec --help`: "if not
+provided as an argument, or if `-` is used, instructions are read from
+stdin"), so a {task_stdin}-shaped backend template can be tested against a
+real subprocess and a real stdin pipe, not just a string substitution.
 
 Special task prefixes (for tests):
   sleep:<secs> ...   -> sleep that long between steps (cancel testing)
@@ -20,6 +26,9 @@ def main() -> int:
     # The bridge already reads this stream as UTF-8.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     task = sys.argv[1] if len(sys.argv) > 1 else "(no task)"
+    if task == "-":
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        task = sys.stdin.read().strip() or "(no task)"
     delay = 0.05
     if task.startswith("sleep:"):
         head, _, rest = task.partition(" ")

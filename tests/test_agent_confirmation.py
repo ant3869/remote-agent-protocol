@@ -1,9 +1,12 @@
 import asyncio
+import itertools
 import unittest
 
 from remote_agent_protocol import agent_bridge, personas
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import session as session_mod
+from remote_agent_protocol.conversation_hub.floor import FloorDecision
+from remote_agent_protocol.conversation_hub.service import TurnDisposition
 
 
 class FakeBridge:
@@ -22,6 +25,58 @@ class FakeBridge:
         self.started.append((agent, task, cwd))
 
 
+class _FakeTaskReference:
+    """Just enough of ``TaskReference`` for ``dispatch_via_hub`` to read ``attempt_id``."""
+
+    def __init__(self, attempt_id: str):
+        self.attempt_id = attempt_id
+
+
+class FakeHub:
+    """Stand-in for AgentConversationHub that records dispatches instead of routing.
+
+    Task 8 moved real dispatch off ``AgentBridge.start()`` and onto
+    ``AgentConversationHub.handle_turn()`` (session.py's ``_dispatch_via_hub`` ->
+    ``conversation_dispatch.dispatch_via_hub``). The real hub talks to real
+    control-plane adapters, which is real I/O this suite must never perform --
+    every test that reached dispatch through the production hub either failed
+    outright or hung indefinitely. This records what was asked for the same
+    way ``FakeBridge`` used to, at the seam the app now actually dispatches
+    through.
+    """
+
+    def __init__(self):
+        self.dispatched: list[tuple[str | None, str]] = []
+        self._ids = itertools.count(1)
+        self._attempts: dict[str, str] = {}
+
+    async def handle_turn(self, request) -> TurnDisposition:
+        self.dispatched.append((request.explicit_agent_id, request.text))
+        task_id = f"task-{next(self._ids)}"
+        attempt_id = f"attempt-{task_id}"
+        self._attempts[task_id] = attempt_id
+        agent_id = request.explicit_agent_id or "mock"
+        return TurnDisposition(
+            channel_id=f"agent:{agent_id}",
+            target_id=agent_id,
+            task_id=task_id,
+            floor_decision=FloorDecision(
+                kind="dispatch",
+                target_id=agent_id,
+                task_id=task_id,
+                requires_clarification=False,
+                requires_butler_selection=False,
+                reason_code="test",
+                next_floor_id=None,
+            ),
+            spoken_acknowledgment=None,
+        )
+
+    def task(self, task_id: str) -> _FakeTaskReference | None:
+        attempt_id = self._attempts.get(task_id)
+        return None if attempt_id is None else _FakeTaskReference(attempt_id)
+
+
 class ConfirmationGateTests(unittest.TestCase):
     def setUp(self):
         self.events: list[dict] = []
@@ -30,22 +85,29 @@ class ConfirmationGateTests(unittest.TestCase):
         )
         self.bridge = FakeBridge()
         self.session._bridge = self.bridge
+        self.hub = FakeHub()
+        self.session._conversation_hub = self.hub
 
     def _types(self):
         return [e.get("type") for e in self.events]
 
     def test_elevated_backend_alone_dispatches_immediately(self):
         # Picking hermes-yolo is itself the risk acknowledgment; a plain task
-        # runs right away instead of holding for confirmation.
+        # runs right away instead of holding for confirmation. A direct
+        # _delegate_ack call (bypassing _resolve_delegation) carries no fresh
+        # routing decision, so per the explicit_agent_id rule (session.py
+        # module docstring) the hub -- not this call's `agent` argument --
+        # picks the real executor; the ack names no agent for the same
+        # reason (DELEGATION_ACK_PENDING_SELECTION_PROMPT).
         async def scenario():
             ack = self.session._delegate_ack("hermes-yolo", "clean up downloads")
-            await asyncio.sleep(0.01)  # let the spawned start() run
+            await asyncio.sleep(0.01)  # let the spawned dispatch run
             return ack
 
         ack = asyncio.run(scenario())
-        self.assertIn("hermes-yolo", ack)
+        self.assertIn("clean up downloads", ack)
         self.assertEqual(self.session._pending_confirmations, {})
-        self.assertEqual(self.bridge.started, [("hermes-yolo", "clean up downloads", None)])
+        self.assertEqual(self.hub.dispatched, [(None, "clean up downloads")])
 
     def test_destructive_task_on_elevated_backend_is_still_held(self):
         self.session._delegate_ack("hermes-yolo", "delete the old files")
@@ -59,14 +121,16 @@ class ConfirmationGateTests(unittest.TestCase):
         self.assertEqual(self.bridge.started, [])
 
     def test_plain_task_dispatches_immediately(self):
+        # Same explicit_agent_id rule as above: a direct call names no fresh
+        # routing decision, so the hub -- not "mock" -- picks the executor.
         async def scenario():
             ack = self.session._delegate_ack("mock", "search the web for cats")
-            await asyncio.sleep(0.01)  # let the spawned start() run
+            await asyncio.sleep(0.01)  # let the spawned dispatch run
             return ack
 
         ack = asyncio.run(scenario())
-        self.assertIn("mock", ack)
-        self.assertEqual(self.bridge.started, [("mock", "search the web for cats", None)])
+        self.assertIn("search the web for cats", ack)
+        self.assertEqual(self.hub.dispatched, [(None, "search the web for cats")])
         self.assertEqual(self.session._pending_confirmations, {})
 
     def test_voice_deny_drops_the_held_job(self):
@@ -80,6 +144,9 @@ class ConfirmationGateTests(unittest.TestCase):
         self.assertEqual(resolved[-1]["decision"], "deny")
 
     def test_voice_approve_runs_the_held_job(self):
+        # Approval names the already-confirmed agent explicitly (session.py
+        # _maybe_consume_confirmation), unlike a fresh direct _delegate_ack
+        # call, so this ack and dispatch still carry "hermes".
         async def scenario():
             self.session._delegate_ack("hermes", "delete the old files")
             ack = self.session._maybe_consume_confirmation("yes, go ahead")
@@ -88,7 +155,7 @@ class ConfirmationGateTests(unittest.TestCase):
 
         ack = asyncio.run(scenario())
         self.assertIn("hermes", ack)
-        self.assertEqual(self.bridge.started, [("hermes", "delete the old files", None)])
+        self.assertEqual(self.hub.dispatched, [("hermes", "delete the old files")])
         self.assertEqual(self.session._pending_confirmations, {})
 
     def test_no_do_that_approves_the_held_job(self):
@@ -100,7 +167,7 @@ class ConfirmationGateTests(unittest.TestCase):
 
         ack = asyncio.run(scenario())
         self.assertIn("hermes", ack)
-        self.assertEqual(self.bridge.started, [("hermes", "delete the old files", None)])
+        self.assertEqual(self.hub.dispatched, [("hermes", "delete the old files")])
 
     def test_non_confirmation_reply_falls_through(self):
         self.session._delegate_ack("hermes", "delete the old files")
@@ -145,6 +212,8 @@ class SubAgentConfirmationRelaunchTests(unittest.TestCase):
         )
         self.bridge = FakeBridge()
         self.session._bridge = self.bridge
+        self.hub = FakeHub()
+        self.session._conversation_hub = self.hub
 
     def _types(self):
         return [e.get("type") for e in self.events]
@@ -170,10 +239,15 @@ class SubAgentConfirmationRelaunchTests(unittest.TestCase):
 
         ack = asyncio.run(scenario())
         self.assertIsNotNone(ack)
-        self.assertEqual(len(self.bridge.started), 1)
-        agent, task, cwd = self.bridge.started[0]
+        self.assertEqual(len(self.hub.dispatched), 1)
+        agent, task = self.hub.dispatched[0]
         self.assertEqual(agent, "hermes-yolo")
-        self.assertEqual(cwd, "C:/work")  # original working dir preserved
+        # cwd cannot survive a hub dispatch -- ConversationTurnRequest has no
+        # cwd field, so it is dropped with a logged warning rather than
+        # silently (conversation_dispatch.warn_if_cwd_unsupported, task-8
+        # review round 1 #3). Not a regression to guard here; the original
+        # working-dir assertion asserted a guarantee the current dispatch
+        # path cannot make.
         self.assertIn("search junk email", task)
         # The relaunch tells the agent it already has permission, so it does
         # not just print the same confirmation gate again.

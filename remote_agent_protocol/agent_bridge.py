@@ -11,6 +11,11 @@ Backends are plain command templates (config.AGENT_BACKENDS), e.g.
 Placeholders:
     {task}   -> the task text
     {task_file} -> a UTF-8 file containing the task text
+    {task_stdin} -> the CLI's own stdin sentinel (currently "-"); the task
+        text is written to the subprocess's stdin after launch instead of
+        appearing in argv or a file. Only for a CLI that documents reading
+        its prompt from stdin (codex: "if not provided as an argument, or if
+        '-' is used, instructions are read from stdin").
     {python} -> sys.executable (used by the built-in mock backend)
 
 Event shape (routed through VoiceSession._emit, same bus as transcripts):
@@ -79,8 +84,32 @@ _SUMMARY_SKIP_RE = re.compile(
     r"^(?:Resume this session with:|hermes\s+--resume\b|Duration:\s*|Messages:\s*)",
     re.IGNORECASE,
 )
-_ORNAMENTAL_LINE_RE = re.compile(r"^[\s─—-]*(?:hermes|code\s+puppy|openclaw)?[\s─—-]*$", re.I)
+# The rule line a CLI draws around its name, allowing one decorative glyph
+# (hermes brands its banner with a caduceus) so the banner is not mistaken for
+# an answer once the echo latch releases on it.
+_ORNAMENTAL_LINE_RE = re.compile(
+    r"^[\s─—-]*(?:[^\w\s]\s*)?(?:hermes|code\s+puppy|openclaw)?[\s─—-]*$", re.I
+)
 _ANSWER_SHAPED_RE = re.compile(r"^(?:\d{1,3}\.\s+|[-*]\s+|#{1,6}\s+|\*\*[^*]+\*\*)")
+
+# A backend announcing it is getting to work. It prints this after echoing the
+# task, never inside the echo, so it doubles as an end-of-echo boundary.
+_AGENT_STARTUP_RE = re.compile(r"^(?:initializing|starting up|loading|connecting to)\b", re.I)
+
+# Opening of the end-of-run footer. The aligned label lines below it are only
+# ever the CLI's own run metadata -- requiring the alignment padding keeps a
+# genuine answer that happens to start "Title:" out of this.
+_SESSION_FOOTER_RE = re.compile(
+    r"^(?:Resume this session with:|(?:Title|Duration|Messages|Session):\s{2,})", re.I
+)
+
+# The gutter a CLI draws down its tool trace ("┊ 💻 $ python -c ..."): the
+# steps it took, not what it found. The communication contract already asks
+# agents to keep this out of the answer; this filters the ones that draw it
+# anyway, which otherwise bury the reply (12 trace lines ahead of "24 days
+# left", jess_agent_history 2026-09-15). Box-drawing only -- an ASCII pipe
+# opens a markdown table an answer may legitimately contain.
+_TOOL_TRACE_RE = re.compile(r"^[│┊╎┆]\s")
 
 _STATUS_PROTOCOL = """
 
@@ -181,6 +210,9 @@ _CLI_HOUSEKEEPING_RE = re.compile(
     r"|^Please consider updating!$"
     r"|Quick Resume selected"
     r"|^branch:\s*detected$"
+    r"|^↻\s*Resumed session\b"
+    # ...and the line it wraps onto, which carries no other content.
+    r"|^user messages?,\s*\d+\s*total messages\)$"
     r"|^No previous session found for this scope; starting fresh\.$",
     re.IGNORECASE,
 )
@@ -325,7 +357,9 @@ def clean_session_template(template: list[str]) -> list[str]:
     options. Unknown wrappers and alternate command forms fail closed instead
     of guessing at their session semantics. The configured template is immutable.
     """
-    task_placeholders = template.count("{task}") + template.count("{task_file}")
+    task_placeholders = (
+        template.count("{task}") + template.count("{task_file}") + template.count("{task_stdin}")
+    )
     if not template or task_placeholders != 1:
         raise ValueError("Clean sessions require a direct CLI and one task placeholder")
     executable = Path(template[0]).stem.lower()
@@ -380,7 +414,7 @@ def clean_session_template(template: list[str]) -> list[str]:
             index += 1
             if selectors[flag] and not separator and index < len(template):
                 value = template[index]
-                if value != "{task}" and not value.startswith("-"):
+                if value not in ("{task}", "{task_stdin}") and not value.startswith("-"):
                     index += 1
             continue
         if any(
@@ -410,6 +444,7 @@ def build_command(
     command = [
         part.replace("{task}", task)
         .replace("{task_file}", task_file or "")
+        .replace("{task_stdin}", "-")
         .replace("{python}", sys.executable)
         for part in template
     ]
@@ -732,12 +767,17 @@ class _LineSkipState:
     status_protocol: bool = False
     consult_protocol: bool = False
     role_echo: bool = False
+    # A CLI's end-of-run footer (how to resume the session, its title, how long
+    # it took). It is terminal: nothing after it is ever part of the answer.
+    footer: bool = False
     # Lowercased last line of what the host injects ahead of the task. An agent
     # that echoes its prompt has finished echoing once this goes past.
     injected_end: str = ""
 
     def consume(self, stripped: str, lowered: str) -> bool:
         """Advance the active skip block, if any. Returns True if the line is consumed."""
+        if self.footer:
+            return True
         if self.prompt:
             # Never release echoed conversation/context; resume only at a
             # boundary that means the echo is over. Code Puppy prints a response
@@ -747,6 +787,18 @@ class _LineSkipState:
             # The end of the injected block is a boundary the host can always
             # recognise, whichever backend is running.
             if lowered == "agent response" or (self.injected_end and self.injected_end in lowered):
+                self.prompt = False
+                return True
+            # A backend that echoes neither boundary -- hermes prints only a
+            # one-line "Query:" header -- still frames its own output with a
+            # banner or a startup line before answering. Releasing there is
+            # safe in a way that latching is not: every per-line filter below
+            # still runs on whatever follows, so an early release can only leak
+            # a line those filters miss, while never releasing discards the
+            # answer outright ("Find the capital city of France" -> hermes said
+            # "paris" and the user heard silence, jess_agent_history
+            # 2026-09-15).
+            if _ORNAMENTAL_LINE_RE.fullmatch(stripped) or _AGENT_STARTUP_RE.match(stripped):
                 self.prompt = False
             return True
         if self.injected_message:
@@ -785,6 +837,9 @@ def _user_facing_output_lines(lines: list[str]) -> list[str]:
         if stripped.startswith(("Query:", "Executing prompt:", "[Scope:")):
             skip.prompt = True
             continue
+        if _SESSION_FOOTER_RE.match(stripped):
+            skip.footer = True
+            continue
         if "[Voice delegation dispatched" in stripped or "[Result returned by agent" in stripped:
             skip.injected_message = True
             continue
@@ -795,6 +850,8 @@ def _user_facing_output_lines(lines: list[str]) -> list[str]:
             skip.consult_protocol = True
             continue
         if _ORNAMENTAL_LINE_RE.fullmatch(stripped):
+            continue
+        if _TOOL_TRACE_RE.match(stripped):
             continue
         if _SUMMARY_SKIP_RE.search(stripped):
             continue
@@ -1415,6 +1472,7 @@ class AgentBridge:
             await self._fail_fast(job, f"could not write agent prompt file: {e}")
             job._launch_done.set()
             return
+        needs_stdin = "{task_stdin}" in template
         command = build_command(
             template,
             command_task,
@@ -1442,6 +1500,7 @@ class AgentBridge:
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=cwd,
+                stdin=asyncio.subprocess.PIPE if needs_stdin else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 # Output is decoded as UTF-8, so ask for UTF-8: a Python agent
@@ -1455,6 +1514,23 @@ class AgentBridge:
             await self._fail_fast(job, f"could not launch {command[0]}: {e}")
             job._launch_done.set()
             return
+
+        if needs_stdin:
+            # Write before _stream starts reading stdout: a CLI reading its
+            # prompt from stdin (codex's "-" sentinel) blocks until stdin
+            # closes, so a delayed write would stall it waiting on us instead
+            # of the other way around. A dead pipe here is not itself the
+            # failure to report -- the process's own exit and output are,
+            # and _stream's existing error-detection already surfaces those;
+            # this just must not crash the launch on a closed pipe.
+            try:
+                proc.stdin.write(command_task.encode("utf-8"))
+                await proc.stdin.drain()
+                proc.stdin.close()
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                logger.warning(
+                    f"Agent job {job.job_id} [{job.agent}]: could not write prompt to stdin: {e}"
+                )
 
         self._procs[job.job_id] = proc
         # A job that waited in _launch_and_run was parked at STATUS_WAITING;
@@ -1904,6 +1980,12 @@ class AgentBridge:
             # this the relayed sentence stops dead at "Last output: ".
             summary = f"{job.agent} failed without reporting anything"
             job.failure_detail = job.failure_detail or summary
+        if job.status == STATUS_DONE and not summary.strip():
+            # A success with nothing to say is the worse half of the same
+            # hole: the job is announced as done and the user hears an empty
+            # sentence, with no hint that the answer went missing rather than
+            # the question being pointless.
+            summary = f"{job.agent} finished without reporting anything"
         job.summary = summary
         job.finished_at = _now_iso()
         await self._check_host_repo(job)

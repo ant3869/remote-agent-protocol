@@ -12,6 +12,10 @@ from remote_agent_protocol import agent_bridge
 from remote_agent_protocol import config as cfg
 
 MOCK_BACKEND = {"mock": ["{python}", "-u", "scripts/mock_agent.py", "{task}"]}
+# {task_stdin}-shaped, matching the real codex template in config.py --
+# proves the stdin pipe AgentBridge wires in _launch actually delivers the
+# task to a real subprocess, not just that build_command substitutes "-".
+MOCK_STDIN_BACKEND = {"mock": ["{python}", "-u", "scripts/mock_agent.py", "{task_stdin}"]}
 
 
 class PureHelperTests(unittest.TestCase):
@@ -56,10 +60,23 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(cfg.AGENT_BACKENDS["hermes"][-2:], ["--query-file", "{task_file}"])
         self.assertEqual(cfg.AGENT_BACKENDS["openclaw"][-2:], ["--message-file", "{task_file}"])
 
+    def test_default_codex_backend_uses_stdin_delivery(self):
+        # codex's own docs (verified against `codex exec --help` 2026-09-21):
+        # "-" as the prompt argument means read the prompt from stdin.
+        self.assertEqual(cfg.AGENT_BACKENDS["codex"][-1], "{task_stdin}")
+
     def test_clean_session_template_accepts_a_task_file_placeholder(self):
         self.assertEqual(
             agent_bridge.clean_session_template(["hermes", "chat", "--query-file", "{task_file}"]),
             ["hermes", "chat", "--oneshot", "--query-file", "{task_file}"],
+        )
+
+    def test_clean_session_template_accepts_a_task_stdin_placeholder(self):
+        self.assertEqual(
+            agent_bridge.clean_session_template(
+                ["codex", "exec", "--sandbox", "danger-full-access", "{task_stdin}"]
+            ),
+            ["codex", "exec", "--ephemeral", "--sandbox", "danger-full-access", "{task_stdin}"],
         )
 
     def test_clean_openclaw_session_uses_a_dedicated_gateway_session(self):
@@ -128,6 +145,17 @@ class PureHelperTests(unittest.TestCase):
             cmd,
             ["codex", "exec", "--sandbox", "danger-full-access", "build a thing"],
         )
+
+    def test_build_command_substitutes_task_stdin_to_the_cli_sentinel(self):
+        task = "x" * 20_000
+        cmd = agent_bridge.build_command(
+            ["codex", "exec", "--sandbox", "danger-full-access", "{task_stdin}"], task
+        )
+        self.assertEqual(
+            cmd,
+            ["codex", "exec", "--sandbox", "danger-full-access", "-"],
+        )
+        self.assertNotIn(task, cmd)
 
     def test_build_command_for_claude_code(self):
         cmd = agent_bridge.build_command(["claude", "-p", "{task}"], "write some tests")
@@ -488,6 +516,49 @@ class PureHelperTests(unittest.TestCase):
 
         self.assertEqual(agent_bridge.fallback_result(lines), "CP_OK")
         self.assertEqual(agent_bridge.summarize_output(lines), "CP_OK")
+
+    def test_answer_survives_a_backend_that_never_closes_its_prompt_echo(self):
+        # jess_agent_history 2026-09-15: hermes opens with a one-line "Query:"
+        # header and prints neither "AGENT RESPONSE" nor the end of the
+        # injected block, so the echo latch never released and every line --
+        # the answer included -- was discarded. Nine jobs finished "done" with
+        # an empty result; the user asked for the capital of France and heard
+        # silence. Its own banner and startup line bound the echo instead.
+        lines = [
+            "Query: Calculate the number of days left until Miles' birthday on October 9th",
+            "Initializing agent...",
+            "────────────────────────────────────────",
+            "  ┊ 💻 $         date  0.2s",
+            "  ┊ 🐍 exec      from datetime import date  0.0s",
+            " ─  ☤ Hermes  ────────────────────────────────────────────",
+            " 24 days left babe",
+            " i checked from today, 2026-09-15, to 2026-10-09.",
+            " ─────────────────────────────────────────────────────────",
+            "Resume this session with:",
+            "  hermes --resume 20260915_062147_a7c2bd -p mera",
+            "Title:          Calculate days until Miles' birthday",
+            "Duration:       28s",
+        ]
+
+        self.assertEqual(
+            agent_bridge.fallback_result(lines),
+            "24 days left babe\ni checked from today, 2026-09-15, to 2026-10-09.",
+        )
+
+    def test_wrapped_query_echo_is_still_withheld(self):
+        # The same header wraps when the query is long. Those continuation
+        # lines are still echo and must not reach the user -- only the reply
+        # after the startup boundary does.
+        lines = [
+            "Query: Answer this question from another agent working on a related task.",
+            "Answer it and stop: do not change any files, install anything, or start work of",
+            "your own.",
+            "Initializing agent...",
+            " ─  ☤ Hermes  ────────────────────────────────────────────",
+            " paris",
+        ]
+
+        self.assertEqual(agent_bridge.fallback_result(lines), "paris")
 
     def test_exact_self_check_sentinel_survives_bridge_result_extraction(self):
         lines = ["RAP_SELF_CHECK_OK"]
@@ -1044,6 +1115,31 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertTrue(any("assistant: hi" in event.get("line", "") for event in events))
         job_events = [event for event in events if event.get("type") == "agent_job"]
         self.assertTrue(all(event["task"] == "diagnose system" for event in job_events))
+
+    def test_codex_shaped_backend_delivers_task_over_stdin_not_argv(self):
+        # A real subprocess round trip against a {task_stdin}-shaped template
+        # (matching config.py's actual codex entry): the task must reach the
+        # child through stdin, and finishing normally proves _launch actually
+        # wrote and closed the pipe rather than the child hanging on a read
+        # that never comes.
+        events: list[dict] = []
+        task = "investigate why code puppy is not responding"
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(MOCK_STDIN_BACKEND, events.append)
+            await bridge.start("mock", task)
+            for _ in range(200):
+                if any(event["event"] == "finished" for event in events):
+                    break
+                await asyncio.sleep(0.05)
+
+        self._run(scenario())
+
+        lines = "\n".join(event.get("line", "") for event in events)
+        self.assertIn(task, lines)
+        job_events = [event for event in events if event.get("type") == "agent_job"]
+        finished = next(event for event in job_events if event["event"] == "finished")
+        self.assertEqual(finished["status"], agent_bridge.STATUS_DONE)
 
     def test_replace_latest_cancels_before_starting_corrected_task(self):
         async def scenario():

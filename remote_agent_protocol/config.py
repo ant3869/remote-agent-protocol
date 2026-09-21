@@ -515,8 +515,25 @@ AGENT_BACKENDS = {
     # unrelated tool calls. Set AGENT_BACKENDS_JSON to opt back in.
     # Let Code Puppy use its current configured model: provider model keys change
     # independently of RAP, and an obsolete pin can exit silently with no answer.
+    # code-puppy has no file/stdin option for its prompt -- only -p/--prompt
+    # (an inline argv string) or a positional `command`, per `code-puppy
+    # --help` (verified 2026-09-21). It remains exposed to the same
+    # 8191-character command-line limit noted below for hermes/openclaw,
+    # with no native mitigation available upstream today.
     "code-puppy": ["code-puppy", "-p", "{task}"],
-    "codex": ["codex", "exec", "--sandbox", "danger-full-access", "{task}"],
+    # codex documents reading its prompt from stdin when the positional
+    # PROMPT argument is "-" (`codex exec --help`, verified 2026-09-21):
+    # "If not provided as an argument (or if `-` is used), instructions are
+    # read from stdin." {task_stdin} substitutes to that sentinel; AgentBridge
+    # pipes the actual task text to the subprocess's stdin after launch
+    # (agent_bridge.py's _launch), keeping it off the command line the same
+    # way hermes/openclaw's {task_file} does.
+    "codex": ["codex", "exec", "--sandbox", "danger-full-access", "{task_stdin}"],
+    # claude-code (the `claude` CLI) also has no file/stdin option for its
+    # prompt -- only a positional `[prompt]` argument, per `claude --help`
+    # (verified 2026-09-21; --system-prompt-file exists but overrides the
+    # system prompt, not the task, so it is not a substitute). Same exposure
+    # and no native mitigation as code-puppy above.
     "claude-code": [
         "claude",
         "-p",

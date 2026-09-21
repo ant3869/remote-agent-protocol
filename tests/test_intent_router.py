@@ -855,6 +855,35 @@ class ConversationRepairRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "hermes",
             )
 
+    def test_marker_actor_wins_over_longer_subject_alias(self):
+        # jess_runtime.log 2026-09-21 12:50-12:52: the marker task named both
+        # the executor (Codex) and the subject under investigation (Code
+        # Puppy). "code puppy"'s alias outlengths "codex"'s, so the old
+        # longest-alias-wins scan picked the subject as if it were the
+        # executor -- once landing on the unrelated default backend via the
+        # repair guard, once dispatching straight to code-puppy itself. The
+        # user caught it live: "you sent that to Code Puppy. You're supposed
+        # to be sending codex to check on Code Puppy."
+        with patch.object(
+            intent_router.cfg, "AGENT_BACKENDS", {"hermes": [], "code-puppy": [], "codex": []}
+        ):
+            self.assertEqual(
+                intent_router.select_marker_backend(
+                    "You said that but you're not doing anything.",
+                    "instruct Codex to check on Code Puppy and get it working if it is not",
+                    "hermes",
+                ),
+                "codex",
+            )
+            self.assertEqual(
+                intent_router.select_marker_backend(
+                    "You said that but you're not doing anything.",
+                    "instruct Codex to investigate Code Puppy and rectify any issues",
+                    "hermes",
+                ),
+                "codex",
+            )
+
     async def test_diagnosis_subject_is_not_the_executor(self):
         for text in (
             "figure out what's wrong with hermes",

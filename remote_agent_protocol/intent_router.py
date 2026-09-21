@@ -651,15 +651,38 @@ def _healthy_alternative(exclude: str, default_backend: str) -> str | None:
     return next((name for name in cfg.AGENT_BACKENDS if name != exclude), None)
 
 
+# The agent as the *executor being handed the work* -- "instruct Codex to
+# check on Code Puppy", "ask Codex to fix it". When a marker's free-text task
+# names two agents (the one doing the work and the one it's investigating),
+# ``named_backend``'s longest-alias-wins scan has no notion of grammatical
+# role and picks whichever alias string is longer, which is "code puppy" over
+# "codex" for essentially any real sentence. Checking for this actor pattern
+# first resolves the ambiguity the way a reader would (jess_runtime.log
+# 2026-09-21: "instruct Codex to check on Code Puppy" dispatched to
+# code-puppy, not codex).
+_ACTOR_VERB = r"(?:instruct|dispatch|ask|tell|send)"
+
+
+def _named_actor(text: str, aliases: dict[str, str]) -> str | None:
+    """Return the agent addressed as the one doing the work, e.g. 'instruct Codex to ...'."""
+    lowered = re.sub(r"[-_]+", " ", text.lower())
+    for alias in sorted(aliases, key=len, reverse=True):
+        name = re.escape(alias)
+        if re.search(rf"\b{_ACTOR_VERB}\s+(?:the\s+)?{name}\b\s+to\b", lowered):
+            return aliases[alias]
+    return None
+
+
 def select_marker_backend(text: str, task: str, default_backend: str) -> str:
     """Resolve the executor of a context-aware delegation without selecting its patient."""
     explicit = voice_commands.parse_delegation(text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES)
     if explicit is not None:
         return explicit[0]
-    named = voice_commands.named_backend(
-        f"{text} {task}", cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
+    combined = f"{text} {task}"
+    named = _named_actor(combined, cfg.AGENT_SPOKEN_ALIASES) or voice_commands.named_backend(
+        combined, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
     )
-    if named and _is_about_repairing(f"{text} {task}", named):
+    if named and _is_about_repairing(combined, named):
         return _healthy_alternative(named, default_backend) or default_backend
     return named or default_backend
 
