@@ -393,12 +393,31 @@ def clean_session_template(template: list[str]) -> list[str]:
         selectors = {"--resume": 1, "-r": 1, "--quick-resume": 1, "-qr": 1}
         extra = []
         offset = 1
+    elif executable == "openclaw" and template[1:3] == ["agent", "exec"]:
+        # A stateless one-shot form with no session-selector flags of its own
+        # to strip -- the "agent" branch below explicitly excludes it, so it
+        # always raised even for a legitimate non-interactive template.
+        # --ephemeral is exec's own equivalent of --oneshot/--no-session-persistence.
+        if any(token.startswith("--resume") or token == "resume" for token in template[2:]):
+            raise ValueError("Clean openclaw agent exec sessions cannot use --resume")
+        selectors = {}
+        extra = ["--ephemeral"]
+        offset = 3
     elif (
         executable == "openclaw"
         and template[1:2] == ["agent"]
         and template[1:3] != ["agent", "exec"]
     ):
-        selectors = {"--session-id": 1, "--session-key": 1, "--to": 1}
+        # --session-id names a specific, possibly foreign session, the way
+        # claude's --cloud/-rterminal do elsewhere in this function -- it used
+        # to be silently stripped and accepted here instead of rejected, the
+        # one selector in this branch that must fail closed rather than
+        # launder into --session-key rap-self-check below.
+        if any(token.partition("=")[0] == "--session-id" for token in template):
+            raise ValueError(
+                "Clean openclaw agent sessions cannot use --session-id (would reuse existing session)"
+            )
+        selectors = {"--session-key": 1, "--to": 1}
         # Keep health probes out of the operator's main conversation while
         # exercising the same gateway, agent configuration, and provider.
         extra = ["--session-key", "rap-self-check"]

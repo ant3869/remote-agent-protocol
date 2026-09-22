@@ -59,7 +59,11 @@ from remote_agent_protocol.orchestration.orchestrator import (
 from remote_agent_protocol.orchestration.providers.copilot import CopilotProvider
 from remote_agent_protocol.orchestration.providers.local import LocalProvider
 from remote_agent_protocol.personas import Persona
-from remote_agent_protocol.session_processors import _MARKER_RE, is_placeholder_task
+from remote_agent_protocol.session_processors import (
+    _MARKER_RE,
+    is_placeholder_task,
+    looks_like_delegation_promise,
+)
 
 
 class LLMUnavailable(RuntimeError):
@@ -99,6 +103,15 @@ class BrainSession:
         self._cancel_wait_s = 5.0
         self._recently_denied: deque[tuple[str, str]] = deque(maxlen=5)
         self._recent_delegations: deque[tuple[float, str]] = deque(maxlen=20)
+        # A sub-agent that keeps "finishing" by asking permission instead of
+        # doing the work (agent_bridge.requests_confirmation) rather than a
+        # broken/stuck one that never returns.
+        self._agent_confirm_streak: dict[str, int] = {}
+        # Whether _handle_delegate_markers actually dispatched a real marker
+        # this call -- read by _maybe_correct_fabricated_response right after,
+        # so a reply that only talks about agent work is never mistaken for
+        # one that triggered it.
+        self._last_marker_dispatched = False
         self._default_agent_backend = cfg.AGENT_DEFAULT_BACKEND
         if persona.tool_user in cfg.AGENT_BACKENDS:
             self._default_agent_backend = persona.tool_user
@@ -288,6 +301,9 @@ class BrainSession:
         if utterance["session_id"] != self._conversation.session_id:
             return ""
         assistant = self._handle_delegate_markers(assistant)
+        assistant = await self._maybe_correct_fabricated_response(
+            assistant, dispatched=self._last_marker_dispatched
+        )
         self._finish_turn(assistant, utterance)
         return SpeechText(assistant, utterance)
 
@@ -374,11 +390,26 @@ class BrainSession:
                     yield SpeechText(ready, utterance)
 
             cleaned = self._handle_delegate_markers(full)
-            remainder = (
-                cleaned[len(spoken) :]
-                if cleaned.startswith(spoken)
-                else ("" if spoken else cleaned)
+            corrected = await self._maybe_correct_fabricated_response(
+                cleaned, dispatched=self._last_marker_dispatched
             )
+            if corrected != cleaned:
+                # Sentences may already have streamed out for this turn and
+                # cannot be unsaid, so the correction is always spoken/yielded
+                # as a follow-up remark rather than folded into the
+                # remainder-since-spoken diff below, which would silently
+                # discard it whenever anything had already streamed. The
+                # persisted record keeps only the honest, corrected text --
+                # never the fabrication -- so later turns are never grounded
+                # in a claim that was never true.
+                remainder = corrected
+                cleaned = corrected
+            else:
+                remainder = (
+                    cleaned[len(spoken) :]
+                    if cleaned.startswith(spoken)
+                    else ("" if spoken else cleaned)
+                )
             if remainder.strip():
                 utterance.update(text=cleaned, final=False, revision=utterance["revision"] + 1)
                 self._emit(dict(utterance))
@@ -842,6 +873,72 @@ class BrainSession:
         explanation = present_no_dispatch_explanation(disposition.spoken_acknowledgment)
         self._messages.append({"role": "assistant", "content": explanation})
 
+    async def _hold_agent_confirmation(self, job: agent_bridge.AgentJob, prompt_text: str) -> None:
+        """A sub-agent "finished" by asking permission instead of a real result.
+
+        Ported from VoiceSession._hold_agent_confirmation (session.py). Some
+        backends are one-shot CLIs: the process already exited, so there is no
+        live task to resume. Register a fresh pending confirmation -- the same
+        mechanism used for our own pre-dispatch gate -- so a "confirm" (voice
+        or the GUI's resolve_confirmation) relaunches the task; the relaunch
+        text notes the approval so the agent does not just ask again
+        immediately. If the same agent keeps doing this with no real result in
+        between, stop looping and tell the user instead, same as session.py.
+
+        Fixed prose rather than a fresh model call, matching the established
+        pattern for async job-completion messages in this file (see
+        _relay_no_dispatch/_relay_hub_intervention above): this runs from an
+        arbitrary event-handler context outside _turn_lock, so calling
+        _call_ollama here would race an in-progress turn.
+        """
+        streak = self._agent_confirm_streak.get(job.agent, 0) + 1
+        self._agent_confirm_streak[job.agent] = streak
+        if streak > cfg.AGENT_CONFIRM_LOOP_LIMIT:
+            logger.warning(
+                f"Agent '{job.agent}' asked for confirmation {streak} times in a row "
+                f"with no result; giving up: {job.task!r}"
+            )
+            self._messages.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"[Agent update: '{job.agent}' keeps asking for confirmation on "
+                        "the same task instead of doing it, and may be stuck. Trying a "
+                        "different agent or rephrasing the request may help.]"
+                    ),
+                }
+            )
+            return
+        self._confirm_counter += 1
+        token = f"agent-confirm-{self._confirm_counter}"
+        approved_task = (
+            f"{job.task}\n\nThe user has already confirmed this action -- proceed "
+            "without asking again."
+        )
+        mid_task_reason = "the agent needs your OK before continuing"
+        self._pending_confirmations[token] = (job.agent, approved_task, job.cwd, mid_task_reason)
+        self._emit(
+            {
+                "type": "agent_confirm",
+                "token": token,
+                "agent": job.agent,
+                "task": job.task,
+                "machine": self._bridge.machine_for(job.agent),
+                "reason": mid_task_reason,
+                "transcript": prompt_text,
+            }
+        )
+        logger.info(f"Agent '{job.agent}' requested confirmation mid-task; holding: {job.task}")
+        self._messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    f"[Agent update: '{job.agent}' needs your OK before continuing with "
+                    f"'{job.task}'. Say or select 'confirm' to proceed, or 'cancel' to stop.]"
+                ),
+            }
+        )
+
     def resolve_confirmation(self, token: str, decision: str) -> str | None:
         """Approve or deny one specific pending confirmation.
 
@@ -1096,6 +1193,19 @@ class BrainSession:
     async def _announce_agent_job(self, job: agent_bridge.AgentJob) -> None:
         if job.internal:
             return
+        # A sub-agent can "finish" by asking permission instead of returning
+        # a real result (e.g. hermes-yolo completing with "Requesting
+        # confirmation to proceed"). Ported from VoiceSession._announce_agent_job
+        # (session.py) -- brain.py had no equivalent, so this was relayed as a
+        # genuine completed answer with no way to actually approve it
+        # (documented for session.py as jess_runtime.log 2026-07-06 18:26:
+        # saying "confirm" after this happened did nothing at all; the same
+        # gap was never ported here).
+        confirmation_prompt = agent_bridge.requests_confirmation(job)
+        if confirmation_prompt is not None:
+            await self._hold_agent_confirmation(job, confirmation_prompt)
+            return
+        self._agent_confirm_streak.pop(job.agent, None)
         # TRACK -> RELAY: telemetry close-out. A no-op for jobs the
         # orchestrator did not route (e.g. a manual GUI dispatch).
         self._orchestrator.record_outcome(job)
@@ -1226,13 +1336,76 @@ class BrainSession:
                 return ""
             if task and lowered not in dispatched:
                 dispatched.add(lowered)
+                if self._recently_delegated(task):
+                    logger.info(
+                        f"Ignoring duplicate LLM delegation marker for handled task: {task!r}"
+                    )
+                    return ""
                 agent, explicit = self._marker_backend(task)
                 logger.info(f"Brain LLM delegation marker -> [{agent}] {task}")
                 self._delegate_ack(agent, task, explicit=explicit)
             return ""
 
         cleaned = _MARKER_RE.sub(replace, text).strip()
+        self._last_marker_dispatched = bool(dispatched)
         return cleaned or "I sent that to the agent."
+
+    def _recently_delegated(self, task: str) -> bool:
+        """True if an equivalent marker task was dispatched within the TTL window.
+
+        Ported from VoiceSession._recently_delegated (session.py). brain.py
+        already wrote to _recent_delegations (via _remember_delegation, called
+        from _delegate_ack) but never read it back, so nothing here ever
+        actually deduped a repeated marker across separate LLM responses.
+        """
+        key = self._delegation_key(task)
+        if not key:
+            return False
+        now = time.monotonic()
+        ttl = max(30.0, cfg.AGENT_PROGRESS_INTERVAL_SECS * 3)
+        while self._recent_delegations and now - self._recent_delegations[0][0] > ttl:
+            self._recent_delegations.popleft()
+        return any(recent_key == key for _, recent_key in self._recent_delegations)
+
+    async def _maybe_correct_fabricated_response(self, text: str, *, dispatched: bool) -> str:
+        """Replace a reply that claims agent work happened but never really did.
+
+        Ported from VoiceSession._on_llm_response (session.py) -- BrainSession
+        had no equivalent, so the persona was free to fabricate a complete
+        "[Agent result from X: ...]"-shaped exchange with nothing behind it.
+        Live incident (jess_runtime.log 2026-09-21 18:51-18:53): three
+        delegation decisions were logged, zero real dispatches ever happened,
+        and the persona invented three separate fake Hermes replies in a row;
+        the user had to catch it turn by turn ("You didn't even talk to
+        Hermes.").
+
+        Unlike session.py, which injects the correction as a new async turn
+        via _inject_and_run, brain.py's turn is still in flight here (this
+        runs inside the same _turn_lock as the reply it is checking), so the
+        correction is produced by calling the model again in place, grounded
+        in the real hold this time instead of the fabricated one.
+        """
+        if dispatched or self._control_turn:
+            return text
+        if self._pending_confirmations or self._bridge.has_active():
+            return text
+        if not looks_like_delegation_promise(text):
+            return text
+        request = self._last_user_text.strip()
+        if not request:
+            logger.warning(f"LLM promised agent work without a request to dispatch: {text!r}")
+            return text
+        logger.warning(
+            f"LLM promised agent work without a marker; correcting fabricated reply: {request!r}"
+        )
+        self._force_confirm = True
+        self._force_confirm_reason = (
+            "the assistant talked about agent work without a valid delegation marker"
+        )
+        agent, _explicit = self._marker_backend(request)
+        ack = self._delegate_ack(agent, request)
+        self._messages.append({"role": "user", "content": ack})
+        return await self._call_ollama()
 
     def _marker_backend(self, task: str) -> tuple[str, bool]:
         """Prefer the agent the user actually named over the configured default.

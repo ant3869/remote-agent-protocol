@@ -1,7 +1,11 @@
+import asyncio
+import itertools
 import unittest
 
 from pipecat.frames.frames import LLMRunFrame
 from remote_agent_protocol import multimodal_prompt, personas, session
+from remote_agent_protocol.conversation_hub.floor import FloorDecision
+from remote_agent_protocol.conversation_hub.service import TurnDisposition
 
 
 class FakeContext:
@@ -23,17 +27,56 @@ class FakeWorker:
         self.frames.extend(frames)
 
 
-class FakeBridge:
+class _FakeTaskReference:
+    """Just enough of ``TaskReference`` for ``dispatch_via_hub`` to read ``attempt_id``."""
+
+    def __init__(self, attempt_id: str):
+        self.attempt_id = attempt_id
+
+
+class FakeHub:
+    """Stand-in for AgentConversationHub that records dispatches instead of routing.
+
+    Task 8 moved real dispatch off ``AgentBridge.start()`` and onto
+    ``AgentConversationHub.handle_turn()`` (session.py's ``_dispatch_via_hub`` ->
+    ``conversation_dispatch.dispatch_via_hub``). The real hub talks to real
+    control-plane adapters, which is real I/O this suite must never perform --
+    every test that reached dispatch through the production hub either failed
+    outright or hung indefinitely. This records what was asked for the same
+    way ``FakeBridge`` used to, at the seam the app now actually dispatches
+    through.
+    """
+
     def __init__(self):
-        self.started = []
+        self.dispatched: list[tuple[str | None, str]] = []
+        self._ids = itertools.count(1)
+        self._attempts: dict[str, str] = {}
 
-    def start(self, agent, task, cwd=None):
-        self.started.append((agent, task, cwd))
+    async def handle_turn(self, request) -> TurnDisposition:
+        self.dispatched.append((request.explicit_agent_id, request.text))
+        task_id = f"task-{next(self._ids)}"
+        attempt_id = f"attempt-{task_id}"
+        self._attempts[task_id] = attempt_id
+        agent_id = request.explicit_agent_id or "mock"
+        return TurnDisposition(
+            channel_id=f"agent:{agent_id}",
+            target_id=agent_id,
+            task_id=task_id,
+            floor_decision=FloorDecision(
+                kind="dispatch",
+                target_id=agent_id,
+                task_id=task_id,
+                requires_clarification=False,
+                requires_butler_selection=False,
+                reason_code="test",
+                next_floor_id=None,
+            ),
+            spoken_acknowledgment=None,
+        )
 
-        async def done():
-            return "job-1"
-
-        return done()
+    def task(self, task_id: str) -> _FakeTaskReference | None:
+        attempt_id = self._attempts.get(task_id)
+        return None if attempt_id is None else _FakeTaskReference(attempt_id)
 
 
 class FakeMemoryClient:
@@ -157,22 +200,34 @@ class SessionMultimodalPromptTests(unittest.IsolatedAsyncioTestCase):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)
         voice_session._context = FakeContext()
         voice_session._worker = FakeWorker()
-        voice_session._bridge = FakeBridge()
+        voice_session._conversation_hub = FakeHub()
         voice_session._default_agent_backend = "mock"
-        voice_session._spawn = lambda coro, *, name: coro.close()
+        calls = []
+        real_delegate_ack = voice_session._delegate_ack
+
+        def spy_delegate_ack(agent, task, cwd=None):
+            calls.append((agent, task))
+            return real_delegate_ack(agent, task, cwd)
+
+        voice_session._delegate_ack = spy_delegate_ack
         bundle = multimodal_prompt.MultimodalPromptBundle()
         bundle.set_final_instruction(
             "can you have code puppy figure out why hermes is not responding in telegram?"
         )
 
         await voice_session._send_multimodal_prompt(bundle)
+        await asyncio.sleep(0.01)  # let the spawned dispatch run
 
-        self.assertEqual(voice_session._bridge.started[0][0], "code-puppy")
+        # parse_delegation named code-puppy, not the "mock" default. Per the
+        # explicit_agent_id rule (session.py module docstring), a direct
+        # _delegate_ack call carries no fresh routing decision, so the hub --
+        # not this agent argument -- ultimately picks the executor; dispatch
+        # still reaches the hub with the right task text either way.
+        self.assertEqual(calls[0][0], "code-puppy")
         self.assertTrue(
-            voice_session._bridge.started[0][1].startswith(
-                "figure out why hermes is not responding in telegram"
-            )
+            calls[0][1].startswith("figure out why hermes is not responding in telegram")
         )
+        self.assertEqual(len(voice_session._conversation_hub.dispatched), 1)
 
     async def test_session_sends_bundle_as_one_llm_turn(self):
         voice_session = session.VoiceSession(personas.DEFAULT_PERSONA)

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import aiohttp
 import pytest
 
+from remote_agent_protocol import agent_bridge
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol.brain import BrainSession, LLMUnavailable, _split_sentences
 from remote_agent_protocol.control_plane.models import (
@@ -387,6 +388,104 @@ async def test_an_approved_confirmation_never_dispatches_a_second_marker(monkeyp
 
     assert dispatched == []  # the marker in the narration must not fire _delegate_ack again
     assert len(started) == 1  # exactly the one dispatch from the approval itself
+
+
+@pytest.mark.asyncio
+async def test_a_marker_repeated_across_turns_is_not_dispatched_twice(monkeypatch):
+    # brain.py wrote to _recent_delegations (inside _delegate_ack's
+    # _remember_delegation call) but never read it back, so the exact same
+    # marker task emitted in two separate LLM responses close together
+    # dispatched twice. session.py has always deduped this via
+    # _recently_delegated; brain.py never got the read side of it.
+    brain = _brain(monkeypatch, ["On it. "])
+    dispatched = []
+    monkeypatch.setattr(
+        brain,
+        "_delegate_ack",
+        lambda agent, task, cwd=None, *, explicit=False: dispatched.append(task) or "ack",
+    )
+    brain._remember_delegation("check the mail server")
+
+    brain._handle_delegate_markers("Right away. [[delegate: check the mail server]]")
+
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_fabricated_agent_result_is_corrected_not_spoken(monkeypatch):
+    # Live incident (jess_runtime.log 2026-09-21 18:51-18:53): three
+    # delegation decisions were logged, zero real dispatches ever happened,
+    # and the persona invented three separate fake Hermes replies in a row --
+    # "[Agent result from hermes: ...]" -- with no [[delegate:]] marker
+    # anywhere. session.py has always caught this (_on_llm_response /
+    # looks_like_delegation_promise); brain.py had no equivalent, so the
+    # fabrication reached the user unchecked. The user had to catch it live:
+    # "You didn't even talk to Hermes."
+    brain = BrainSession(PERSONAS[0])
+    monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    brain._messages.clear()
+    brain._last_user_text = "check my emails for anything important"
+
+    calls = {"n": 0}
+
+    async def fake_call_ollama():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return (
+                "I'm sending that request now, sir. [Agent result from hermes: "
+                "I need to know which email account to check.]"
+            )
+        return "I need to check with you before proceeding, sir."
+
+    monkeypatch.setattr(brain, "_call_ollama", fake_call_ollama)
+
+    async def no_delegation(_text):
+        return None
+
+    monkeypatch.setattr(brain, "_resolve_delegation", no_delegation)
+    ack_calls = []
+    monkeypatch.setattr(
+        brain,
+        "_delegate_ack",
+        lambda agent, task: ack_calls.append((agent, task)) or "[held]",
+    )
+
+    reply = await brain.complete("check my emails for anything important")
+
+    assert "Agent result from hermes" not in reply
+    assert calls["n"] == 2  # the fabricated first pass was replaced by a grounded second call
+    assert ack_calls == [(brain._default_agent_backend, "check my emails for anything important")]
+
+
+@pytest.mark.asyncio
+async def test_a_sub_agent_confirmation_gate_is_held_not_announced_as_done(monkeypatch):
+    # session.py has always caught a sub-agent that "finishes" by asking
+    # permission instead of doing the work (agent_bridge.requests_confirmation)
+    # -- documented there as jess_runtime.log 2026-07-06 18:26: hermes-yolo
+    # "completed" with "Requesting confirmation to proceed", and saying
+    # "confirm" afterward did nothing at all. brain.py's _announce_agent_job
+    # had no equivalent check, so the same gate would have been relayed as a
+    # genuine completed answer with no real way to approve it.
+    brain = BrainSession(PERSONAS[0])
+    monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    brain._messages.clear()
+    job = agent_bridge.AgentJob(
+        job_id="job-1", agent="hermes-yolo", task="search junk email", cwd="C:/work"
+    )
+    job.status = agent_bridge.STATUS_DONE
+    job.result = "I'm about to search your junk email; please say 'confirm' to proceed."
+
+    await brain._announce_agent_job(job)
+
+    assert brain._agent_confirm_streak["hermes-yolo"] == 1
+    assert len(brain._pending_confirmations) == 1
+    (agent, task, cwd, _reason), *_ = brain._pending_confirmations.values()
+    assert (agent, task[:17], cwd) == ("hermes-yolo", "search junk email", "C:/work")
+    # Never presented as a real, verified answer to the user's question.
+    assert not any(
+        "[Agent result from hermes-yolo:" in message.get("content", "")
+        for message in brain._messages
+    )
 
 
 @pytest.mark.asyncio
