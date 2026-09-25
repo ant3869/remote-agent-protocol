@@ -520,6 +520,40 @@ def detect_provider_failure(line: str) -> str | None:
     return None
 
 
+# Key/token-shaped substrings to strip before any raw process output is kept
+# in failure_detail, which can otherwise surface a provider's own error body
+# (a bearer token, an API key) straight into job history. Deliberately
+# pattern-based rather than provider-specific: catches vendor prefixes (sk-,
+# eyJ... JWTs) and the generic "key/token/secret: <value>" shape most
+# provider CLIs use in their own diagnostics.
+_SECRET_LIKE_RE = re.compile(
+    r"(?:sk|pk|rk)-[A-Za-z0-9_-]{10,}"
+    r"|AIza[A-Za-z0-9_-]{20,}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r"|(?i:api[_-]?key|access[_-]?token|bearer|secret)\s*[:=]\s*['\"]?[A-Za-z0-9._-]{8,}",
+)
+
+_MAX_FAILURE_TAIL_LINES = 10
+_MAX_FAILURE_TAIL_CHARS = 2000
+
+
+def redact_secrets(text: str) -> str:
+    """Replace key/token-shaped substrings in ``text`` with a placeholder."""
+    return _SECRET_LIKE_RE.sub("[redacted]", text)
+
+
+def _failure_tail(lines: list[str]) -> str:
+    """A bounded, redacted tail of raw job output for an unclassified failure.
+
+    Falls back to nothing (empty string) when there is genuinely no captured
+    output to show -- the caller then keeps whatever generic summary it has.
+    """
+    tail = [line.strip() for line in lines if line.strip()][-_MAX_FAILURE_TAIL_LINES:]
+    if not tail:
+        return ""
+    return redact_secrets("\n".join(tail))[:_MAX_FAILURE_TAIL_CHARS]
+
+
 _CONSULT_MARKER = "@@JESS_CONSULT"
 _CONSULT_PROTOCOL = """
 If another agent on this machine would know something you need, you may ask ONE
@@ -1998,8 +2032,13 @@ class AgentBridge:
                 job.summary = (
                     f"Agent failed with exit code {job.returncode} without reporting details"
                 )
-            if failed and job.summary and not job.failure_detail:
-                job.failure_detail = job.summary
+            if failed and not job.failure_detail:
+                # No classified failure_kind ever set failure_detail above --
+                # a bounded, redacted tail of everything actually captured
+                # beats mirroring the single-line summary (jess_agent_history
+                # entries like "exit code 1 without reporting details" had
+                # real output that never reached the recorded reason).
+                job.failure_detail = _failure_tail(job.lines) or job.summary
         if job.status == STATUS_DONE and not job.result:
             job.result = fallback_result(job.lines)
             job.result_is_fallback = True

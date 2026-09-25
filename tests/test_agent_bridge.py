@@ -23,6 +23,27 @@ class PureHelperTests(unittest.TestCase):
         raw = "\x1b[32mhello\x1b[0m world\r\x1b[K"
         self.assertEqual(agent_bridge.clean_line(raw), "hello world")
 
+    def test_redact_secrets_masks_key_shaped_substrings(self):
+        text = "auth failed, api_key: sk-abcdefghijklmnopqrstuvwxyz still rejected"
+        redacted = agent_bridge.redact_secrets(text)
+        self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz", redacted)
+        self.assertIn("[redacted]", redacted)
+
+    def test_redact_secrets_leaves_ordinary_text_alone(self):
+        text = "Preflight compaction required but failed: Summarization failed"
+        self.assertEqual(agent_bridge.redact_secrets(text), text)
+
+    def test_failure_tail_returns_bounded_redacted_join(self):
+        lines = [f"line {i}" for i in range(20)] + ["api_key: sk-abcdefghijklmnopqrstuvwxyz"]
+        tail = agent_bridge._failure_tail(lines)
+        self.assertNotIn("line 0", tail)  # older than the kept window
+        self.assertIn("line 19", tail)
+        self.assertIn("[redacted]", tail)
+
+    def test_failure_tail_of_empty_lines_is_empty(self):
+        self.assertEqual(agent_bridge._failure_tail([]), "")
+        self.assertEqual(agent_bridge._failure_tail(["   ", ""]), "")
+
     def test_build_command_substitutes_task_and_python(self):
         cmd = agent_bridge.build_command(["{python}", "run", "{task}"], "do a thing")
         self.assertEqual(cmd, [sys.executable, "run", "do a thing"])
@@ -1590,6 +1611,59 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(job.returncode, 1)
         self.assertEqual(job.summary, message)
         self.assertEqual(job.failure_detail, message)
+
+    def test_nonzero_exit_with_multiline_output_keeps_full_tail_in_detail(self):
+        # jess_agent_history.json has "Agent failed with exit code 1 without
+        # reporting details" for claude-code/openclaw even when real
+        # multi-line diagnostic output was printed -- only the single last
+        # line ever reached failure_detail. A bounded tail of everything
+        # captured is more useful for later debugging.
+        events: list[dict] = []
+        script = (
+            "print('Connecting to gateway...'); "
+            "print('Preflight compaction required but failed: Summarization failed'); "
+            "print('Retry-After: 120 seconds'); "
+            "raise SystemExit(1)"
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            job_id = await bridge.start("mock", "run a task")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
+        self.assertIn("Connecting to gateway", job.failure_detail)
+        self.assertIn("Retry-After: 120 seconds", job.failure_detail)
+
+    def test_failure_detail_redacts_key_shaped_output(self):
+        events: list[dict] = []
+        script = (
+            "print('Connection dropped, api_key: sk-abcdefghijklmnopqrstuvwxyz'); "
+            "raise SystemExit(1)"
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            job_id = await bridge.start("mock", "run a task")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_FAILED)
+        self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz", job.failure_detail)
+        self.assertIn("[redacted]", job.failure_detail)
 
     def test_zero_exit_with_error_tail_reports_failed(self):
         # Regression: code-puppy hit a 429 usage limit, printed the error, and
