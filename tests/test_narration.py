@@ -4,7 +4,8 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from remote_agent_protocol import narration
+from remote_agent_protocol import llm_endpoint, narration
+from remote_agent_protocol import model_providers as mp
 
 
 def _moment(kind=narration.KIND_WORKING, **kwargs):
@@ -130,6 +131,97 @@ class GenerationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         line = await asyncio.wait_for(narrator.line(_moment()), timeout=5)
+
+        self.assertTrue(line)
+
+
+class _FakeResponse:
+    def __init__(self, payload, status=200):
+        self._payload = payload
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise RuntimeError(f"status {self.status}")
+
+
+class _FakeSession:
+    def __init__(self, calls, payload):
+        self._calls = calls
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, json=None, headers=None):
+        self._calls.append({"url": url, "json": json, "headers": headers})
+        return _FakeResponse(self._payload)
+
+
+class RoleAssignmentTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Never saved/loaded in this test, so the path is never touched.
+        self.registry = mp.ProviderRegistry("unused-narration-role-assignment-tests.json")
+        llm_endpoint.use_registry(self.registry)
+        self.addCleanup(llm_endpoint.use_registry, None)
+
+    def _assign_narration(self, model="vendor/small-model"):
+        self.registry.upsert_provider(
+            mp.ProviderConfig(
+                id="openrouter",
+                preset="openrouter",
+                label="OpenRouter",
+                base_url="https://openrouter.test/v1",
+                auth="bearer",
+            )
+        )
+        self.registry.set_role_chain(
+            "narration", [mp.RoleChainEntry(provider_id="openrouter", model=model)]
+        )
+
+    async def test_uses_the_assigned_endpoint_when_a_role_is_configured(self):
+        self._assign_narration()
+        narrator = narration.Narrator("Jess", enabled=True)
+        calls: list[dict] = []
+        fake_session = _FakeSession(calls, {"choices": [{"message": {"content": "it moved."}}]})
+
+        with patch.object(narration.aiohttp, "ClientSession", lambda timeout=None: fake_session):
+            line = await narrator._generate(_moment())
+
+        self.assertEqual(line, "it moved.")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["url"], "https://openrouter.test/v1/chat/completions")
+        self.assertEqual(calls[0]["json"]["model"], "vendor/small-model")
+
+    async def test_an_explicit_host_override_bypasses_the_role_assignment(self):
+        """A caller that names a specific box means exactly that box."""
+        self._assign_narration()
+        narrator = narration.Narrator("Jess", host="http://127.0.0.1:1", timeout_secs=0.25)
+
+        with patch.object(narrator, "_generate_via_endpoint", side_effect=AssertionError):
+            line = await asyncio.wait_for(narrator.line(_moment()), timeout=5)
+
+        self.assertTrue(line)
+
+    async def test_a_failed_cloud_endpoint_degrades_to_a_stock_line(self):
+        self._assign_narration()
+        narrator = narration.Narrator("Jess", enabled=True)
+        fake_session = _FakeSession([], {})  # malformed: no "choices" key
+
+        with patch.object(narration.aiohttp, "ClientSession", lambda timeout=None: fake_session):
+            line = await narrator.line(_moment())
 
         self.assertTrue(line)
 

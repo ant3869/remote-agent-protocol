@@ -28,6 +28,7 @@ import aiohttp
 from loguru import logger
 
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol import llm_endpoint
 
 # A spoken sentence, not a paragraph. Anything longer is a model that ignored
 # the instruction, and gets clipped rather than read aloud in full.
@@ -302,6 +303,11 @@ class Narrator:
             enabled: Force generation on/off. Defaults to OFF -- see
                 :meth:`enable`.
         """
+        # An explicit host/model always wins over a role assignment: a caller
+        # that names a specific box (tests pointing at a dead address, an
+        # embedder wiring in its own model) means exactly that box, not
+        # whatever the operator has assigned to the narration role.
+        self._host_overridden = host is not None or model is not None
         self._host = (host or cfg.OLLAMA_HOST).rstrip("/")
         self._model = model or cfg.NARRATION_MODEL
         self._timeout = cfg.NARRATION_TIMEOUT_SECS if timeout_secs is None else timeout_secs
@@ -447,16 +453,33 @@ class Narrator:
         return "\n".join(rows)
 
     async def _generate(self, moment: Moment) -> str:
+        """One short completion, or "" on any miss.
+
+        Resolves through the narration role assignment when one exists and
+        no explicit host/model was given to this narrator; otherwise this is
+        exactly today's behavior: the small resident classifier model, over
+        Ollama's native chat API.
+        """
+        if not self._host_overridden:
+            endpoint = llm_endpoint.role_endpoint(llm_endpoint.NARRATION)
+            if endpoint is not None:
+                return await self._generate_via_endpoint(endpoint, moment)
+        return await self._generate_local(moment)
+
+    def _system_and_user_messages(self, moment: Moment) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": _SYSTEM.format(persona=self._persona_name, flavour=self._flavour),
+            },
+            {"role": "user", "content": self._facts(moment)},
+        ]
+
+    async def _generate_local(self, moment: Moment) -> str:
         """One short completion on the small resident model, or "" on any miss."""
         payload = {
             "model": self._model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": _SYSTEM.format(persona=self._persona_name, flavour=self._flavour),
-                },
-                {"role": "user", "content": self._facts(moment)},
-            ],
+            "messages": self._system_and_user_messages(moment),
             "stream": False,
             # Same VRAM discipline as the classifier: a small context so this
             # model stays resident beside the voice model instead of forcing
@@ -478,5 +501,27 @@ class Narrator:
                     data = await resp.json()
             return _clean_line(data["message"]["content"])
         except (TimeoutError, aiohttp.ClientError, KeyError, ValueError) as e:
+            logger.debug(f"Narration fell back to a stock line: {e}")
+            return ""
+
+    async def _generate_via_endpoint(self, endpoint: llm_endpoint.Endpoint, moment: Moment) -> str:
+        """One short OpenAI-compatible completion against an assigned role endpoint."""
+        payload = {
+            "model": endpoint.model,
+            "messages": self._system_and_user_messages(moment),
+            "max_tokens": 48,
+            "temperature": 0.9,
+            "top_p": 0.95,
+        }
+        timeout = aiohttp.ClientTimeout(total=self._timeout)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as http:
+                async with http.post(
+                    endpoint.chat_url, json=payload, headers=endpoint.headers
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+            return _clean_line(data["choices"][0]["message"]["content"])
+        except (TimeoutError, aiohttp.ClientError, KeyError, IndexError, ValueError) as e:
             logger.debug(f"Narration fell back to a stock line: {e}")
             return ""
