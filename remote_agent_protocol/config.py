@@ -1104,6 +1104,13 @@ EPHEMERAL_PROMPT_PREFIXES = (
     "[Correction --",
     "[Agent model control:",
     "[Not dispatched --",
+    # brain.py's BrainSession.ANNOUNCE_PREFIX: a finished/failed background
+    # job with no speaker of its own is relayed back through the ordinary
+    # text-turn pipeline as a synthetic "[[announce]] [id=...] [Agent job
+    # update: ...]" prompt so the persona can summarize it out loud. It is
+    # never something Ant said and must not linger in memory as if it were
+    # (2026-09-25 Phase B3: these were being persisted as fake user turns).
+    "[[announce]]",
 )
 
 # ---------------------------------------------------------------------------
