@@ -9,7 +9,8 @@ down, so every caller falls back to the local model rather than to silence.
 import pytest
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import llm_endpoint
+from remote_agent_protocol import llm_endpoint, secret_store
+from remote_agent_protocol import model_providers as mp
 
 KINDS = (llm_endpoint.BRAIN, llm_endpoint.INTENT, llm_endpoint.ORCHESTRATION)
 
@@ -206,3 +207,136 @@ def test_a_cloud_request_always_caps_its_own_cost(monkeypatch, cloud):
     local_payload = session._ollama_payload(stream=True, endpoint=local_ep)
     assert "max_tokens" not in local_payload, "the local model is not billed per token"
     assert local_payload["keep_alive"] == cfg.LLM_KEEP_ALIVE
+
+
+@pytest.fixture
+def registry(tmp_path):
+    """An isolated, in-memory-loaded registry -- never the real app data."""
+    reg = mp.ProviderRegistry(tmp_path / "model_providers.json")
+    llm_endpoint.use_registry(reg)
+    yield reg
+    llm_endpoint.use_registry(None)
+
+
+@pytest.fixture
+def fake_secrets():
+    backend = secret_store.InMemoryBackend()
+    secret_store.use_backend(backend)
+    yield backend
+    secret_store.use_backend(None)
+    secret_store._known_secrets.clear()
+
+
+def _openrouter_provider(provider_id="openrouter") -> mp.ProviderConfig:
+    return mp.ProviderConfig(
+        id=provider_id,
+        preset="openrouter",
+        label="OpenRouter",
+        base_url="https://openrouter.test/v1",
+        auth="bearer",
+        extra_headers={"X-Title": "Remote Agent Protocol"},
+    )
+
+
+def test_a_role_assignment_wins_over_the_legacy_cloud_env(registry, cloud):
+    """Acceptance #4: an operator-assigned chain wins even when CLOUD_* is set."""
+    registry.upsert_provider(_openrouter_provider())
+    registry.set_role_chain(
+        "butler", [mp.RoleChainEntry(provider_id="openrouter", model="vendor/model-a")]
+    )
+
+    result = llm_endpoint.chain(llm_endpoint.BRAIN)
+
+    assert [e.model for e in result] == ["vendor/model-a"]
+    assert result[0].base_url == "https://openrouter.test/v1"
+
+
+def test_an_empty_role_assignment_falls_back_to_legacy_env(registry, cloud):
+    result = llm_endpoint.chain(llm_endpoint.BRAIN)
+    assert [e.cloud for e in result] == [True, False]
+
+
+def test_role_chain_skips_a_disabled_provider(registry):
+    disabled = mp.ProviderConfig(
+        id="openrouter",
+        preset="openrouter",
+        label="OpenRouter",
+        base_url="https://openrouter.test/v1",
+        enabled=False,
+    )
+    registry.upsert_provider(disabled)
+    registry.set_role_chain(
+        "butler", [mp.RoleChainEntry(provider_id="openrouter", model="vendor/model-a")]
+    )
+
+    result = llm_endpoint.chain(llm_endpoint.BRAIN)
+
+    assert result[0].model == cfg.LLM_MODEL, "a disabled provider must be skipped, not returned"
+
+
+def test_role_chain_skips_a_missing_provider(registry):
+    registry.set_role_chain(
+        "butler", [mp.RoleChainEntry(provider_id="ghost-provider", model="m")]
+    )
+
+    result = llm_endpoint.chain(llm_endpoint.BRAIN)
+
+    assert result[0].model == cfg.LLM_MODEL
+
+
+def test_role_chain_entries_fetch_the_key_from_secret_store_not_the_dataclass(
+    registry, fake_secrets
+):
+    registry.upsert_provider(_openrouter_provider())
+    registry.set_role_chain(
+        "butler", [mp.RoleChainEntry(provider_id="openrouter", model="vendor/model-a")]
+    )
+    secret_store.set_key("openrouter", "sk-or-role-chain-secret")
+
+    endpoint = llm_endpoint.role_endpoint(llm_endpoint.BRAIN)
+
+    assert endpoint.api_key == "", "the key must never be cached on the frozen dataclass"
+    assert endpoint.headers["Authorization"] == "Bearer sk-or-role-chain-secret"
+    assert endpoint.headers["X-Title"] == "Remote Agent Protocol"
+
+
+def test_role_endpoint_returns_only_the_first_hop(registry):
+    registry.upsert_provider(_openrouter_provider("openrouter"))
+    registry.upsert_provider(_openrouter_provider("nine-router"))
+    registry.set_role_chain(
+        "butler",
+        [
+            mp.RoleChainEntry(provider_id="openrouter", model="a"),
+            mp.RoleChainEntry(provider_id="nine-router", model="b"),
+        ],
+    )
+
+    endpoint = llm_endpoint.role_endpoint(llm_endpoint.BRAIN)
+
+    assert endpoint.provider_id == "openrouter"
+    assert endpoint.model == "a"
+
+
+def test_narration_falls_back_to_local_when_unassigned(registry):
+    result = llm_endpoint.chain(llm_endpoint.NARRATION)
+    assert len(result) == 1
+    assert result[0].cloud is False
+    assert result[0].model == cfg.NARRATION_MODEL
+
+
+def test_narration_never_inherits_the_shared_persona_cloud_model(registry, cloud):
+    """A persona cloud model must not silently start narrating in the cloud too."""
+    assert llm_endpoint.cloud_endpoint(llm_endpoint.NARRATION) is None
+    result = llm_endpoint.chain(llm_endpoint.NARRATION)
+    assert result[0].cloud is False
+
+
+def test_narration_uses_its_own_role_assignment_when_configured(registry):
+    registry.upsert_provider(_openrouter_provider())
+    registry.set_role_chain(
+        "narration", [mp.RoleChainEntry(provider_id="openrouter", model="vendor/small-model")]
+    )
+
+    result = llm_endpoint.chain(llm_endpoint.NARRATION)
+
+    assert [e.model for e in result] == ["vendor/small-model"]

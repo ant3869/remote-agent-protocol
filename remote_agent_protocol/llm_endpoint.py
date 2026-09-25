@@ -14,16 +14,53 @@ that speaks ``/chat/completions`` and supply a key.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol import secret_store
+from remote_agent_protocol.model_providers import ProviderRegistry
 
-# The three callers. Each resolves its own model name but shares one endpoint.
+# The four callers. Each resolves its own model name but shares one endpoint.
 BRAIN = "brain"
 INTENT = "intent"
 ORCHESTRATION = "orchestration"
+NARRATION = "narration"
+
+# Which role-assignment chain (model_providers.ROLES) backs each caller.
+_ROLE_FOR_KIND = {
+    BRAIN: "butler",
+    INTENT: "intent",
+    ORCHESTRATION: "orchestration",
+    NARRATION: "narration",
+}
+
+_registry_override: ProviderRegistry | None = None
+_registry_singleton: ProviderRegistry | None = None
+
+
+def use_registry(registry: ProviderRegistry | None) -> None:
+    """Test hook: force a specific provider registry, or None for the app's own."""
+    global _registry_override
+    _registry_override = registry
+
+
+def get_registry() -> ProviderRegistry:
+    """The shared provider registry: providers, catalogs, role assignments.
+
+    Lazily loaded once per process from ``cfg.MODEL_PROVIDERS_PATH`` and
+    reused, so a role assignment the web UI saves is resolved against the
+    same instance on the very next call here -- no separate reload step.
+    """
+    if _registry_override is not None:
+        return _registry_override
+    global _registry_singleton
+    if _registry_singleton is None:
+        _registry_singleton = ProviderRegistry(Path(cfg.MODEL_PROVIDERS_PATH))
+        _registry_singleton.load()
+    return _registry_singleton
 
 
 @dataclass(frozen=True)
@@ -34,11 +71,21 @@ class Endpoint:
     model: str
     api_key: str = ""
     cloud: bool = False
+    provider_id: str = ""
+    extra_headers: dict[str, str] = field(default_factory=dict)
 
     @property
     def headers(self) -> dict[str, str]:
-        """Auth headers, or none for a local Ollama that wants no key."""
-        return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        """Auth headers plus any provider-specific extras.
+
+        A role-chain endpoint carries no key of its own (``api_key`` stays
+        ``""``) -- the key is fetched from ``secret_store`` here, at call
+        time, so it is never cached on this frozen dataclass.
+        """
+        key = self.api_key or (secret_store.get_key(self.provider_id) if self.provider_id else "")
+        result = {"Authorization": f"Bearer {key}"} if key else {}
+        result.update(self.extra_headers)
+        return result
 
     @property
     def chat_url(self) -> str:
@@ -57,7 +104,15 @@ class Endpoint:
 
 
 def _cloud_model(kind: str) -> str:
-    """The configured cloud model for one caller, falling back to the shared one."""
+    """The configured cloud model for one caller, falling back to the shared one.
+
+    NARRATION has no legacy env path of its own: sharing ``CLOUD_LLM_MODEL``
+    by default would silently start sending it to the cloud the day this
+    feature ships, for every install that already has a persona cloud model
+    configured. Only an explicit role assignment puts narration in the cloud.
+    """
+    if kind == NARRATION:
+        return ""
     per_kind = {
         BRAIN: cfg.CLOUD_LLM_MODEL,
         INTENT: cfg.CLOUD_INTENT_MODEL,
@@ -91,6 +146,7 @@ def local_endpoint(kind: str, model: str | None = None) -> Endpoint:
         BRAIN: cfg.LLM_MODEL,
         INTENT: cfg.INTENT_MODEL,
         ORCHESTRATION: cfg.ORCHESTRATION_REASONING_MODEL,
+        NARRATION: cfg.NARRATION_MODEL,
     }
     return Endpoint(
         base_url=cfg.OLLAMA_BASE_URL,
@@ -99,15 +155,56 @@ def local_endpoint(kind: str, model: str | None = None) -> Endpoint:
     )
 
 
+def _role_chain_endpoints(kind: str) -> tuple[Endpoint, ...]:
+    """The operator-assigned chain for this caller's role, resolved to endpoints.
+
+    Empty when nothing is assigned, or when every assigned entry's provider
+    is missing or disabled -- either way the caller falls back to the legacy
+    ``CLOUD_*``/local path. The local Ollama preset can appear anywhere in a
+    chain like any other provider; there is no hard-coded "local last" rule
+    here, because the operator's own ordering already encodes that.
+    """
+    role = _ROLE_FOR_KIND.get(kind)
+    if role is None:
+        return ()
+    registry = get_registry()
+    endpoints = []
+    for entry in registry.get_role_chain(role):
+        provider = registry.get_provider(entry.provider_id)
+        if provider is None or not provider.enabled:
+            continue
+        endpoints.append(
+            Endpoint(
+                base_url=provider.base_url,
+                model=entry.model,
+                cloud=provider.auth == "bearer",
+                provider_id=provider.id,
+                extra_headers=dict(provider.extra_headers),
+            )
+        )
+    return tuple(endpoints)
+
+
+def role_endpoint(kind: str) -> Endpoint | None:
+    """The first hop of ``kind``'s role-assignment chain, or None if unassigned."""
+    endpoints = _role_chain_endpoints(kind)
+    return endpoints[0] if endpoints else None
+
+
 def chain(
     kind: str, *, local_model: str | None = None, cloud_model: str | None = None
 ) -> tuple[Endpoint, ...]:
-    """Endpoints to try in order, honoring an explicit cloud-only policy.
+    """Endpoints to try in order: role assignment, then legacy env, then local.
 
-    The local endpoint is always last, so an unreachable cloud, a rejected key,
-    or a provider outage degrades to the machine's own model instead of to
-    silence.
+    A non-empty role-assignment chain wins outright and is returned as-is.
+    Otherwise this falls back to exactly today's behavior: the legacy
+    ``CLOUD_*`` endpoint first when configured, with the local endpoint
+    always last, so an unreachable cloud, a rejected key, or a provider
+    outage degrades to the machine's own model instead of to silence.
     """
+    role_chain = _role_chain_endpoints(kind)
+    if role_chain:
+        return role_chain
     cloud = cloud_endpoint(kind, cloud_model)
     local = local_endpoint(kind, local_model)
     if cloud is None:

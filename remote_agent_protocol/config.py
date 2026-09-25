@@ -752,6 +752,13 @@ CONVERSATION_STORE_PATH = Path(
     _env("CONVERSATION_STORE_PATH", str(DATA_DIR / "conversations.json"))
 )
 
+# The model-provider registry (Phase C0) -- providers, cached catalogs, test
+# results, and role chains. Holds no secrets; overridable so the test suite
+# can sandbox it away from real application data (see tests/conftest.py).
+MODEL_PROVIDERS_PATH = Path(
+    _env("MODEL_PROVIDERS_PATH", str(DATA_DIR / "model_providers.json"))
+)
+
 # Context-assembly and retention defaults for the conversation hub (Task 10).
 # CONVERSATION_RECENT_TURN_LIMIT is reserved for a future turn-count cap in
 # ContextAssembler -- context.py's ContextBudget is char-budgeted only today.

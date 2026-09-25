@@ -39,3 +39,13 @@ os.environ.setdefault(
     "CONVERSATION_STORE_PATH",
     os.path.join(tempfile.gettempdir(), f"rap_test_conversations_{os.getpid()}.json"),
 )
+
+# Same reasoning, for the model-provider registry (Phase C0): llm_endpoint's
+# role-chain resolution lazily loads and caches one registry per process, so
+# an unsandboxed path would let a real data/model_providers.json leak role
+# assignments into every test that resolves BRAIN/INTENT/ORCHESTRATION/
+# NARRATION without an explicit ``use_registry()`` override.
+os.environ.setdefault(
+    "MODEL_PROVIDERS_PATH",
+    os.path.join(tempfile.gettempdir(), f"rap_test_model_providers_{os.getpid()}.json"),
+)
