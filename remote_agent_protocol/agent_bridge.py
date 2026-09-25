@@ -44,6 +44,7 @@ from loguru import logger
 
 from remote_agent_protocol import collab, remote_protocol, voice_commands
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol.subprocess_resolution import find_shadow_executable, resolve_executable
 
 if TYPE_CHECKING:  # imported for typing only; keeps this module injection-only
     from remote_agent_protocol.remote_client import RemoteRegistry
@@ -330,7 +331,8 @@ class AgentJob:
     failure_kind: str = ""
     failure_detail: str = ""
     result_is_fallback: bool = False  # result was reconstructed from output, not agent-authored
-    model_label: str = ""
+    model_label: str = ""  # the CONFIGURED override's label, known before the job runs
+    answered_model: str = ""  # best-effort, parsed from the harness's OWN output; "" if unprinted
     host_modified: bool = False  # the job touched the host app's own source
     # Consultation bookkeeping. This is what makes the limits structural: an
     # agent may ask for whatever it likes, but depth and chain travel with the
@@ -519,6 +521,58 @@ def detect_provider_failure(line: str) -> str | None:
     return None
 
 
+# Key/token-shaped substrings to strip before any raw process output is kept
+# in failure_detail, which can otherwise surface a provider's own error body
+# (a bearer token, an API key) straight into job history. Deliberately
+# pattern-based rather than provider-specific: catches vendor prefixes (sk-,
+# eyJ... JWTs) and the generic "key/token/secret: <value>" shape most
+# provider CLIs use in their own diagnostics.
+_SECRET_LIKE_RE = re.compile(
+    r"(?:sk|pk|rk)-[A-Za-z0-9_-]{10,}"
+    r"|AIza[A-Za-z0-9_-]{20,}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r"|(?i:api[_-]?key|access[_-]?token|bearer|secret)\s*[:=]\s*['\"]?[A-Za-z0-9._-]{8,}",
+)
+
+_MAX_FAILURE_TAIL_LINES = 10
+_MAX_FAILURE_TAIL_CHARS = 2000
+
+
+def redact_secrets(text: str) -> str:
+    """Replace key/token-shaped substrings in ``text`` with a placeholder."""
+    return _SECRET_LIKE_RE.sub("[redacted]", text)
+
+
+# A harness that prints its active model does so under a handful of common,
+# unambiguous labels ("Model: X", "Using model: X"). Deliberately narrow and
+# anchored to the line start: this must never guess a model name out of
+# ordinary prose that happens to mention "model". No specific harness's
+# banner format is assumed here -- none of the 5 configured harnesses'
+# captured probe output during the 2026-09-25 audit matched this, so in
+# practice this currently returns None for all of them until a harness's
+# real format is confirmed and, if needed, a harness-specific pattern is
+# added alongside this one.
+_ANSWERED_MODEL_RE = re.compile(r"^(?:using\s+)?model\s*:\s*(\S.*)$", re.IGNORECASE)
+
+
+def extract_answered_model(line: str) -> str | None:
+    """Best-effort model name from one line of a harness's own output, or None."""
+    match = _ANSWERED_MODEL_RE.match(clean_line(line).strip())
+    return match.group(1).strip() if match else None
+
+
+def _failure_tail(lines: list[str]) -> str:
+    """A bounded, redacted tail of raw job output for an unclassified failure.
+
+    Falls back to nothing (empty string) when there is genuinely no captured
+    output to show -- the caller then keeps whatever generic summary it has.
+    """
+    tail = [line.strip() for line in lines if line.strip()][-_MAX_FAILURE_TAIL_LINES:]
+    if not tail:
+        return ""
+    return redact_secrets("\n".join(tail))[:_MAX_FAILURE_TAIL_CHARS]
+
+
 _CONSULT_MARKER = "@@JESS_CONSULT"
 _CONSULT_PROTOCOL = """
 If another agent on this machine would know something you need, you may ask ONE
@@ -633,9 +687,13 @@ def resolve_cwd(cwd: str | None, workspace_dir: str | None) -> str | None:
 def executable_status(command: list[str]) -> tuple[str, str]:
     """Whether a backend's command can be launched, without launching it.
 
-    Returns ``("ok"|"fail", explanation)``. This is as much as can be known
-    without spending a real turn on the agent, and it is what separates "not
-    installed on this machine" from "installed but slow to answer".
+    Returns ``("ok"|"warn"|"fail", explanation)``. This is as much as can be
+    known without spending a real turn on the agent, and it is what
+    separates "not installed on this machine" from "installed but slow to
+    answer". A "warn" flags a same-named ``.exe`` sitting elsewhere on PATH
+    that a *different*, shell-less launcher could pick up by mistake (see
+    docs/notes/2026-09-25-harness-audit.md) -- this process's own launch
+    path already resolves correctly via ``resolve_executable``.
     """
     if not command:
         return "fail", "empty command"
@@ -647,9 +705,17 @@ def executable_status(command: list[str]) -> tuple[str, str]:
             return "ok", f"found at {executable}"
         return "fail", f"not found: {executable}"
     found = shutil.which(executable)
-    if found:
-        return "ok", f"found at {found}"
-    return "fail", f"'{executable}' not found on PATH"
+    if not found:
+        return "fail", f"'{executable}' not found on PATH"
+    shadow = find_shadow_executable(executable)
+    if shadow:
+        return (
+            "warn",
+            f"found at {found}, but a different executable also answers to "
+            f"'{executable}' at {shadow.shadow} -- a shell-less launcher that "
+            "doesn't resolve via PATHEXT would run that one instead",
+        )
+    return "ok", f"found at {found}"
 
 
 def parse_status_line(line: str) -> dict | None:
@@ -1129,6 +1195,7 @@ class AgentBridge:
         completion_grace_secs: float = 2.0,
         on_persist: Callable[[AgentJob], "asyncio.Future | None"] | None = None,
         model_targets: dict | None = None,
+        default_model_targets: dict[str, str] | None = None,
         workspace_dir: str | None = None,
         scope_preamble: str = "",
         host_repo: str | None = None,
@@ -1147,6 +1214,10 @@ class AgentBridge:
             completion_grace_secs: Grace after a structured terminal marker.
             on_persist: Optional async callback that persists terminal jobs.
             model_targets: Agent/provider mappings for deterministic model overrides.
+            default_model_targets: Agent -> provider key applied immediately
+                via set_model_override(), so a broken default model doesn't
+                need a spoken/API override first. Unknown agent/provider
+                pairs are logged and skipped, not raised.
             workspace_dir: Default cwd for jobs started without one; None
                 inherits the host process directory (the old behavior).
             scope_preamble: Text added after every task ({cwd} placeholder);
@@ -1194,6 +1265,12 @@ class AgentBridge:
         self._tasks: set[asyncio.Task] = set()
         self._idle_notified = True
         self._public_work_since_idle = False
+        for agent, provider in (default_model_targets or {}).items():
+            if self.set_model_override(agent, provider) is None:
+                logger.warning(
+                    f"AGENT_DEFAULT_MODEL_TARGETS_JSON: no '{provider}' target for "
+                    f"'{agent}' in AGENT_MODEL_TARGETS -- ignoring"
+                )
 
     # -- queries ------------------------------------------------------------
 
@@ -1512,9 +1589,10 @@ class AgentBridge:
         # never .CMD/.BAT -- so an npm-installed shim like codex.CMD fails with
         # "WinError 2: The system cannot find the file specified" unless we
         # resolve it to its real, extensioned path first (jess_runtime.log
-        # 2026-07-10 19:59:55). shutil.which is a no-op on other platforms.
-        if resolved := shutil.which(command[0]):
-            command[0] = resolved
+        # 2026-07-10 19:59:55). A no-op on other platforms. Centralized in
+        # subprocess_resolution so this and remote_host.py's remote launch
+        # path share one implementation (docs/notes/2026-09-25-harness-audit.md).
+        command[0] = resolve_executable(command[0])
         try:
             proc = await asyncio.create_subprocess_exec(
                 *command,
@@ -1864,6 +1942,8 @@ class AgentBridge:
             line = clean_line(raw.decode("utf-8", errors="replace"))
             if not line:
                 continue
+            if not job.answered_model and (found_model := extract_answered_model(line)):
+                job.answered_model = found_model
             if job.agent in _HERMES_SESSION_AGENTS and (
                 session_match := _HERMES_SESSION_RE.fullmatch(line)
             ):
@@ -1984,8 +2064,13 @@ class AgentBridge:
                 job.summary = (
                     f"Agent failed with exit code {job.returncode} without reporting details"
                 )
-            if failed and job.summary and not job.failure_detail:
-                job.failure_detail = job.summary
+            if failed and not job.failure_detail:
+                # No classified failure_kind ever set failure_detail above --
+                # a bounded, redacted tail of everything actually captured
+                # beats mirroring the single-line summary (jess_agent_history
+                # entries like "exit code 1 without reporting details" had
+                # real output that never reached the recorded reason).
+                job.failure_detail = _failure_tail(job.lines) or job.summary
         if job.status == STATUS_DONE and not job.result:
             job.result = fallback_result(job.lines)
             job.result_is_fallback = True
@@ -2245,6 +2330,7 @@ class AgentBridge:
             "failure_detail": job.failure_detail,
             "result_is_fallback": job.result_is_fallback,
             "model_label": job.model_label,
+            "answered_model": job.answered_model,
             "host_modified": job.host_modified,
             "elapsed_secs": job.secs
             if job.secs is not None

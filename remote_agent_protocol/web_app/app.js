@@ -1136,7 +1136,11 @@ function renderAgentJobList() {
     const moves = Array.isArray(job.moves) ? job.moves : fallbackAgentMoves(job);
     const current = moves.at(-1)?.text || job.action || job.state || "No moves yet";
     const title = job.task || job.summary || "Agent task";
-    button.innerHTML = `<strong>${escapeHtml(job.agent || "Agent")}</strong><b>${escapeHtml(job.status || job.state || "unknown")}</b><span>${escapeHtml(title)}</span><em>${escapeHtml(current)}</em><time>${escapeHtml(fmtClock(job.started_at || job.finished_at))}</time>`;
+    // answered_model is best-effort (parsed from the harness's own output,
+    // e.g. Hermes's session banner) -- absent whenever a harness doesn't
+    // print it, so this never fabricates a model name.
+    const modelBadge = job.answered_model ? `<u title="Model that actually answered">${escapeHtml(job.answered_model)}</u>` : "";
+    button.innerHTML = `<strong>${escapeHtml(job.agent || "Agent")}</strong><b>${escapeHtml(job.status || job.state || "unknown")}</b><span>${escapeHtml(title)}</span><em>${escapeHtml(current)}</em>${modelBadge}<time>${escapeHtml(fmtClock(job.started_at || job.finished_at))}</time>`;
     button.addEventListener("click", () => {
       state.selectedAgentJobId = job.job_id;
       renderAgentJobList();
@@ -1190,7 +1194,7 @@ function renderAgentDetail() {
     job.step ? `Step: ${job.step}${job.step_total ? `/${job.step_total}` : ""}` : "",
     job.last_completed_step ? `Last done: ${job.last_completed_step}` : "",
   ].filter(Boolean).join(" · ");
-  $("agentDetailNow").innerHTML = `<span>${agentIsActive(job) ? "Current move" : "Final move"}</span><strong>${escapeHtml(currentMove?.text || job.action || job.state || "No move reported.")}</strong><p class="muted">${escapeHtml(nowMeta || job.model_label || job.failure_kind || "No extra status reported.")}</p>`;
+  $("agentDetailNow").innerHTML = `<span>${agentIsActive(job) ? "Current move" : "Final move"}</span><strong>${escapeHtml(currentMove?.text || job.action || job.state || "No move reported.")}</strong><p class="muted">${escapeHtml(nowMeta || job.answered_model || job.model_label || job.failure_kind || "No extra status reported.")}</p>`;
   $("agentMoveTimeline").innerHTML = moves.map((move) => (
     `<li class="${escapeHtml(move.status || "")}"><time>${escapeHtml(fmtClock(move.at))}</time><div><strong>${escapeHtml(move.event || "update")}</strong><p>${escapeHtml(move.text)}</p>${move.tool || move.step ? `<span>${escapeHtml([move.tool, move.step ? `step ${move.step}${move.step_total ? `/${move.step_total}` : ""}` : ""].filter(Boolean).join(" · "))}</span>` : ""}</div></li>`
   )).join("");

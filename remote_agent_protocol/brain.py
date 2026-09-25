@@ -91,6 +91,22 @@ class BrainSession:
         self._messages = (
             memory.load_memory(cfg.MEMORY_FILE, cfg.MEMORY_MAX_MSGS) if cfg.MEMORY_ENABLED else []
         )
+        if cfg.MEMORY_ENABLED:
+            # VoiceSession already does this on load (session.py); brain mode
+            # never had (2026-09-25 Phase B3), so old synthetic announce
+            # relays kept getting resent to the model and repersisted forever.
+            self._messages = memory.strip_ephemeral(
+                self._messages,
+                system_prefixes=(cfg.MEM0_MEMORY_HEADER,),
+                drop_contents=(cfg.KICKOFF_RETURNING, cfg.KICKOFF_FIRST),
+                drop_prefixes=cfg.EPHEMERAL_PROMPT_PREFIXES,
+            )
+        # Maps a control-turn's full wrapped message content (what the model
+        # sees and what self._messages holds) back to Ant's actual words, so
+        # persistence can store the real utterance without ever touching
+        # self._messages itself -- see _record_user_turn and
+        # _messages_for_persistence.
+        self._persisted_text_for_wrapped: dict[str, str] = {}
         self._router = intent_router.IntentRouter()
         self._routing_history: deque[dict] = deque(maxlen=25)
         self._pending_confirmations: dict[str, tuple[str, str, str | None, str]] = {}
@@ -130,6 +146,7 @@ class BrainSession:
             completion_grace_secs=cfg.AGENT_COMPLETION_GRACE_SECS,
             on_persist=self._persist_job if cfg.AGENT_HISTORY_FILE else None,
             model_targets=cfg.AGENT_MODEL_TARGETS,
+            default_model_targets=cfg.AGENT_DEFAULT_MODEL_TARGETS,
             workspace_dir=cfg.AGENT_WORKSPACE_DIR,
             scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
             host_repo=cfg.AGENT_HOST_REPO,
@@ -261,7 +278,7 @@ class BrainSession:
             finally:
                 self._http = None
         if cfg.MEMORY_ENABLED:
-            memory.save_memory(cfg.MEMORY_FILE, self._messages[-cfg.MEMORY_MAX_MSGS :])
+            memory.save_memory(cfg.MEMORY_FILE, self._messages_for_persistence()[-cfg.MEMORY_MAX_MSGS :])
 
     async def complete(
         self, user_text: str, *, llm_content: str | None = None, delivery: str = "text_only"
@@ -315,8 +332,39 @@ class BrainSession:
     def _record_user_turn(self, text: str, content: str) -> None:
         """Keep the user's wording alongside the outcome of local control actions."""
         if self._control_turn and not text.startswith(ANNOUNCE_PREFIX):
-            content = f"User request: {text}\n\nApplication context (not a new request):\n{content}"
+            wrapped = f"User request: {text}\n\nApplication context (not a new request):\n{content}"
+            # The model still needs the full wrapped content THIS turn (it's
+            # what self._messages holds and _ollama_payload sends verbatim);
+            # only what gets PERSISTED should be Ant's actual words, not the
+            # framework's scaffolding around them (2026-09-25 Phase B3).
+            self._persisted_text_for_wrapped[wrapped] = text
+            content = wrapped
+            if len(self._persisted_text_for_wrapped) > cfg.MEMORY_MAX_MSGS:
+                self._persisted_text_for_wrapped.pop(next(iter(self._persisted_text_for_wrapped)))
         self._messages.append({"role": "user", "content": content})
+
+    def _persisted_view(self, message: dict) -> dict:
+        """Swap a control-turn's wrapped content for Ant's real words, unwrapped ones as-is."""
+        content = message.get("content")
+        if message.get("role") != "user" or not isinstance(content, str):
+            return message
+        real_text = self._persisted_text_for_wrapped.get(content)
+        return {**message, "content": real_text} if real_text is not None else message
+
+    def _messages_for_persistence(self) -> list[dict]:
+        """A copy of self._messages fit to write to disk; self._messages itself is untouched.
+
+        Rewrites a control-turn's wrapped content back to Ant's real words
+        (see _record_user_turn), then drops pure framework relays the same
+        way every other EPHEMERAL_PROMPT_PREFIXES entry already is.
+        """
+        rewritten = [self._persisted_view(message) for message in self._messages]
+        return memory.strip_ephemeral(
+            rewritten,
+            system_prefixes=(cfg.MEM0_MEMORY_HEADER,),
+            drop_contents=(cfg.KICKOFF_RETURNING, cfg.KICKOFF_FIRST),
+            drop_prefixes=cfg.EPHEMERAL_PROMPT_PREFIXES,
+        )
 
     def _finish_turn(self, assistant: str, utterance: dict | None = None) -> None:
         """Record one completed assistant turn in history, memory, and the UI."""
@@ -324,7 +372,7 @@ class BrainSession:
             return
         self._messages.append({"role": "assistant", "content": assistant})
         if cfg.MEMORY_ENABLED:
-            memory.save_memory(cfg.MEMORY_FILE, self._messages[-cfg.MEMORY_MAX_MSGS :])
+            memory.save_memory(cfg.MEMORY_FILE, self._messages_for_persistence()[-cfg.MEMORY_MAX_MSGS :])
         self._emit(
             {**(utterance or self._conversation.utterance()), "text": assistant, "final": True}
         )

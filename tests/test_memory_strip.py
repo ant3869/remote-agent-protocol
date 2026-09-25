@@ -16,6 +16,10 @@ _INJECTED_PROMPTS = (
     "[Result returned by agent 'hermes' for the task 'find stuff'. This is the actual answer -- relay it to me when I ask about it; do not restate the task:]\nCurrent version: 0.0.614",
     # Retired marker-correction prompt; keep stripping old memory files.
     "[Correction -- your last reply promised agent work without dispatching.]",
+    # brain.py's ANNOUNCE_PREFIX relay (Phase B3, 2026-09-25): a finished
+    # background job with no speaker of its own, fed back through the
+    # ordinary text-turn pipeline as a synthetic prompt.
+    "[[announce]] [id=job-1:done] [Agent job update: hermes done. Outcome: ok.]",
 )
 
 

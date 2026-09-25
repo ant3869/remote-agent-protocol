@@ -27,6 +27,7 @@ class FakeJob:
     failure_kind: str = ""
     failure_detail: str = ""
     model_label: str = ""
+    answered_model: str = ""
 
 
 class JobStoreTests(unittest.TestCase):
@@ -57,6 +58,36 @@ class JobStoreTests(unittest.TestCase):
         self.assertEqual(row["started_at"], "2026-07-05T02:44:01.643-05:00")
         self.assertEqual(row["finished_at"], "2026-07-05T02:47:01.843-05:00")
         self.assertEqual(row["failure_kind"], "")
+
+    def test_answered_model_survives_persistence(self):
+        row = job_store.job_to_row(FakeJob("job-model", answered_model="openai/gpt-6-luna-pro"))
+        self.assertEqual(row["answered_model"], "openai/gpt-6-luna-pro")
+
+    def test_answered_model_defaults_to_empty_for_a_job_object_without_it(self):
+        @dataclass
+        class LegacyJob:
+            job_id: str = "job-legacy"
+            agent: str = "mock"
+            machine: str = "local"
+            task: str = "do a thing"
+            status: str = "done"
+            secs: float | None = 1.2
+            lines: list = field(default_factory=list)
+            state: str = "completed"
+            action: str = "Finished"
+            tool: str = ""
+            step: int | None = None
+            step_total: int | None = None
+            last_completed_step: str = ""
+            summary: str = ""
+            started_at: str = ""
+            finished_at: str = ""
+            failure_kind: str = ""
+            failure_detail: str = ""
+            model_label: str = ""
+
+        row = job_store.job_to_row(LegacyJob())
+        self.assertEqual(row["answered_model"], "")
 
     def test_missing_file_returns_empty(self):
         self.assertEqual(job_store.load_history("does-not-exist.json"), [])

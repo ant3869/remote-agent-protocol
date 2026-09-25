@@ -388,6 +388,77 @@ async def test_machine_output_requires_the_same_bound_agent_to_author_a_final_re
 
 
 @pytest.mark.asyncio
+async def test_duplicate_completion_events_write_exactly_one_turn(tmp_path):
+    """B1 (2026-09-25): a burst of identical completion events for the same
+    job_id must not each append a new turn -- 2026-09-20 04:04:24 wrote one
+    OpenClaw success turn 20 times this way. Root cause: _task_by_job_id
+    matches on attempt_id alone, with no status check, so a redelivered
+    terminal event for an already-done task kept finding and re-recording it.
+    """
+    hub, _registry, adapters = make_hub(tmp_path)
+    disposition = await hub.handle_turn(turn_request("OpenClaw, check my email"))
+    task = hub.task(disposition.task_id)
+    job_event = {
+        "type": "agent_job",
+        "agent": "openclaw",
+        "job_id": task.attempt_id,
+        "status": "done",
+        "result": "The inbox is clear.",
+        "result_is_fallback": False,
+    }
+
+    for _ in range(20):
+        await hub.handle_job_event(job_event)
+
+    result_turns = [
+        turn for turn in hub.turns("agent:openclaw") if turn.result_kind == ResultKind.SUCCESS
+    ]
+    assert len(result_turns) == 1
+    assert result_turns[0].full_text == "The inbox is clear."
+    assert hub.task(disposition.task_id).status == "done"
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_replay_an_already_recorded_completion(tmp_path):
+    """B2 (2026-09-25): a completion event replayed after restart -- a
+    backlog reconciliation against jess_agent_history.json, say -- must not
+    re-append a turn the restored store already has. 2026-09-21 11:59:17:
+    ~30 old turns were re-appended as new ones this way. The same guard that
+    fixes B1 covers this: the restored task is already terminal, so the
+    replayed event is recognized and dropped, whatever triggered the replay.
+    """
+    hub, _registry, adapters = make_hub(tmp_path)
+    disposition = await hub.handle_turn(turn_request("OpenClaw, check my email"))
+    task = hub.task(disposition.task_id)
+    job_event = {
+        "type": "agent_job",
+        "agent": "openclaw",
+        "job_id": task.attempt_id,
+        "status": "done",
+        "result": "The inbox is clear.",
+        "result_is_fallback": False,
+    }
+    await hub.handle_job_event(job_event)
+    turn_count_before = len(hub.turns("agent:openclaw"))
+
+    # Simulate a restart: a fresh hub instance loads the persisted store.
+    store = ConversationStore(tmp_path / "conversations.json")
+    restarted, _registry2, _adapters2 = make_hub(tmp_path, adapters=adapters)
+    restarted.restore(store.load())
+    assert len(restarted.turns("agent:openclaw")) == turn_count_before
+
+    # A second restore (e.g. a supervisor restarting the process again with
+    # no new activity in between) must also leave the turn count unchanged.
+    restarted.restore(store.load())
+    assert len(restarted.turns("agent:openclaw")) == turn_count_before
+
+    # A backlog replay (or a redelivered event) for the same, now-restored,
+    # already-terminal job must not duplicate the turn either.
+    await restarted.handle_job_event(job_event)
+    assert len(restarted.turns("agent:openclaw")) == turn_count_before
+
+
+@pytest.mark.asyncio
 async def test_invalid_presentation_output_transfers_recovery_to_butler(tmp_path):
     """A second raw output is not promoted; Butler receives only recovery narration."""
     events = []

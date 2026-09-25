@@ -256,6 +256,27 @@ class CheckAgentBackendsTests(unittest.TestCase):
             results = doctor.check_agent_backends()
         self.assertEqual(results[0].status, "ok")
 
+    def test_shadow_executable_elsewhere_on_path_warns(self):
+        from remote_agent_protocol.subprocess_resolution import ExecutableShadow
+
+        with (
+            mock.patch.object(cfg, "AGENT_BACKENDS", {"openclaw": ["openclaw", "{task_file}"]}),
+            mock.patch(
+                "remote_agent_protocol.agent_bridge.shutil.which",
+                return_value=r"C:\npm\openclaw.CMD",
+            ),
+            mock.patch(
+                "remote_agent_protocol.agent_bridge.find_shadow_executable",
+                return_value=ExecutableShadow(
+                    resolved=r"C:\npm\openclaw.CMD", shadow=r"C:\local\bin\openclaw.exe"
+                ),
+            ),
+        ):
+            results = doctor.check_agent_backends()
+        self.assertEqual(results[0].status, "warn")
+        self.assertIn(r"C:\npm\openclaw.CMD", results[0].message)
+        self.assertIn(r"C:\local\bin\openclaw.exe", results[0].message)
+
     def test_never_executes_the_backend_command(self):
         with (
             mock.patch.object(cfg, "AGENT_BACKENDS", {"hermes": ["hermes", "chat", "{task}"]}),

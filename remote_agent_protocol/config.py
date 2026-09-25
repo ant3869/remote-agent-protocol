@@ -574,6 +574,18 @@ AGENT_MODEL_TARGETS = {
         }
     },
 }
+# AGENT_DEFAULT_MODEL_TARGETS_JSON: agent name -> provider key applied to
+# AGENT_MODEL_TARGETS automatically at bridge init, so a backend whose own
+# default model is broken (2026-09-25 harness audit: code-puppy's default
+# routes through a local proxy with a dead Claude credential) comes up
+# already pointed at a known-good target instead of waiting for someone to
+# say "switch code-puppy to openai" out loud first. Empty by default -- this
+# changes no behavior unless set. Invalid entries (unknown agent/provider)
+# are logged and skipped, never raised, since this is loaded at startup.
+# Example: AGENT_DEFAULT_MODEL_TARGETS_JSON={"code-puppy":"openai"}
+AGENT_DEFAULT_MODEL_TARGETS = _parse_string_map(
+    _env("AGENT_DEFAULT_MODEL_TARGETS_JSON", ""), "AGENT_DEFAULT_MODEL_TARGETS_JSON"
+)
 _LOCAL_MACHINE = _env("AGENT_LOCAL_MACHINE", "Main PC")
 AGENT_LOCAL_MACHINE = _LOCAL_MACHINE
 AGENT_MACHINES = {
@@ -1092,6 +1104,13 @@ EPHEMERAL_PROMPT_PREFIXES = (
     "[Correction --",
     "[Agent model control:",
     "[Not dispatched --",
+    # brain.py's BrainSession.ANNOUNCE_PREFIX: a finished/failed background
+    # job with no speaker of its own is relayed back through the ordinary
+    # text-turn pipeline as a synthetic "[[announce]] [id=...] [Agent job
+    # update: ...]" prompt so the persona can summarize it out loud. It is
+    # never something Ant said and must not linger in memory as if it were
+    # (2026-09-25 Phase B3: these were being persisted as fake user turns).
+    "[[announce]]",
 )
 
 # ---------------------------------------------------------------------------
