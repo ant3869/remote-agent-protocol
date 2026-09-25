@@ -260,7 +260,17 @@ would talk over itself.
   always-listening when the engine is unavailable; secondary persona models
   activate only when they are installed locally.
 - Memory and job-history writes are atomic (temp file + swap), and every
-  injected one-shot prompt is stripped before the transcript is persisted.
+  injected one-shot prompt is stripped before the transcript is persisted --
+  in both full voice mode and brain mode, including a control turn's
+  "Application context" wrapper (the real utterance is kept) and the
+  `[[announce]]` background-job relay used to voice a finished job.
+- Agent-job completion events are idempotent per (task, attempt): a
+  redelivered or replayed terminal event for an already-finished job cannot
+  append a duplicate conversation turn.
+- Backend executable resolution is centralized in `subprocess_resolution.py`
+  (a bare command name only gets `.exe` auto-appended by a shell-less launch
+  on Windows, never `.cmd`/`.bat`); `doctor` warns when a backend resolves to
+  an unexpected binary elsewhere on PATH.
 - Pure routing, memory, configuration, dashboard, wake-word, processor, and
   bridge behavior have focused unit coverage.
 
@@ -318,6 +328,20 @@ rejected. `AGENT_MACHINES_JSON` supplies the machine labels shown in the UI.
 AGENT_BACKENDS_JSON={"openclaw":["trusted-launcher","openclaw","{task}"]}
 AGENT_MACHINES_JSON={"openclaw":"Laptop"}
 ```
+
+`AGENT_DEFAULT_MODEL_TARGETS_JSON` pins a backend to one of its own
+`AGENT_MODEL_TARGETS` entries at bridge init (agent name -> provider key),
+for a backend whose own default model is unreliable:
+
+```dotenv
+AGENT_DEFAULT_MODEL_TARGETS_JSON={"code-puppy":"openai"}
+```
+
+Each `AgentJob` also carries `model_label` (the configured override's label,
+known before the job runs) and `answered_model` (best-effort, parsed from the
+harness's own output where it prints one -- empty otherwise, never guessed).
+A non-zero exit with no classified failure reason keeps a bounded, redacted
+tail of the process's actual output in `failure_detail`.
 
 ### Remote agent hosts
 

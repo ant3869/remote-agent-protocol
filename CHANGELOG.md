@@ -10,6 +10,32 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ## [Unreleased]
 
+### Added
+
+- `AGENT_DEFAULT_MODEL_TARGETS_JSON` config: pin a backend to a known-good
+  `AGENT_MODEL_TARGETS` entry at startup, so a harness whose own default model
+  is broken doesn't need a spoken override every session.
+- `AgentJob.answered_model`, a best-effort record of which model actually
+  answered a delegated job, parsed from the harness's own output where it
+  prints one; surfaced in job history and the Agents panel.
+- `subprocess_resolution` module centralizing backend-executable resolution
+  (previously duplicated in `agent_bridge.py` and `remote_host.py`); `doctor`
+  now warns when a backend resolves to an unexpected binary elsewhere on PATH.
+
+### Fixed
+
+- A non-zero exit with no classified failure reason now keeps a bounded,
+  redacted tail of the process's actual output in `failure_detail`, instead
+  of a content-free "exit code N without reporting details".
+- Agent-job completion events are now idempotent per task/attempt: a
+  redelivered or replayed terminal event for an already-finished job no
+  longer appends a duplicate conversation turn (fixes both a live
+  duplicate-delivery burst and a restart-time backlog replay).
+- Brain mode no longer persists injected scaffolding -- a control turn's
+  "Application context" wrapper or a background job's `[[announce]]` relay --
+  into `jess_memory.json` as if it were something Ant said; only the real
+  utterance is stored, and the model-facing context is unchanged.
+
 ## [1.16.0] - 2026-09-17
 
 ### Added
