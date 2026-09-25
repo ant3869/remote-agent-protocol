@@ -160,8 +160,16 @@ def set_key(provider_id: str, key: str) -> None:
 
 
 def get_key(provider_id: str) -> str | None:
-    """The stored key for ``provider_id``, or None if none is stored."""
-    return _resolve_backend().get(_target(provider_id))
+    """The stored key for ``provider_id``, or None if none is stored.
+
+    Also tracks the value for redaction, since this -- not ``set_key`` -- is
+    the path every later app start actually uses to fetch a key that was
+    saved in a previous session.
+    """
+    key = _resolve_backend().get(_target(provider_id))
+    if key:
+        _known_secrets.add(key)
+    return key
 
 
 def delete_key(provider_id: str) -> bool:
@@ -197,5 +205,13 @@ def _patch_record(record: dict) -> None:
 
 
 def install_log_redaction() -> None:
-    """Patch loguru so a stored key never reaches a sink verbatim."""
+    """Patch loguru so a stored key never reaches a sink verbatim.
+
+    ``logger.configure(patcher=...)`` replaces the whole patcher slot, not
+    just this one -- there is currently no other caller of it anywhere in the
+    app, but a future one that calls it again after this would silently
+    disable redaction. Call this once, late in startup, after any other
+    ``logger.configure(patcher=...)`` call, or fold that call's logic into
+    ``_patch_record`` instead of adding a second ``configure``.
+    """
     logger.configure(patcher=_patch_record)

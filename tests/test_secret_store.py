@@ -79,6 +79,21 @@ def test_redact_strips_a_tracked_key_out_of_arbitrary_text():
     assert "[REDACTED]" in secret_store.redact(message)
 
 
+def test_get_key_also_tracks_the_value_for_redaction():
+    """The dominant real path is: save once, then only ever get_key() on later
+    starts. Redaction must cover that path, not just the value passed to set_key.
+    """
+    backend = secret_store.InMemoryBackend()
+    backend.set(secret_store._target("openrouter"), "sk-or-loaded-from-store")
+    secret_store.use_backend(backend)
+
+    secret_store.get_key("openrouter")
+
+    assert "sk-or-loaded-from-store" not in secret_store.redact(
+        "used key sk-or-loaded-from-store just now"
+    )
+
+
 def test_redact_leaves_unrelated_text_untouched():
     secret_store.set_key("openrouter", "sk-or-super-secret-value")
     assert secret_store.redact("nothing sensitive here") == "nothing sensitive here"
