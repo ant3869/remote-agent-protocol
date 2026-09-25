@@ -449,6 +449,12 @@ class BrainSession:
             self._direct_reply = voice_commands.OPENCLAW_OPENAI_REAUTH_GUIDANCE
             return "[OpenClaw authentication command supplied by RAP; do not start any new work.]"
 
+        control = voice_commands.parse_agent_control(
+            text, cfg.AGENT_BACKENDS, cfg.AGENT_SPOKEN_ALIASES
+        )
+        if control is not None:
+            return self._handle_agent_control_command(control)
+
         if self._last_liveness_agent is not None and voice_commands.is_agent_liveness_followup(
             text
         ):
@@ -536,6 +542,35 @@ class BrainSession:
             return self._delegate_ack(agent, task)
         return llm_content or text
 
+    def _handle_agent_control_command(self, control: tuple[str, str | None]) -> str:
+        """Answer or apply "list agents" / "make X my default agent" locally.
+
+        Ported from VoiceSession._handle_agent_control_command (session.py) --
+        voice_commands.parse_agent_control was wired only in session.py, so
+        these two spoken commands silently fell through to delegation in
+        brain mode.
+        """
+        self._control_turn = True
+        action, agent = control
+        if action == "list":
+            names = ", ".join(self._bridge.backend_names())
+            self._direct_reply = (
+                f"Available agents: {names}. Default is {self._default_agent_backend}."
+            )
+            return (
+                f"[Agent control: available agents are {names}; "
+                f"default is {self._default_agent_backend}.]"
+            )
+        if action == "get_default":
+            self._direct_reply = f"Your default agent is {self._default_agent_backend}."
+            return f"[Agent control: the default agent is {self._default_agent_backend}.]"
+        assert agent is not None
+        self._default_agent_backend = agent
+        logger.info(f"Default agent backend -> {agent}")
+        self._emit({"type": "default_agent_changed", "agent": agent})
+        self._direct_reply = f"Your default agent is now {agent}."
+        return f"[Agent control: the default agent is now {agent}.]"
+
     async def _handle_agent_cancel(self, cancel_request: tuple[str | None, bool]) -> str:
         """Cancel matching active jobs for real, then let the persona narrate it.
 
@@ -607,9 +642,7 @@ class BrainSession:
         if missing is not None:
             self._direct_reply = f"I could not run an agent diagnostic: {missing}."
         else:
-            self._direct_reply = (
-                f"Agent diagnostic: {'; '.join(rows)}. {agent_status.DIAGNOSTIC_LIMITATION}"
-            )
+            self._direct_reply = "\n".join(("Agent diagnostic:", *rows))
         return agent_status.format_diagnostic(rows, missing)
 
     async def _handle_agent_redirect(self, new_agent: str) -> str:
@@ -788,6 +821,9 @@ class BrainSession:
                 forced_reason
                 or "this task changes files, installs software, or otherwise mutates the system"
             )
+            repeat_note = self._denial_repeat_note(agent, task)
+            if repeat_note:
+                reason = f"{reason} {repeat_note}"
             self._confirm_counter += 1
             token = f"confirm-{self._confirm_counter}"
             self._pending_confirmations[token] = (agent, task, cwd, reason)
@@ -871,6 +907,10 @@ class BrainSession:
         hub failure/stall (task-8 review round 1, #1).
         """
         explanation = present_no_dispatch_explanation(disposition.spoken_acknowledgment)
+        logger.info(
+            f"Hub resolved to no dispatch on channel '{disposition.channel_id}' "
+            f"(reason={disposition.floor_decision.reason_code}): {explanation!r}"
+        )
         self._messages.append({"role": "assistant", "content": explanation})
 
     async def _hold_agent_confirmation(self, job: agent_bridge.AgentJob, prompt_text: str) -> None:
@@ -967,6 +1007,30 @@ class BrainSession:
             return cfg.AGENT_CONFIRM_APPROVED_PROMPT.format(agent=agent, task=task)
         self._recently_denied.append((agent, task.strip().lower()))
         return cfg.AGENT_CONFIRM_DENIED_PROMPT.format(agent=agent, task=task)
+
+    def _denial_repeat_note(self, agent: str, task: str) -> str:
+        """Flag a proposal that closely resembles one the user denied this session.
+
+        Ported from VoiceSession._denial_repeat_note (session.py) -- brain.py
+        wrote to ``self._recently_denied`` but never read it back, so a
+        repeated confirmation prompt gave no hint the user had already said
+        no to essentially the same thing.
+        """
+        normalized = task.strip().lower()
+        words = set(normalized.split())
+        for denied_agent, denied_task in self._recently_denied:
+            if denied_agent != agent:
+                continue
+            if denied_task == normalized:
+                return "(you denied this same request earlier this session)"
+            denied_words = set(denied_task.split())
+            if (
+                words
+                and denied_words
+                and len(words & denied_words) / len(words | denied_words) >= 0.6
+            ):
+                return "(similar to a request you denied earlier this session)"
+        return ""
 
     def _maybe_consume_confirmation(self, text: str) -> str | None:
         if not self._pending_confirmations:
@@ -1311,6 +1375,10 @@ class BrainSession:
         agent_id = task_ref.agent_id if task_ref is not None else ""
         line = present_butler_intervention(
             event.get("data") or {}, agent_id=agent_id, detail=event.get("detail", "")
+        )
+        logger.info(
+            f"Hub intervention for agent '{agent_id}' (task={task_id}, "
+            f"detail={event.get('detail', '')!r}): {line!r}"
         )
         self._messages.append({"role": "assistant", "content": line})
 

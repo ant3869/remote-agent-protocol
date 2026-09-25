@@ -177,8 +177,9 @@ async def test_actual_response_diagnostic_stays_local_and_starts_fixed_check(mon
 
     brain._control_plane.list_agents.assert_awaited_once_with(refresh=True)
     brain._control_plane.request_response_check.assert_awaited_once_with("codex")
+    assert response.startswith("Agent diagnostic:\n")
     assert "self-check is pinging" in response
-    assert "fixed-response evidence" in response
+    assert "fixed-response evidence" not in response
     assert "[[delegate" not in response
 
 

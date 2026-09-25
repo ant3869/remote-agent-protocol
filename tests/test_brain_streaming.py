@@ -391,6 +391,49 @@ async def test_an_approved_confirmation_never_dispatches_a_second_marker(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_agent_control_commands_are_answered_locally_without_delegating(monkeypatch):
+    # voice_commands.parse_agent_control ("list agents" / "make X my default
+    # agent") was wired only in session.py; brain.py silently fell through to
+    # delegation for these spoken commands instead of answering from state.
+    monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    monkeypatch.setattr(cfg, "AGENT_BACKENDS", {"code-puppy": ["{python}"], "hermes": ["{python}"]})
+    events = []
+    brain = BrainSession(PERSONAS[0], on_event=events.append)
+    brain._messages.clear()
+
+    listed = await brain._turn_content("list agents", None)
+    current = await brain._turn_content("what is my default agent", None)
+    changed = await brain._turn_content("make code puppy my default agent", None)
+
+    assert "available agents" in listed
+    assert "default agent" in current
+    assert "code-puppy" in changed
+    assert brain._default_agent_backend == "code-puppy"
+    assert any(
+        event.get("type") == "default_agent_changed" and event.get("agent") == "code-puppy"
+        for event in events
+    )
+
+
+def test_confirmation_prompt_flags_a_similar_earlier_denial(monkeypatch):
+    # brain.py wrote to self._recently_denied on every denial but never read
+    # it back (session.py's _denial_repeat_note, ported below), so a repeated
+    # confirmation prompt gave no hint the user had already said no.
+    monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    monkeypatch.setattr(cfg, "AGENT_CONFIRM_ENABLED", True)
+    events = []
+    brain = BrainSession(PERSONAS[0], on_event=events.append)
+    brain._messages.clear()
+    brain._recently_denied.append(("hermes", "delete the old logs"))
+
+    brain._delegate_ack("hermes", "delete the old logs")
+
+    confirm_events = [event for event in events if event.get("type") == "agent_confirm"]
+    assert len(confirm_events) == 1
+    assert "denied this same request earlier this session" in confirm_events[0]["reason"]
+
+
+@pytest.mark.asyncio
 async def test_a_marker_repeated_across_turns_is_not_dispatched_twice(monkeypatch):
     # brain.py wrote to _recent_delegations (inside _delegate_ack's
     # _remember_delegation call) but never read it back, so the exact same

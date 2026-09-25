@@ -1827,8 +1827,16 @@ def test_conversation_channels_payload_lists_the_hubs_channels(session_loop):
     payload = app._conversation_channels_payload()
 
     assert payload["available"] is True
-    assert [row["channel_id"] for row in payload["channels"]] == ["coordinator:butler"]
-    assert payload["channels"][0]["resettable"] is False
+    # conversation_hub/migrations.py eagerly creates a channel for Butler and
+    # every configured agent at hub construction, not just the one a turn
+    # touches; channels() order is explicitly undocumented/unguaranteed
+    # (conversation_hub/service.py), so compare as a set.
+    assert {row["channel_id"] for row in payload["channels"]} == {
+        "coordinator:butler",
+        *(f"agent:{name}" for name in cfg.AGENT_BACKENDS),
+    }
+    butler = next(row for row in payload["channels"] if row["channel_id"] == "coordinator:butler")
+    assert butler["resettable"] is False
 
 
 def test_conversation_history_payload_includes_the_hubs_user_turn(session_loop):
@@ -2007,7 +2015,11 @@ def test_conversation_routes_are_served_over_http(session_loop):
     try:
         port = server.server_address[1]
         channels = _get_json(port, "/api/conversation-channels")
-        assert [row["channel_id"] for row in channels["channels"]] == ["coordinator:butler"]
+        # See test_conversation_channels_payload_lists_the_hubs_channels above.
+        assert {row["channel_id"] for row in channels["channels"]} == {
+            "coordinator:butler",
+            *(f"agent:{name}" for name in cfg.AGENT_BACKENDS),
+        }
 
         history = _get_json(port, "/api/conversation-history?channel_id=&query=invoice")
         assert [entry["full_text"] for entry in history["entries"]] == ["check the invoice totals"]

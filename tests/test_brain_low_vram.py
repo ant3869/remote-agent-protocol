@@ -1,7 +1,53 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from remote_agent_protocol import brain, llm_endpoint, personas
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol.control_plane.adapters.fake import FakeAgentAdapter
+from remote_agent_protocol.control_plane.models import (
+    Activity,
+    AgentObservation,
+    Evidence,
+    Health,
+    JobHandle,
+    Presence,
+)
+
+
+def _reachable_observation(agent_id: str) -> AgentObservation:
+    now = datetime.now(UTC)
+    return AgentObservation(
+        agent_id=agent_id,
+        display_name=agent_id,
+        harness=agent_id,
+        machine="local",
+        presence=Presence.REACHABLE,
+        activity=Activity.IDLE,
+        health=Health.HEALTHY,
+        capabilities=frozenset(),
+        evidence=(Evidence("fake", now, "Responded."),),
+        observed_at=now,
+        expires_at=now + timedelta(seconds=30),
+    )
+
+
+def _missing_executable_observation(agent_id: str) -> AgentObservation:
+    now = datetime.now(UTC)
+    return AgentObservation(
+        agent_id=agent_id,
+        display_name=agent_id,
+        harness=agent_id,
+        machine="local",
+        presence=Presence.STOPPED,
+        activity=Activity.UNKNOWN,
+        health=Health.FAILED,
+        capabilities=frozenset(),
+        evidence=(Evidence("fake", now, "Configured executable was not found."),),
+        observed_at=now,
+        expires_at=now + timedelta(seconds=30),
+        issues=("missing_executable",),
+    )
 
 
 class FakeResponse:
@@ -86,35 +132,61 @@ async def test_a_group_ping_is_answered_from_rap_not_delegated(monkeypatch, tmp_
     # An agent cannot report on its peers; asked to, it guesses, and the guess
     # is spoken as fact. RAP answers this itself from what it can verify.
     monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
-    monkeypatch.setattr(cfg, "AGENT_BACKENDS", {"mock": ["{python}", "-c", "print(1)"]})
+    # Isolate the control plane's on-disk registry (control_plane/registry.py
+    # persists to cfg.DATA_DIR / "agent_registry.json") so this reflects only
+    # what the test sets up, never leftover state from a real RAP session.
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     session = brain.BrainSession(personas.PERSONAS[0])
     started = []
     monkeypatch.setattr(session._bridge, "start", lambda *a, **k: started.append(a))
+    # The control-plane migration (control_plane/adapters/factory.py) wires
+    # rollcall adapters for five known harnesses only; AGENT_BACKENDS no
+    # longer steers what the rollcall sees, so a fake adapter is injected
+    # directly at the same seam test_agent_control_plane.py uses.
+    session._control_plane._adapters = {
+        "mock": FakeAgentAdapter("mock", discover=_reachable_observation("mock"))
+    }
+    check_calls = []
+
+    async def fake_response_check(agent_id):
+        check_calls.append(agent_id)
+        return JobHandle("fake-job", agent_id)
+
+    monkeypatch.setattr(session._control_plane, "request_response_check", fake_response_check)
 
     content = await session._turn_content(
         "Can you ping all of the agents and see which ones respond?", None
     )
 
-    # As above: only the internal fixed-response self-check may reach the
-    # bridge, never the user's own request treated as real delegated work.
-    assert all(task.startswith("RAP self-check") for _agent, task in started)
+    # Only the internal fixed-response self-check may reach the control
+    # plane, never the user's own request treated as real delegated work --
+    # and neither ever touches the raw bridge directly.
+    assert started == []
+    assert check_calls == ["mock"]
     assert "Agent roll call:" in content
     assert "mock" in content
-    # The instruction has to stop the model claiming the agents answered.
-    assert "not a reply from the agents themselves" in content
+    # The instruction has to stop the model claiming the agents answered with
+    # real content of their own, rather than reporting only RAP's own evidence.
+    assert "Report only the response evidence" in content
     assert session._control_turn is True
 
 
 @pytest.mark.asyncio
 async def test_a_roll_call_reports_an_unrunnable_backend_as_such(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
-    monkeypatch.setattr(cfg, "AGENT_BACKENDS", {"ghost": ["definitely-not-installed", "{task}"]})
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path)
     session = brain.BrainSession(personas.PERSONAS[0])
+    # See test_a_group_ping_... above: the control plane only auto-wires the
+    # five known harnesses, so an unrunnable backend is modeled directly
+    # rather than through AGENT_BACKENDS.
+    session._control_plane._adapters = {
+        "ghost": FakeAgentAdapter("ghost", discover=_missing_executable_observation("ghost"))
+    }
 
     content = await session._handle_agent_rollcall()
 
     assert "ghost" in content
-    assert "not runnable here" in content
+    assert "missing_executable" in content
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,27 @@ def make_observation(agent_id: str) -> AgentObservation:
     )
 
 
+@pytest.mark.parametrize(
+    ("failure_kind", "expected"),
+    [
+        ("rate_limit", "Codex: Down (Rate limit; current)"),
+        ("response_timeout", "Codex: Down (No response; current)"),
+        ("unexpected_response", "Codex: Down (Unexpected response; current)"),
+    ],
+)
+def test_response_check_failure_summary_is_plain_and_specific(
+    failure_kind: str, expected: str
+) -> None:
+    observation = replace(
+        make_observation("codex"),
+        health=Health.FAILED,
+        response_state=ResponseState.FAILED,
+        issues=(failure_kind,),
+    )
+
+    assert agent_status_reporting.control_summary("codex", AgentSnapshot(observation)) == expected
+
+
 @pytest.mark.asyncio
 async def test_refresh_returns_healthy_results_when_one_adapter_hangs() -> None:
     """One timeout must not hide evidence returned by another adapter."""
@@ -253,7 +274,7 @@ async def test_rollcall_reports_the_result_of_its_new_response_check() -> None:
     rows, missing = await rows_task
 
     assert missing is None
-    assert rows == ["Codex: answered RAP's fixed response check (current)"]
+    assert rows == ["Codex: Up (responded; current)"]
 
 
 @pytest.mark.asyncio

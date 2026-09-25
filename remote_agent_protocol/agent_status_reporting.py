@@ -29,6 +29,22 @@ DIAGNOSTIC_LIMITATION = (
     "It cannot inspect unsupported external sessions or accounts."
 )
 
+_RESPONSE_FAILURE_LABELS = {
+    "quota": "Rate limit",
+    "rate_limit": "Rate limit",
+    "capacity": "Capacity",
+    "auth": "Authentication",
+    "authentication": "Authentication",
+    "response_timeout": "No response",
+    "unexpected_response": "Unexpected response",
+}
+
+
+def _response_failure_label(issues: tuple[str, ...]) -> str:
+    """Return the latest bounded self-check failure in user-facing terms."""
+    failure_kind = issues[-1] if issues else ""
+    return _RESPONSE_FAILURE_LABELS.get(failure_kind, "Error")
+
 
 def control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str:
     """Turn a control-plane result into concise, evidence-bound narration input."""
@@ -37,12 +53,14 @@ def control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str:
     observation = result.observation
     freshness = "stale" if result.is_stale() else "current"
     if observation.response_state is ResponseState.RESPONDED:
-        return f"{observation.display_name}: answered RAP's fixed response check ({freshness})"
+        return f"{observation.display_name}: Up (responded; {freshness})"
     if observation.response_state is ResponseState.FAILED:
-        detail = observation.evidence[0].detail
-        return f"{observation.display_name}: fixed response check failed ({freshness}; {detail})"
+        return (
+            f"{observation.display_name}: Down ({_response_failure_label(observation.issues)}; "
+            f"{freshness})"
+        )
     if observation.response_state is ResponseState.PENDING:
-        return f"{observation.display_name}: RAP's fixed response check is running now"
+        return f"{observation.display_name}: Checking for a response now"
     work = f", {observation.current_work.summary}" if observation.current_work else ""
     response = {
         ResponseState.RESPONDED: "actual response confirmed",

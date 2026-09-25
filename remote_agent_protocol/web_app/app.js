@@ -960,11 +960,9 @@ function renderAgentEvent(event) {
 }
 
 function renderAgentControlEvent(event) {
-  const action = event.event || "status update";
-  const detail = event.detail || action.replaceAll("_", " ");
-  if (["control_probe_started", "control_probe_succeeded", "control_probe_failed"].includes(action)) {
-    addMessage("agent", event.agent || "Agent control", detail);
-  }
+  // Probe events only establish registry evidence. Rendering them as chat rows
+  // makes "Contacting" / "Adapter returned current evidence" look like an
+  // agent answer even though the fixed-response check is the real outcome.
   renderAgents(state.status || { agentBackends: [], agentStates: {} });
   renderAgentsPage();
 }

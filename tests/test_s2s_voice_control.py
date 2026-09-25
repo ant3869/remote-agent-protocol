@@ -87,6 +87,10 @@ def test_a_finished_agent_job_publishes_a_spoken_announcement(monkeypatch, tmp_p
     monkeypatch.setattr(cfg, "S2S_VOICE_FILE", str(tmp_path / "voice.txt"))
     events = []
     adapter = BrainSessionAdapter(PERSONAS[0], on_event=events.append)
+    # Construction eagerly creates a hub channel for Butler and every
+    # configured agent (conversation_hub/migrations.py), each firing its own
+    # agent_conversation event; only events from the action under test matter.
+    events.clear()
 
     adapter._observe_event(
         {
@@ -169,6 +173,10 @@ def test_speak_text_does_not_forge_an_assistant_turn(monkeypatch, tmp_path):
     events = []
     monkeypatch.setattr(cfg, "S2S_VOICE_FILE", str(tmp_path / "voice.txt"))
     adapter = BrainSessionAdapter(PERSONAS[0], on_event=events.append)
+    # See test_a_finished_agent_job_publishes_a_spoken_announcement above:
+    # construction fires one agent_conversation event per eagerly created
+    # hub channel, unrelated to what this test checks.
+    events.clear()
 
     adapter.speak_text("This is the selected text to speech voice.")
 
@@ -183,6 +191,10 @@ async def test_brain_adapter_announces_ready_only_after_start_completes(monkeypa
     # run() sweeps the announcement queue; keep that off the developer's own.
     monkeypatch.setattr(cfg, "S2S_ANNOUNCE_FILE", str(tmp_path / "announce.json"))
     adapter = BrainSessionAdapter(PERSONAS[0], on_event=events.append)
+    # See test_a_finished_agent_job_publishes_a_spoken_announcement above:
+    # construction fires one agent_conversation event per eagerly created
+    # hub channel, before run()'s own ready sequence begins.
+    events.clear()
 
     async def start():
         brain_started.set()

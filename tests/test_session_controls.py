@@ -1,11 +1,39 @@
 import dataclasses
+import tempfile
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from remote_agent_protocol import config, personas
 from remote_agent_protocol import session as session_mod
+from remote_agent_protocol.control_plane.adapters.fake import FakeAgentAdapter
+from remote_agent_protocol.control_plane.models import (
+    Activity,
+    AgentObservation,
+    Evidence,
+    Health,
+    Presence,
+)
 from remote_agent_protocol.session_processors import MicGate
+
+
+def _missing_executable_observation(agent_id: str) -> AgentObservation:
+    now = datetime.now(UTC)
+    return AgentObservation(
+        agent_id=agent_id,
+        display_name=agent_id,
+        harness=agent_id,
+        machine="local",
+        presence=Presence.STOPPED,
+        activity=Activity.UNKNOWN,
+        health=Health.FAILED,
+        capabilities=frozenset(),
+        evidence=(Evidence("fake", now, "Configured executable was not found."),),
+        observed_at=now,
+        expires_at=now + timedelta(seconds=30),
+        issues=("missing_executable",),
+    )
 
 
 def persona_with_tool_user(tool_user: str | None):
@@ -72,26 +100,48 @@ class AgentRollcallAndStatusControlTests(unittest.IsolatedAsyncioTestCase):
     """
 
     async def test_status_question_answers_locally_without_delegating(self):
-        session = session_mod.VoiceSession(personas.DEFAULT_PERSONA)
+        # The control plane persists its registry to cfg.DATA_DIR /
+        # "agent_registry.json" (control_plane/registry.py); isolate it so
+        # this reflects a clean state, never leftover state from a real RAP
+        # session on this machine.
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            patch.object(config, "DATA_DIR", Path(data_dir)),
+        ):
+            session = session_mod.VoiceSession(personas.DEFAULT_PERSONA)
 
-        content = await session._maybe_handle_model_control(
-            "how many agents are actively running right now?"
-        )
+            content = await session._maybe_handle_model_control(
+                "how many agents are actively running right now?"
+            )
 
         self.assertIsNotNone(content)
-        self.assertIn("no active agent tasks", content)
+        # Post-Task-8 (control_plane/service.py), status always reports full
+        # per-agent evidence rather than a short-circuited "nothing running"
+        # message; with a clean registry and no probe run yet, each of the
+        # configured harnesses is unverified.
+        self.assertIn("no verified response yet", content)
         self.assertTrue(session._agent_ack_turn)
 
     async def test_rollcall_question_answers_locally_without_delegating(self):
-        with patch.object(
-            config, "AGENT_BACKENDS", {"ghost": ["definitely-not-installed", "{task}"]}
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            patch.object(config, "DATA_DIR", Path(data_dir)),
         ):
             session = session_mod.VoiceSession(personas.DEFAULT_PERSONA)
+            # The control plane only auto-wires the five known harnesses
+            # (control_plane/adapters/factory.py); AGENT_BACKENDS no longer
+            # steers what the rollcall sees, so an unrunnable backend is
+            # modeled directly at the control-plane seam instead.
+            session._control_plane._adapters = {
+                "ghost": FakeAgentAdapter(
+                    "ghost", discover=_missing_executable_observation("ghost")
+                )
+            }
             content = await session._maybe_handle_model_control("are all the agents online")
 
         self.assertIsNotNone(content)
         self.assertIn("ghost", content)
-        self.assertIn("not runnable here", content)
+        self.assertIn("missing_executable", content)
 
 
 class MutePersistenceTests(unittest.TestCase):
