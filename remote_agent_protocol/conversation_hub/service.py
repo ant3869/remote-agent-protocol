@@ -72,6 +72,7 @@ _NO_DISPATCH_KINDS = frozenset(
     }
 )
 _NON_TERMINAL_JOB_STATUSES = frozenset({"running", "waiting", "blocked"})
+_TERMINAL_TASK_STATUSES = frozenset({"done", "failed"})
 _PRESENTATION_REQUEST = (
     "Your task execution completed, but RAP received only machine-oriented output. "
     "Using the referenced attempt material, now write the final answer directly to Ant. "
@@ -625,6 +626,18 @@ class AgentConversationHub:
             # new, unrelated harness event; ownership must agree before that
             # event can alter a channel or trigger result recovery.
             if str(event.get("agent") or "") != task.agent_id:
+                return
+            # Idempotency: a task's attempt_id changes on every real retry
+            # (see _dispatch's reassignment path), so once this exact job_id
+            # has already driven this task to a terminal status, any further
+            # event for the same job_id is a redelivery/replay -- a live
+            # duplicate (2026-09-20: one OpenClaw success turn written 20x)
+            # or a restart-time backlog replay (2026-09-21: ~30 old turns
+            # re-appended) -- never a legitimate new outcome. task_id +
+            # attempt_id (== job_id here) + the terminal result_kind already
+            # recorded together make (task_id, attempt_id, result_kind)
+            # idempotent without inspecting individual turns.
+            if task.status in _TERMINAL_TASK_STATUSES:
                 return
             status = str(event.get("status", ""))
             now = self._now()
