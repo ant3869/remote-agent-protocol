@@ -44,6 +44,7 @@ from loguru import logger
 
 from remote_agent_protocol import collab, remote_protocol, voice_commands
 from remote_agent_protocol import config as cfg
+from remote_agent_protocol.subprocess_resolution import find_shadow_executable, resolve_executable
 
 if TYPE_CHECKING:  # imported for typing only; keeps this module injection-only
     from remote_agent_protocol.remote_client import RemoteRegistry
@@ -633,9 +634,13 @@ def resolve_cwd(cwd: str | None, workspace_dir: str | None) -> str | None:
 def executable_status(command: list[str]) -> tuple[str, str]:
     """Whether a backend's command can be launched, without launching it.
 
-    Returns ``("ok"|"fail", explanation)``. This is as much as can be known
-    without spending a real turn on the agent, and it is what separates "not
-    installed on this machine" from "installed but slow to answer".
+    Returns ``("ok"|"warn"|"fail", explanation)``. This is as much as can be
+    known without spending a real turn on the agent, and it is what
+    separates "not installed on this machine" from "installed but slow to
+    answer". A "warn" flags a same-named ``.exe`` sitting elsewhere on PATH
+    that a *different*, shell-less launcher could pick up by mistake (see
+    docs/notes/2026-09-25-harness-audit.md) -- this process's own launch
+    path already resolves correctly via ``resolve_executable``.
     """
     if not command:
         return "fail", "empty command"
@@ -647,9 +652,17 @@ def executable_status(command: list[str]) -> tuple[str, str]:
             return "ok", f"found at {executable}"
         return "fail", f"not found: {executable}"
     found = shutil.which(executable)
-    if found:
-        return "ok", f"found at {found}"
-    return "fail", f"'{executable}' not found on PATH"
+    if not found:
+        return "fail", f"'{executable}' not found on PATH"
+    shadow = find_shadow_executable(executable)
+    if shadow:
+        return (
+            "warn",
+            f"found at {found}, but a different executable also answers to "
+            f"'{executable}' at {shadow.shadow} -- a shell-less launcher that "
+            "doesn't resolve via PATHEXT would run that one instead",
+        )
+    return "ok", f"found at {found}"
 
 
 def parse_status_line(line: str) -> dict | None:
@@ -1512,9 +1525,10 @@ class AgentBridge:
         # never .CMD/.BAT -- so an npm-installed shim like codex.CMD fails with
         # "WinError 2: The system cannot find the file specified" unless we
         # resolve it to its real, extensioned path first (jess_runtime.log
-        # 2026-07-10 19:59:55). shutil.which is a no-op on other platforms.
-        if resolved := shutil.which(command[0]):
-            command[0] = resolved
+        # 2026-07-10 19:59:55). A no-op on other platforms. Centralized in
+        # subprocess_resolution so this and remote_host.py's remote launch
+        # path share one implementation (docs/notes/2026-09-25-harness-audit.md).
+        command[0] = resolve_executable(command[0])
         try:
             proc = await asyncio.create_subprocess_exec(
                 *command,

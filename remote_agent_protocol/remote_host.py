@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
 import threading
@@ -42,6 +41,7 @@ from remote_agent_protocol.agent_bridge import (
     with_scope,
     with_status_protocol,
 )
+from remote_agent_protocol.subprocess_resolution import resolve_executable
 
 _JOB_IDS = count(1)
 
@@ -136,8 +136,7 @@ class RemoteAgentHost:
         command = build_command(template, task, extra_args=list(request.extra_args))
         # Same Windows shim problem as the local launcher: CreateProcess only
         # auto-appends .EXE, so a .CMD entry point has to be resolved first.
-        if resolved := shutil.which(command[0]):
-            command[0] = resolved
+        command[0] = resolve_executable(command[0])
 
         job_id = f"remote-{next(_JOB_IDS)}"
         try:
