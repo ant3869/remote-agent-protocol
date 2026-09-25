@@ -1176,6 +1176,7 @@ class AgentBridge:
         completion_grace_secs: float = 2.0,
         on_persist: Callable[[AgentJob], "asyncio.Future | None"] | None = None,
         model_targets: dict | None = None,
+        default_model_targets: dict[str, str] | None = None,
         workspace_dir: str | None = None,
         scope_preamble: str = "",
         host_repo: str | None = None,
@@ -1194,6 +1195,10 @@ class AgentBridge:
             completion_grace_secs: Grace after a structured terminal marker.
             on_persist: Optional async callback that persists terminal jobs.
             model_targets: Agent/provider mappings for deterministic model overrides.
+            default_model_targets: Agent -> provider key applied immediately
+                via set_model_override(), so a broken default model doesn't
+                need a spoken/API override first. Unknown agent/provider
+                pairs are logged and skipped, not raised.
             workspace_dir: Default cwd for jobs started without one; None
                 inherits the host process directory (the old behavior).
             scope_preamble: Text added after every task ({cwd} placeholder);
@@ -1241,6 +1246,12 @@ class AgentBridge:
         self._tasks: set[asyncio.Task] = set()
         self._idle_notified = True
         self._public_work_since_idle = False
+        for agent, provider in (default_model_targets or {}).items():
+            if self.set_model_override(agent, provider) is None:
+                logger.warning(
+                    f"AGENT_DEFAULT_MODEL_TARGETS_JSON: no '{provider}' target for "
+                    f"'{agent}' in AGENT_MODEL_TARGETS -- ignoring"
+                )
 
     # -- queries ------------------------------------------------------------
 

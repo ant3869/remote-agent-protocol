@@ -301,6 +301,43 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(label, "OpenAI GPT-5.5")
         self.assertEqual(bridge._model_overrides["code-puppy"], ["--model", "chatgpt-gpt-5.5"])
 
+    def test_default_model_targets_applies_override_at_init(self):
+        bridge = agent_bridge.AgentBridge(
+            {},
+            lambda _event: None,
+            model_targets={
+                "code-puppy": {
+                    "openai": {
+                        "label": "OpenAI GPT-5.5",
+                        "args": ["--model", "chatgpt-gpt-5.5"],
+                    }
+                }
+            },
+            default_model_targets={"code-puppy": "openai"},
+        )
+
+        self.assertEqual(bridge._model_overrides["code-puppy"], ["--model", "chatgpt-gpt-5.5"])
+        self.assertEqual(bridge._model_labels["code-puppy"], "OpenAI GPT-5.5")
+
+    def test_default_model_targets_is_empty_by_default_no_behavior_change(self):
+        bridge = agent_bridge.AgentBridge(
+            {},
+            lambda _event: None,
+            model_targets={
+                "code-puppy": {"openai": {"label": "OpenAI GPT-5.5", "args": ["--model", "x"]}}
+            },
+        )
+        self.assertEqual(bridge._model_overrides, {})
+
+    def test_default_model_targets_ignores_unknown_provider_without_raising(self):
+        bridge = agent_bridge.AgentBridge(
+            {},
+            lambda _event: None,
+            model_targets={"code-puppy": {"openai": {"label": "x", "args": ["--model", "x"]}}},
+            default_model_targets={"code-puppy": "not-a-real-provider"},
+        )
+        self.assertEqual(bridge._model_overrides, {})
+
     def test_scope_preamble_follows_task_so_prompt_hooks_see_the_task(self):
         wrapped = agent_bridge.with_scope(
             "do a thing", "C:/sandbox", "[Scope: workspace is {cwd}, hands off.]"

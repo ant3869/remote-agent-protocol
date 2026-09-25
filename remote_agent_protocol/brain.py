@@ -130,6 +130,7 @@ class BrainSession:
             completion_grace_secs=cfg.AGENT_COMPLETION_GRACE_SECS,
             on_persist=self._persist_job if cfg.AGENT_HISTORY_FILE else None,
             model_targets=cfg.AGENT_MODEL_TARGETS,
+            default_model_targets=cfg.AGENT_DEFAULT_MODEL_TARGETS,
             workspace_dir=cfg.AGENT_WORKSPACE_DIR,
             scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
             host_repo=cfg.AGENT_HOST_REPO,

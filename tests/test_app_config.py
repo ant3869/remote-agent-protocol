@@ -17,6 +17,17 @@ class AgentConfigTests(unittest.TestCase):
     def test_agent_jobs_have_a_bounded_default_runtime(self):
         self.assertGreater(config.AGENT_JOB_TIMEOUT_SECS, 0)
 
+    def test_agent_default_model_targets_is_empty_unless_configured(self):
+        # AGENT_DEFAULT_MODEL_TARGETS_JSON is unset in the test environment --
+        # this must change no behavior by default.
+        self.assertEqual(config.AGENT_DEFAULT_MODEL_TARGETS, {})
+
+    def test_agent_default_model_targets_json_parses_agent_to_provider_map(self):
+        parsed = config._parse_string_map(
+            '{"code-puppy":"openai"}', "AGENT_DEFAULT_MODEL_TARGETS_JSON"
+        )
+        self.assertEqual(parsed, {"code-puppy": "openai"})
+
     def test_code_puppy_jobs_start_from_a_clean_session(self):
         # --quick-resume shares a session pool with the human's own interactive
         # runs, so a delegated task arrives mid-conversation in whatever was last
