@@ -44,6 +44,24 @@ class PureHelperTests(unittest.TestCase):
         self.assertEqual(agent_bridge._failure_tail([]), "")
         self.assertEqual(agent_bridge._failure_tail(["   ", ""]), "")
 
+    def test_extract_answered_model_matches_labelled_line(self):
+        self.assertEqual(
+            agent_bridge.extract_answered_model("Model: openai/gpt-6-luna-pro"),
+            "openai/gpt-6-luna-pro",
+        )
+        self.assertEqual(
+            agent_bridge.extract_answered_model("Using model: gemini-3.6-flash"),
+            "gemini-3.6-flash",
+        )
+
+    def test_extract_answered_model_does_not_guess_from_prose(self):
+        # "don't guess" (Task A4): a sentence that merely mentions "model"
+        # must never be mistaken for a labelled model line.
+        self.assertIsNone(
+            agent_bridge.extract_answered_model("The model can't answer that right now.")
+        )
+        self.assertIsNone(agent_bridge.extract_answered_model("Loaded 65 providers and 1371 models"))
+
     def test_build_command_substitutes_task_and_python(self):
         cmd = agent_bridge.build_command(["{python}", "run", "{task}"], "do a thing")
         self.assertEqual(cmd, [sys.executable, "run", "do a thing"])
@@ -1648,6 +1666,42 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertEqual(job.returncode, 1)
         self.assertEqual(job.summary, message)
         self.assertEqual(job.failure_detail, message)
+
+    def test_answered_model_captured_from_harness_output(self):
+        events: list[dict] = []
+        script = "print('Model: openai/gpt-6-luna-pro'); print('RAP_OK')"
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            job_id = await bridge.start("mock", "run a task")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.answered_model, "openai/gpt-6-luna-pro")
+
+    def test_answered_model_stays_empty_when_never_printed(self):
+        events: list[dict] = []
+        script = "print('RAP_OK')"
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"mock": ["{python}", "-u", "-c", script]}, events.append
+            )
+            job_id = await bridge.start("mock", "run a task")
+            for _ in range(200):
+                if any(e["event"] == "finished" for e in events):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.answered_model, "")
 
     def test_nonzero_exit_with_multiline_output_keeps_full_tail_in_detail(self):
         # jess_agent_history.json has "Agent failed with exit code 1 without

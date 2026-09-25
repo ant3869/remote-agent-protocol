@@ -331,7 +331,8 @@ class AgentJob:
     failure_kind: str = ""
     failure_detail: str = ""
     result_is_fallback: bool = False  # result was reconstructed from output, not agent-authored
-    model_label: str = ""
+    model_label: str = ""  # the CONFIGURED override's label, known before the job runs
+    answered_model: str = ""  # best-effort, parsed from the harness's OWN output; "" if unprinted
     host_modified: bool = False  # the job touched the host app's own source
     # Consultation bookkeeping. This is what makes the limits structural: an
     # agent may ask for whatever it likes, but depth and chain travel with the
@@ -540,6 +541,24 @@ _MAX_FAILURE_TAIL_CHARS = 2000
 def redact_secrets(text: str) -> str:
     """Replace key/token-shaped substrings in ``text`` with a placeholder."""
     return _SECRET_LIKE_RE.sub("[redacted]", text)
+
+
+# A harness that prints its active model does so under a handful of common,
+# unambiguous labels ("Model: X", "Using model: X"). Deliberately narrow and
+# anchored to the line start: this must never guess a model name out of
+# ordinary prose that happens to mention "model". No specific harness's
+# banner format is assumed here -- none of the 5 configured harnesses'
+# captured probe output during the 2026-09-25 audit matched this, so in
+# practice this currently returns None for all of them until a harness's
+# real format is confirmed and, if needed, a harness-specific pattern is
+# added alongside this one.
+_ANSWERED_MODEL_RE = re.compile(r"^(?:using\s+)?model\s*:\s*(\S.*)$", re.IGNORECASE)
+
+
+def extract_answered_model(line: str) -> str | None:
+    """Best-effort model name from one line of a harness's own output, or None."""
+    match = _ANSWERED_MODEL_RE.match(clean_line(line).strip())
+    return match.group(1).strip() if match else None
 
 
 def _failure_tail(lines: list[str]) -> str:
@@ -1923,6 +1942,8 @@ class AgentBridge:
             line = clean_line(raw.decode("utf-8", errors="replace"))
             if not line:
                 continue
+            if not job.answered_model and (found_model := extract_answered_model(line)):
+                job.answered_model = found_model
             if job.agent in _HERMES_SESSION_AGENTS and (
                 session_match := _HERMES_SESSION_RE.fullmatch(line)
             ):
@@ -2309,6 +2330,7 @@ class AgentBridge:
             "failure_detail": job.failure_detail,
             "result_is_fallback": job.result_is_fallback,
             "model_label": job.model_label,
+            "answered_model": job.answered_model,
             "host_modified": job.host_modified,
             "elapsed_secs": job.secs
             if job.secs is not None
