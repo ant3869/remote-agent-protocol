@@ -6,6 +6,16 @@ const ASSET_BASE = "/assets/avatars/butler/runtime_512_v1/";
 // (for example, previously wrong-MIME) response from an earlier server.
 const ASSET_REVISION = "20260920";
 const FRAME_LOAD_TIMEOUT_MS = 6000;
+const FRAME_INTERVAL_MS = 1000 / 30;
+// Mouth shapes change on speech timing; everything else is an expression
+// change that reads better as a slower, eased dissolve.
+const VISEMES = new Set(["base", "halfsmile", "ah_small", "e_sound", "oh", "oo", "open", "fv", "grit"]);
+const VISEME_FADE_MS = 40;
+const EXPRESSION_FADE_MS = 150;
+const VISEME_HOLD_MS = 60;
+const LEVEL_ATTACK_MS = 25;
+const LEVEL_RELEASE_MS = 90;
+const POSE_SETTLE_MS = 240;
 const MATERIALIZE_DURATIONS = [55, 55, 55, 55, 55, 72, 72, 72, 72, 72, 95, 110, 220];
 const FAILURE_DURATIONS = [80, 65, 65, 75, 70, 75, 80, 100, 650];
 
@@ -47,7 +57,25 @@ export function frameUrls(base = ASSET_BASE) {
 }
 
 export function stateForResolved(state) {
-  return STATE_MAP[state] || "idle";
+  if (STATE_MAP[state]) return STATE_MAP[state];
+  return Object.hasOwn(STATE_FRAMES, state) ? state : "idle";
+}
+
+export function transitionMs(previous, next) {
+  return VISEMES.has(previous) && VISEMES.has(next) ? VISEME_FADE_MS : EXPRESSION_FADE_MS;
+}
+
+// Exponential approach toward ``target`` over ``dtMs``: fast when rising
+// (a syllable onset) and slower when falling, so the mouth doesn't chatter.
+export function smoothToward(current, target, dtMs, riseMs = LEVEL_ATTACK_MS, fallMs = LEVEL_RELEASE_MS) {
+  const tau = target > current ? riseMs : fallMs;
+  if (!(dtMs > 0) || !(tau > 0)) return target;
+  return current + (target - current) * (1 - Math.exp(-dtMs / tau));
+}
+
+function easeInOut(value) {
+  const t = Math.max(0, Math.min(1, value));
+  return t * t * (3 - 2 * t);
 }
 
 export function frameForState(state) {
@@ -139,7 +167,14 @@ export async function createAvatarScene(host, settings) {
   let effect = null;
   let blink = null;
   let nextBlinkAt = 0;
+  let glance = null;
+  let nextGlanceAt = 0;
+  let audioTarget = 0;
   let audioLevel = 0;
+  let speechFrame = "base";
+  let speechFrameAt = 0;
+  let lastDrawAt = 0;
+  let pose = { y: 0, scale: 1, angle: 0 };
   let audioAt = -Infinity;
   let fallbackFrame = "base";
   let nextFallbackAt = 0;
@@ -152,6 +187,9 @@ export async function createAvatarScene(host, settings) {
   const reducedMotion = () => Boolean(currentSettings.effectiveReducedMotion);
   const scheduleBlink = (now = performance.now()) => {
     nextBlinkAt = now + randomBetween(2200, 5500);
+  };
+  const scheduleGlance = (now = performance.now()) => {
+    nextGlanceAt = now + randomBetween(9000, 18000);
   };
   const play = (names, durations, onComplete) => {
     if (reducedMotion()) {
@@ -182,9 +220,11 @@ export async function createAvatarScene(host, settings) {
     visualState = stateForResolved(next);
     effect = null;
     blink = null;
+    glance = null;
     fallbackFrame = "base";
     nextFallbackAt = performance.now();
     scheduleBlink();
+    scheduleGlance();
     if (visualState === "completed") playCompleted();
     else if (visualState === "failed") playFailure();
   };
@@ -192,7 +232,7 @@ export async function createAvatarScene(host, settings) {
   const stream = new AvatarEnvelopeStream((sample) => {
     const rms = Math.max(0, Math.min(1, Number(sample?.rms) || 0));
     const peak = Math.max(rms, Math.min(1, Number(sample?.peak) || 0));
-    audioLevel = Math.max(0, Math.min(1, rms * 1.45 + (peak - rms) * 0.22));
+    audioTarget = Math.max(0, Math.min(1, rms * 1.45 + (peak - rms) * 0.22));
     audioAt = performance.now();
   });
   if (settings.lipSync) stream.start();
@@ -220,7 +260,28 @@ export async function createAvatarScene(host, settings) {
     const frame = activeSequenceFrame(blink, now);
     if (blink && !frame) {
       blink = null;
-      scheduleBlink(now);
+      // Now and then a second blink follows the first, as people do.
+      if (Math.random() < 0.18) nextBlinkAt = now + randomBetween(140, 220);
+      else scheduleBlink(now);
+    }
+    return frame;
+  };
+
+  // Idle and listening hold one frame for long stretches; an occasional
+  // glance or half smile keeps him present without implying a state change.
+  const glanceFrame = (now) => {
+    if (reducedMotion() || effect || blink) return null;
+    if (!glance && now >= nextGlanceAt && (visualState === "idle" || visualState === "listening")) {
+      const choices = visualState === "idle"
+        ? [["lookup", 900], ["lookdown", 750], ["halfsmile", 1400]]
+        : [["halfsmile", 1600]];
+      const [name, duration] = choices[Math.floor(Math.random() * choices.length)];
+      glance = sequence([name], [duration], now);
+    }
+    const frame = activeSequenceFrame(glance, now);
+    if (glance && !frame) {
+      glance = null;
+      scheduleGlance(now);
     }
     return frame;
   };
@@ -243,9 +304,16 @@ export async function createAvatarScene(host, settings) {
     }
     const blinking = blinkFrame(now);
     if (blinking) return blinking;
-    if (visualState !== "speaking") return frameForState(visualState);
+    if (visualState !== "speaking") return glanceFrame(now) || frameForState(visualState);
     const level = debugLevel ?? audioLevel;
-    return now - audioAt < 350 || debugLevel !== null ? frameForLevel(level) : fallbackViseme(now);
+    const candidate = now - audioAt < 350 || debugLevel !== null
+      ? frameForLevel(level)
+      : fallbackViseme(now);
+    if (candidate !== speechFrame && now - speechFrameAt >= VISEME_HOLD_MS) {
+      speechFrame = candidate;
+      speechFrameAt = now;
+    }
+    return speechFrame;
   };
 
   const setFrame = (name, now) => {
@@ -255,15 +323,53 @@ export async function createAvatarScene(host, settings) {
     frameChangedAt = now;
   };
 
-  const motion = (now) => {
+  const targetPose = (now) => {
     if (reducedMotion() || effect) return { y: 0, scale: 1, angle: 0 };
     const seconds = now / 1000;
     const speakingEnergy = visualState === "speaking" ? Math.max(0.1, audioLevel) : 0;
+    const lean = visualState === "listening" ? -1.1
+      : visualState === "thinking" ? 0.6 + Math.sin(seconds * 0.9) * 0.35
+        : Math.sin(seconds * 0.55) * 0.18;
     return {
       y: Math.sin(seconds * Math.PI * 0.56) * 1.15 + speakingEnergy * Math.sin(seconds * 17) * 0.75,
       scale: 1 + Math.sin(seconds * Math.PI * 0.48) * 0.0035,
-      angle: visualState === "listening" ? -1.1 : Math.sin(seconds * 0.55) * 0.18,
+      angle: lean,
     };
+  };
+
+  // Ease toward the target pose so a state change (a listening tilt, say)
+  // settles into place instead of snapping.
+  const motion = (now, dt) => {
+    const target = targetPose(now);
+    if (reducedMotion() || effect) {
+      pose = target;
+      return pose;
+    }
+    const k = 1 - Math.exp(-Math.max(0, dt) / POSE_SETTLE_MS);
+    pose = {
+      y: target.y,
+      scale: target.scale,
+      angle: pose.angle + (target.angle - pose.angle) * k,
+    };
+    return pose;
+  };
+
+  // A faint band of light that drifts down the figure every few seconds --
+  // the hologram reading as projected rather than printed.
+  const drawSweep = (now) => {
+    if (reducedMotion() || typeof context.createLinearGradient !== "function") return;
+    const cycle = (now % 7000) / 7000;
+    if (cycle > 0.6) return;
+    const y = -80 + (cycle / 0.6) * 672;
+    const gradient = context.createLinearGradient(0, y - 40, 0, y + 40);
+    gradient.addColorStop(0, "rgba(120, 220, 255, 0)");
+    gradient.addColorStop(0.5, "rgba(150, 230, 255, 0.09)");
+    gradient.addColorStop(1, "rgba(120, 220, 255, 0)");
+    context.save();
+    context.globalCompositeOperation = "source-atop";
+    context.fillStyle = gradient;
+    context.fillRect(0, y - 40, 512, 80);
+    context.restore();
   };
 
   const drawImage = (name, alpha, transform) => {
@@ -285,18 +391,35 @@ export async function createAvatarScene(host, settings) {
   const draw = (now) => {
     animationFrame = 0;
     if (disposed || !visible || document.hidden) return;
+    const dt = lastDrawAt ? now - lastDrawAt : 0;
+    if (lastDrawAt && dt < FRAME_INTERVAL_MS - 1) {
+      scheduleDraw();
+      return;
+    }
+    lastDrawAt = now;
+    audioLevel = reducedMotion() ? audioTarget : smoothToward(audioLevel, audioTarget, dt);
     setFrame(desiredFrame(now), now);
     context.clearRect(0, 0, 512, 512);
-    const transform = motion(now);
-    const transition = reducedMotion() ? 1 : Math.min(1, (now - frameChangedAt) / 45);
+    const transform = motion(now, dt);
+    const fade = transitionMs(previousFrame, currentFrame);
+    const transition = reducedMotion() ? 1 : easeInOut((now - frameChangedAt) / fade);
     if (transition < 1) drawImage(previousFrame, 1 - transition, transform);
-    drawImage(currentFrame, transition, transform);
+    if (visualState === "working" && currentFrame === "glow_eyes" && images.base && !reducedMotion() && !effect) {
+      // The eyes glow in and out while he works rather than staring fixed.
+      const pulse = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(now / 1000 * Math.PI * 0.8));
+      drawImage("base", transition, transform);
+      drawImage("glow_eyes", transition * pulse, transform);
+    } else {
+      drawImage(currentFrame, transition, transform);
+    }
+    if (!effect) drawSweep(now);
     scheduleDraw();
   };
   const onVisibilityChange = () => scheduleDraw();
   document.addEventListener?.("visibilitychange", onVisibilityChange);
 
   scheduleBlink();
+  scheduleGlance();
   scheduleDraw();
   const deferredFrames = FRAME_NAMES.filter((name) => !CRITICAL_FRAMES.includes(name));
   Promise.allSettled(deferredFrames.map((name) => preloadFrames(urls, [name])))

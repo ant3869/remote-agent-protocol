@@ -56,6 +56,12 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
+- Butler avatar motion: smoothed lip-sync with a minimum hold per mouth
+  shape, eased expression dissolves, a listening tilt that settles instead of
+  snapping, idle glances and occasional double blinks, a pulsing eye glow while
+  working, a faint hologram sweep, and a 30 fps draw cap. Art and frames are
+  unchanged; reduced motion disables all of it.
+- The Control Center had no favicon, which logged a 404 on every load.
 - The test suite no longer reads or writes real application data: provider
   keys, the agent registry, job history, UI and s2s state, and the
   single-instance endpoint file are sandboxed per test run.

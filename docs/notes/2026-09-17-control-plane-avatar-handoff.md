@@ -52,3 +52,25 @@ request before changing animation behavior.
 - Do not alter the Butler art, frame sequence, or consulting-state mapping
   unless the user explicitly asks. Diagnose load/visibility/resource failures
   first.
+
+## Follow-up (2026-09-26)
+
+- **Visual confirmation done** in headless Chromium against a real brain-mode RAP
+  process. All 40 `runtime_512_v1/*.webp` frames return `200 image/webp`, the
+  canvas attaches, and idle, working, speaking, listening, and failed all render.
+  The only console error was a missing `/favicon.ico`; the page now carries an
+  inline icon.
+- **Motion refinements, at the user's request.** Art, frames, and the state-to-frame
+  mapping are unchanged. What changed:
+  - audio level smoothing, faster on the way up than down
+  - a 60 ms minimum hold per mouth shape
+  - eased 150 ms dissolves between expressions (mouth shapes still swap in 40 ms)
+  - a listening tilt that eases in, and a slow sway while thinking
+  - idle glances and a half smile every 9–18 s, and an occasional double blink
+  - a pulsing eye glow while working
+  - a faint hologram sweep over the figure
+  - drawing capped at 30 fps
+
+  Reduced motion turns all of it off. The debug API's `setState` also accepts
+  visual state names (`working`, `failed`) directly.
+

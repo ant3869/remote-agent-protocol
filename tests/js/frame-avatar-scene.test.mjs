@@ -9,6 +9,8 @@ import {
   frameForState,
   frameUrls,
   preloadFrames,
+  smoothToward,
+  transitionMs,
 } from "../../remote_agent_protocol/web_app/avatar/frame-avatar-scene.js";
 
 
@@ -157,4 +159,57 @@ test("frame preload times out instead of leaving the companion blank forever", a
     preloadFrames({ base: "/assets/avatars/butler/runtime_512_v1/base.webp" }, ["base"], NeverLoadingImage, 5),
     /Timed out loading Butler frame: base/,
   );
+});
+
+
+test("visual state names pass through, so the debug API can set them directly", () => {
+  assert.equal(stateForResolved("working"), "working");
+  assert.equal(stateForResolved("failed"), "failed");
+  assert.equal(stateForResolved("nonsense"), "idle");
+});
+
+
+test("mouth shapes swap quickly while expression changes dissolve slowly", () => {
+  assert.ok(transitionMs("oh", "open") < transitionMs("base", "lookup"));
+  assert.equal(transitionMs("base", "ah_small"), transitionMs("e_sound", "oo"));
+  assert.ok(transitionMs("glow_eyes", "confused") >= 120);
+});
+
+
+test("audio level rises faster than it falls", () => {
+  const rise = smoothToward(0, 1, 30);
+  const fall = 1 - smoothToward(1, 0, 30);
+  assert.ok(rise > fall, `${rise} should exceed ${fall}`);
+  assert.equal(smoothToward(0.2, 0.8, 0), 0.8, "no elapsed time snaps to the target");
+  assert.ok(smoothToward(0, 1, 10_000) > 0.999);
+});
+
+
+test("working state pulses the eye glow over the base portrait", async (t) => {
+  const canvas = fakeBrowser(t);
+  const drawn = [];
+  const context = canvas.getContext();
+  context.drawImage = (image) => drawn.push(image.value);
+  context.createLinearGradient = () => ({ addColorStop() {} });
+  context.fillRect = () => {};
+  let frameCallback = null;
+  globalThis.requestAnimationFrame = (callback) => { frameCallback = callback; return 1; };
+  globalThis.performance ??= { now: () => Date.now() };
+  const host = fakeHost();
+  const settings = { lipSync: false, effectiveReducedMotion: false };
+  const scene = await createAvatarScene(host, settings);
+  scene.update({ runtime: {}, resolved: { state: "focused" }, settings });
+
+  let now = performance.now();
+  for (let step = 0; step < 12; step += 1) {
+    now += 40;
+    const callback = frameCallback;
+    frameCallback = null;
+    callback?.(now);
+  }
+  const last = drawn.slice(-2);
+  scene.dispose();
+
+  assert.ok(last[0].includes("base.webp"), last.join(", "));
+  assert.ok(last[1].includes("glow_eyes.webp"), last.join(", "));
 });
