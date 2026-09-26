@@ -60,6 +60,11 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - Brain mode now handles spoken model switches ("switch Hermes to
   OpenRouter") locally, for every configured provider, and says exactly what
   changed.
+- `CLOUD_LLM_REASONING_EFFORT` config: sends `reasoning_effort` on every cloud
+  chat request when set, so a thinking-capable hosted model (e.g. via
+  9Router) can run at a lower effort instead of spending the same latency the
+  cloud path exists to avoid. Empty (default) sends nothing. A provider that
+  400s on the field gets one retry without it.
 
 ### Fixed
 

@@ -1417,14 +1417,13 @@ class BrainSession:
             "stream": stream,
         }
         if endpoint.cloud:
-            # keep_alive and reasoning_effort are Ollama's own extensions; a
-            # hosted API rejects unknown fields rather than ignoring them.
-            # max_tokens is not a style choice here: providers reserve a
-            # request's maximum possible cost up front, so an uncapped reply is
-            # refused outright unless the balance could cover the model running
-            # to its full output length.
-            payload["max_tokens"] = cfg.CLOUD_LLM_MAX_TOKENS
-            return payload
+            # keep_alive is Ollama's own extension; a hosted API rejects
+            # unknown fields rather than ignoring them. max_tokens is not a
+            # style choice here: providers reserve a request's maximum
+            # possible cost up front, so an uncapped reply is refused outright
+            # unless the balance could cover the model running to its full
+            # output length.
+            return llm_endpoint.apply_cloud_request_options(payload)
         payload["keep_alive"] = cfg.LLM_KEEP_ALIVE
         if cfg.LLM_REASONING_EFFORT is not None:
             payload["reasoning_effort"] = cfg.LLM_REASONING_EFFORT
@@ -1465,26 +1464,34 @@ class BrainSession:
         payload = self._ollama_payload(stream=True, endpoint=endpoint)
         timeout = cfg.CLOUD_LLM_TIMEOUT_SECS if endpoint.cloud else 120
         try:
-            async with self._http.post(
-                endpoint.chat_url, json=payload, headers=endpoint.headers, timeout=timeout
-            ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(f"{endpoint.label} chat failed {resp.status}: {body}")
-                async for raw in resp.content:
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-                    if delta:
-                        yield delta
+            for attempt in range(2):
+                async with self._http.post(
+                    endpoint.chat_url, json=payload, headers=endpoint.headers, timeout=timeout
+                ) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        retry_payload = llm_endpoint.cloud_retry_without_reasoning_effort(
+                            resp.status, body, payload
+                        )
+                        if retry_payload is not None and attempt == 0:
+                            payload = retry_payload
+                            continue
+                        raise RuntimeError(f"{endpoint.label} chat failed {resp.status}: {body}")
+                    async for raw in resp.content:
+                        line = raw.decode("utf-8", "replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                        if delta:
+                            yield delta
+                break
         except aiohttp.ClientConnectionError as exc:
             raise LLMUnavailable(f"{endpoint.base_url} is not reachable: {exc}") from exc
         if not endpoint.cloud:
@@ -1513,13 +1520,21 @@ class BrainSession:
         payload = self._ollama_payload(stream=False, endpoint=endpoint)
         timeout = cfg.CLOUD_LLM_TIMEOUT_SECS if endpoint.cloud else 120
         try:
-            async with self._http.post(
-                endpoint.chat_url, json=payload, headers=endpoint.headers, timeout=timeout
-            ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    raise RuntimeError(f"{endpoint.label} chat failed {resp.status}: {body}")
-                data = await resp.json()
+            for attempt in range(2):
+                async with self._http.post(
+                    endpoint.chat_url, json=payload, headers=endpoint.headers, timeout=timeout
+                ) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        retry_payload = llm_endpoint.cloud_retry_without_reasoning_effort(
+                            resp.status, body, payload
+                        )
+                        if retry_payload is not None and attempt == 0:
+                            payload = retry_payload
+                            continue
+                        raise RuntimeError(f"{endpoint.label} chat failed {resp.status}: {body}")
+                    data = await resp.json()
+                break
         except aiohttp.ClientConnectionError as exc:
             raise LLMUnavailable(f"{endpoint.base_url} is not reachable: {exc}") from exc
         if not endpoint.cloud:

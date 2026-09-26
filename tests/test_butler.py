@@ -556,3 +556,34 @@ async def test_redirect_stops_the_attempt_and_relaunches_with_the_correction():
     agent, instructions = dispatcher.calls[-1]
     assert agent == "hermes"
     assert instructions.endswith("Correction from the user: Search the body, since August.")
+
+
+@pytest.mark.asyncio
+async def test_the_butler_sends_reasoning_effort_and_retries_without_it_on_a_400(monkeypatch):
+    from aiohttp import web
+
+    monkeypatch.setattr(cfg, "CLOUD_LLM_REASONING_EFFORT", "low")
+    bridge = FakeBridge()
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), FakeDispatcher(bridge))
+
+    class PickyModel(FakeModel):
+        """Rejects reasoning_effort the way some providers do, then answers without it."""
+
+        async def handle(self, request):
+            body = await request.json()
+            self.requests.append(body)
+            if "reasoning_effort" in body:
+                return web.Response(status=400, text="unknown field: reasoning_effort")
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            chunk = {"choices": [{"delta": {"content": "Hello."}}]}
+            await response.write(f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode())
+            await response.write_eof()
+            return response
+
+    model = PickyModel(lambda m, t: Say("unused"))
+    reply = await _run_loop(model, box)
+
+    assert reply == "Hello."
+    assert model.requests[0]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in model.requests[1]

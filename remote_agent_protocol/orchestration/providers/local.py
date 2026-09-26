@@ -132,9 +132,22 @@ class LocalProvider(ModelProvider):
             "temperature": 0,
             "max_tokens": max_tokens,
         }
+        llm_endpoint.apply_cloud_request_options(payload)
         async with self._session_factory() as http:
-            async with http.post(endpoint.chat_url, json=payload, headers=endpoint.headers) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
+            for attempt in range(2):
+                async with http.post(
+                    endpoint.chat_url, json=payload, headers=endpoint.headers
+                ) as resp:
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        retry_payload = llm_endpoint.cloud_retry_without_reasoning_effort(
+                            resp.status, body, payload
+                        )
+                        if retry_payload is not None and attempt == 0:
+                            payload = retry_payload
+                            continue
+                        raise RuntimeError(f"{endpoint.label} chat failed {resp.status}: {body}")
+                    data = await resp.json()
+                break
         text = str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
         return CompletionResult(text=text, model=endpoint.model)

@@ -283,6 +283,13 @@ Each successful call is noted with `llm_endpoint.record_answer()`, and
 time) so the role editor shows what actually answered. Chain entries can be
 reordered in place.
 
+Every cloud request goes through `llm_endpoint.apply_cloud_request_options()`,
+which caps `max_tokens` (`CLOUD_LLM_MAX_TOKENS`) and, when
+`CLOUD_LLM_REASONING_EFFORT` is set, adds `reasoning_effort` -- a thinking-capable
+hosted model otherwise spends the same latency the cloud path exists to avoid. A
+provider that 400s on the field gets one retry without it, logged once, so a
+provider that doesn't recognize it never costs the turn.
+
 ## What is solid
 
 - Voice and typed input use the same session and routing path.

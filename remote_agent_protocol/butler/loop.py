@@ -192,34 +192,56 @@ class ButlerLoop:
         if not final_round and schemas:
             payload["tools"] = schemas
             payload["tool_choice"] = "auto"
+        if endpoint.cloud:
+            llm_endpoint.apply_cloud_request_options(payload)
         timeout = aiohttp.ClientTimeout(total=self._timeout_secs)
         async with http.post(
             endpoint.chat_url, json=payload, headers=endpoint.headers, timeout=timeout
         ) as resp:
             if resp.status >= 400:
-                body = (await resp.text())[:300]
-                raise RuntimeError(f"HTTP {resp.status}: {body}")
-            async for raw in resp.content:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(chunk, dict) and chunk.get("error"):
-                    raise RuntimeError(f"provider error: {chunk['error']}")
-                choice = (chunk.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                for tool_delta in delta.get("tool_calls") or ():
-                    current.add_tool_delta(tool_delta)
-                text = delta.get("content")
-                if text:
-                    current.text += text
-                    yield text
+                body = await resp.text()
+                retry = llm_endpoint.cloud_retry_without_reasoning_effort(
+                    resp.status, body, payload
+                )
+                if retry is None:
+                    raise RuntimeError(f"HTTP {resp.status}: {body[:300]}")
+            else:
+                retry = None
+                async for delta in self._read_stream(resp, current):
+                    yield delta
+        if retry is not None:
+            async with http.post(
+                endpoint.chat_url, json=retry, headers=endpoint.headers, timeout=timeout
+            ) as resp:
+                if resp.status >= 400:
+                    raise RuntimeError(f"HTTP {resp.status}: {(await resp.text())[:300]}")
+                async for delta in self._read_stream(resp, current):
+                    yield delta
+
+    @staticmethod
+    async def _read_stream(resp: aiohttp.ClientResponse, current: _Round) -> AsyncIterator[str]:
+        """Accumulate one streamed response into ``current``, yielding its text."""
+        async for raw in resp.content:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(chunk, dict) and chunk.get("error"):
+                raise RuntimeError(f"provider error: {chunk['error']}")
+            choice = (chunk.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            for tool_delta in delta.get("tool_calls") or ():
+                current.add_tool_delta(tool_delta)
+            text = delta.get("content")
+            if text:
+                current.text += text
+                yield text
 
 
 def _safe_json(raw: str) -> dict:

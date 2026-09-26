@@ -8,7 +8,10 @@ imported, launched, or billed for anything here.
 """
 
 import unittest
+from unittest.mock import patch
 
+from remote_agent_protocol import config as cfg
+from remote_agent_protocol import llm_endpoint
 from remote_agent_protocol.orchestration.providers.base import ModelCapability
 from remote_agent_protocol.orchestration.providers.copilot import (
     CopilotProvider,
@@ -87,6 +90,101 @@ class LocalProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_quota_is_always_none(self):
         provider = LocalProvider(session_factory=lambda: _FakeSession())
         self.assertIsNone(await provider.quota())
+
+
+class _CloudResp:
+    def __init__(self, status, payload=None, text=""):
+        self.status = status
+        self._payload = payload or {}
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return self._text
+
+
+class _CaptureCloudSession:
+    """Captures the single payload sent to a cloud endpoint."""
+
+    captured: dict = {}
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, json=None, headers=None):
+        _CaptureCloudSession.captured = json
+        return _CloudResp(200, {"choices": [{"message": {"content": "ok"}}]})
+
+
+class _RetryCloudSession:
+    """Rejects the first request's reasoning_effort, then succeeds."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, json=None, headers=None):
+        self.calls.append(json)
+        if len(self.calls) == 1:
+            return _CloudResp(400, text="Unknown parameter: reasoning_effort")
+        return _CloudResp(200, {"choices": [{"message": {"content": "ok"}}]})
+
+
+class LocalProviderCloudTests(unittest.IsolatedAsyncioTestCase):
+    ENDPOINT = llm_endpoint.Endpoint(
+        base_url="https://example.test/v1", model="m", api_key="k", cloud=True
+    )
+
+    async def test_omits_reasoning_effort_by_default(self):
+        provider = LocalProvider(session_factory=lambda: _CaptureCloudSession())
+        with patch.object(cfg, "CLOUD_LLM_REASONING_EFFORT", ""):
+            await provider._complete_cloud(self.ENDPOINT, "decide", max_tokens=400)
+        self.assertNotIn("reasoning_effort", _CaptureCloudSession.captured)
+
+    async def test_sends_reasoning_effort_when_configured(self):
+        provider = LocalProvider(session_factory=lambda: _CaptureCloudSession())
+        with patch.object(cfg, "CLOUD_LLM_REASONING_EFFORT", "low"):
+            result = await provider._complete_cloud(self.ENDPOINT, "decide", max_tokens=400)
+        self.assertEqual(_CaptureCloudSession.captured.get("reasoning_effort"), "low")
+        self.assertEqual(result.text, "ok")
+
+    async def test_a_callers_max_tokens_budget_is_kept(self):
+        provider = LocalProvider(session_factory=lambda: _CaptureCloudSession())
+        with patch.object(cfg, "CLOUD_LLM_REASONING_EFFORT", "low"):
+            await provider._complete_cloud(self.ENDPOINT, "decide", max_tokens=123)
+        self.assertEqual(_CaptureCloudSession.captured.get("max_tokens"), 123)
+
+    async def test_retries_once_when_the_provider_rejects_reasoning_effort(self):
+        session = _RetryCloudSession()
+        provider = LocalProvider(session_factory=lambda: session)
+        with (
+            patch.object(cfg, "CLOUD_LLM_REASONING_EFFORT", "low"),
+            patch.object(llm_endpoint, "_warned_reasoning_effort_unsupported", False),
+        ):
+            result = await provider._complete_cloud(self.ENDPOINT, "decide", max_tokens=400)
+        self.assertEqual(len(session.calls), 2)
+        self.assertIn("reasoning_effort", session.calls[0])
+        self.assertNotIn("reasoning_effort", session.calls[1])
+        self.assertEqual(result.text, "ok")
 
 
 class _FakeAssistantMessageData:

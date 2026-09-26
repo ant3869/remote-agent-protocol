@@ -23,6 +23,9 @@ def cloud(monkeypatch):
     monkeypatch.setattr(cfg, "CLOUD_INTENT_MODEL", "")
     monkeypatch.setattr(cfg, "CLOUD_ORCHESTRATION_MODEL", "")
     monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", True)
+    # A real local .env may set this; tests must not inherit whatever is on
+    # the developer's machine.
+    monkeypatch.setattr(cfg, "CLOUD_LLM_REASONING_EFFORT", "")
 
 
 @pytest.fixture
@@ -428,3 +431,195 @@ def test_intent_falls_back_to_the_local_model_when_the_chain_fails(registry, mon
 
     assert verdict["local"] is True
     assert llm_endpoint.last_answers()["intent"]["model"] == cfg.INTENT_MODEL
+
+
+# -- CLOUD_LLM_REASONING_EFFORT ----------------------------------------------
+
+
+def test_apply_cloud_request_options_fills_in_the_default_max_tokens(cloud):
+    payload: dict = {}
+    llm_endpoint.apply_cloud_request_options(payload)
+    assert payload["max_tokens"] == cfg.CLOUD_LLM_MAX_TOKENS
+
+
+def test_apply_cloud_request_options_keeps_a_callers_own_max_tokens(cloud):
+    """The classifier and orchestrator size their own budget; the helper must not clobber it."""
+    payload = {"max_tokens": 250}
+    llm_endpoint.apply_cloud_request_options(payload)
+    assert payload["max_tokens"] == 250
+
+
+def test_apply_cloud_request_options_omits_reasoning_effort_by_default(cloud):
+    payload: dict = {}
+    llm_endpoint.apply_cloud_request_options(payload)
+    assert "reasoning_effort" not in payload
+
+
+def test_apply_cloud_request_options_sends_reasoning_effort_when_configured(monkeypatch, cloud):
+    monkeypatch.setattr(cfg, "CLOUD_LLM_REASONING_EFFORT", "low")
+    payload: dict = {}
+    llm_endpoint.apply_cloud_request_options(payload)
+    assert payload["reasoning_effort"] == "low"
+
+
+def test_cloud_retry_without_reasoning_effort_ignores_a_non_400(monkeypatch):
+    monkeypatch.setattr(llm_endpoint, "_warned_reasoning_effort_unsupported", False)
+    payload = {"reasoning_effort": "low"}
+    assert (
+        llm_endpoint.cloud_retry_without_reasoning_effort(500, "reasoning_effort", payload) is None
+    )
+
+
+def test_cloud_retry_without_reasoning_effort_ignores_an_unrelated_400(monkeypatch):
+    monkeypatch.setattr(llm_endpoint, "_warned_reasoning_effort_unsupported", False)
+    payload = {"reasoning_effort": "low"}
+    assert llm_endpoint.cloud_retry_without_reasoning_effort(400, "bad request", payload) is None
+
+
+def test_cloud_retry_without_reasoning_effort_ignores_when_the_field_was_never_sent(monkeypatch):
+    monkeypatch.setattr(llm_endpoint, "_warned_reasoning_effort_unsupported", False)
+    payload = {"max_tokens": 10}
+    body = "unknown field reasoning_effort"
+    assert llm_endpoint.cloud_retry_without_reasoning_effort(400, body, payload) is None
+
+
+def test_cloud_retry_without_reasoning_effort_strips_the_field_and_warns_once(monkeypatch):
+    monkeypatch.setattr(llm_endpoint, "_warned_reasoning_effort_unsupported", False)
+    warnings: list[str] = []
+    monkeypatch.setattr(llm_endpoint.logger, "warning", warnings.append)
+    payload = {"model": "m", "reasoning_effort": "low"}
+
+    retried = llm_endpoint.cloud_retry_without_reasoning_effort(
+        400, "Unknown parameter: reasoning_effort", payload
+    )
+    assert retried == {"model": "m"}
+    assert len(warnings) == 1
+
+    again = llm_endpoint.cloud_retry_without_reasoning_effort(
+        400, "Unknown parameter: reasoning_effort", {"reasoning_effort": "low"}
+    )
+    assert again == {}
+    assert len(warnings) == 1, "the warning must not repeat on a second rejection"
+
+
+class _StatusResp:
+    """A JSON response carrying a status code, for the reasoning_effort retry path."""
+
+    def __init__(self, payload, status=200, text=""):
+        self._payload = payload
+        self.status = status
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self):
+        return self._payload
+
+    async def text(self):
+        return self._text
+
+
+class _StreamResp:
+    """An SSE-shaped streaming response carrying a status code."""
+
+    def __init__(self, status, lines=(), text=""):
+        self.status = status
+        self._lines = list(lines)
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def text(self):
+        return self._text
+
+    @property
+    async def content(self):
+        for line in self._lines:
+            yield line.encode("utf-8")
+
+
+class _RetryHttp:
+    """Rejects the first cloud request's reasoning_effort, then succeeds."""
+
+    def __init__(self, ok_resp_factory):
+        self.calls: list[dict] = []
+        self._ok_resp_factory = ok_resp_factory
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.calls.append(json)
+        if len(self.calls) == 1:
+            return _StatusResp({}, status=400, text="Unknown parameter: reasoning_effort")
+        return self._ok_resp_factory()
+
+
+def test_a_non_streamed_cloud_call_retries_once_when_reasoning_effort_is_rejected(
+    monkeypatch, cloud
+):
+    import asyncio
+
+    from remote_agent_protocol.brain import BrainSession
+    from remote_agent_protocol.personas import PERSONAS
+
+    monkeypatch.setattr(cfg, "CLOUD_LLM_REASONING_EFFORT", "low")
+    monkeypatch.setattr(llm_endpoint, "_warned_reasoning_effort_unsupported", False)
+
+    session = BrainSession.__new__(BrainSession)
+    session._persona = PERSONAS[0]
+    session._messages = []
+    session._system_instruction = lambda: "system"
+    http = _RetryHttp(
+        lambda: _StatusResp({"choices": [{"message": {"content": "hi"}}]}, status=200)
+    )
+    session._http = http
+
+    endpoint = llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN)
+    result = asyncio.run(session._call_endpoint(endpoint))
+
+    assert result == "hi"
+    assert len(http.calls) == 2
+    assert http.calls[0]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in http.calls[1], "the retry must drop the rejected field"
+
+
+def test_a_streamed_cloud_call_retries_once_when_reasoning_effort_is_rejected(monkeypatch, cloud):
+    import asyncio
+
+    from remote_agent_protocol.brain import BrainSession
+    from remote_agent_protocol.personas import PERSONAS
+
+    monkeypatch.setattr(cfg, "CLOUD_LLM_REASONING_EFFORT", "low")
+    monkeypatch.setattr(llm_endpoint, "_warned_reasoning_effort_unsupported", False)
+
+    session = BrainSession.__new__(BrainSession)
+    session._persona = PERSONAS[0]
+    session._messages = []
+    session._system_instruction = lambda: "system"
+    http = _RetryHttp(
+        lambda: _StreamResp(
+            200,
+            lines=[
+                'data: {"choices":[{"delta":{"content":"hi"}}]}',
+                "data: [DONE]",
+            ],
+        )
+    )
+    session._http = http
+
+    endpoint = llm_endpoint.cloud_endpoint(llm_endpoint.BRAIN)
+
+    async def collect():
+        return [delta async for delta in session._stream_from(endpoint)]
+
+    deltas = asyncio.run(collect())
+
+    assert deltas == ["hi"]
+    assert len(http.calls) == 2
+    assert "reasoning_effort" not in http.calls[1]
