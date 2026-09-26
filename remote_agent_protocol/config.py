@@ -466,7 +466,7 @@ VAD_MIN_VOLUME = float(_env("VAD_MIN_VOLUME", "0.6"))
 #                    context window from overflowing on a small local model.
 #                    Set to 0 for unlimited (not recommended).
 MEMORY_ENABLED = True
-MEMORY_FILE = str(DATA_DIR / "jess_memory.json")
+MEMORY_FILE = _env("MEMORY_FILE", str(DATA_DIR / "jess_memory.json"))
 # 40 real turns is a lot of prompt for a CPU-bound local model to prefill every
 # single inference. 24 keeps her snappy while still feeling like she remembers
 # the conversation. Bump it back up if you miss the longer recall.

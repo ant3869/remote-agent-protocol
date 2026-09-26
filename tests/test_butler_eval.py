@@ -83,3 +83,23 @@ async def test_live_mode_refuses_without_a_cloud_butler_endpoint(monkeypatch):
 
     with pytest.raises(RuntimeError, match="No cloud Butler endpoint"):
         await butler_eval.run_all(mode="live")
+
+
+@pytest.mark.asyncio
+async def test_the_eval_never_reads_the_real_memory_file(monkeypatch, tmp_path):
+    from remote_agent_protocol import memory
+
+    real = tmp_path / "jess_memory.json"
+    real.write_text('[{"role": "user", "content": "private"}]', encoding="utf-8")
+    monkeypatch.setattr(cfg, "MEMORY_FILE", str(real))
+    read: list[str] = []
+    original = memory.load_memory
+    monkeypatch.setattr(
+        memory, "load_memory", lambda path, limit: read.append(str(path)) or original(path, limit)
+    )
+    case = next(c for c in butler_eval.CASES if c.id == "chat-thanks")
+
+    await butler_eval.run_all((case,), mode="scripted")
+
+    assert str(real) not in read
+    assert cfg.MEMORY_FILE == str(real)

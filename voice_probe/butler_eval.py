@@ -436,6 +436,8 @@ class _World:
     def __init__(self, case: ButlerCase, data_dir: Path):
         cfg.AGENT_REGISTRY_FILE = str(data_dir / f"registry-{case.id}.json")
         cfg.CONVERSATION_STORE_PATH = str(data_dir / f"conversations-{case.id}.json")
+        # The hub imports legacy chat history from this file into a new store.
+        cfg.MEMORY_FILE = str(data_dir / "no-memory.json")
         self.case = case
         self.health = {**DEFAULT_HEALTH, **dict(case.health)}
         self.session = brain.BrainSession(personas.by_name("Butler"))
@@ -717,6 +719,7 @@ _OVERRIDES = {
     "AGENT_HISTORY_FILE": "",
     "AGENT_REGISTRY_FILE": None,
     "CONVERSATION_STORE_PATH": None,
+    "MEMORY_FILE": None,
 }
 
 

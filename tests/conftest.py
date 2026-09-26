@@ -61,6 +61,10 @@ os.environ.setdefault(
     os.path.join(tempfile.gettempdir(), f"rap_test_agent_registry_{os.getpid()}.json"),
 )
 os.environ.setdefault(
+    "MEMORY_FILE",
+    os.path.join(tempfile.gettempdir(), f"rap_test_memory_{os.getpid()}.json"),
+)
+os.environ.setdefault(
     "AGENT_HISTORY_FILE",
     os.path.join(tempfile.gettempdir(), f"rap_test_agent_history_{os.getpid()}.json"),
 )
