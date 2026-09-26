@@ -10,6 +10,8 @@ top level, by which point ``config.AGENT_BACKENDS`` is already frozen.
 import os
 import tempfile
 
+import pytest
+
 # "mock" is disabled in a live session by default (see config.py) so it can
 # never silently swallow real work. The test suite is exactly the deliberate
 # debug context that flag exists for: mock is the one backend guaranteed
@@ -49,3 +51,20 @@ os.environ.setdefault(
     "MODEL_PROVIDERS_PATH",
     os.path.join(tempfile.gettempdir(), f"rap_test_model_providers_{os.getpid()}.json"),
 )
+
+
+@pytest.fixture(autouse=True)
+def _sandboxed_secret_store():
+    """Keep provider keys off the real Windows Credential Manager.
+
+    Any test that saves a provider (directly or through a web action) would
+    otherwise write ``RAP/model-provider/*`` credentials into the developer's
+    real vault, and off Windows it can't run at all. Tests that exercise the
+    real resolver opt back in with ``secret_store.use_backend(None)``.
+    """
+    from remote_agent_protocol import secret_store
+
+    secret_store.use_backend(secret_store.InMemoryBackend())
+    yield
+    secret_store.use_backend(None)
+    secret_store._known_secrets.clear()

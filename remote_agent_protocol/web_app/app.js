@@ -549,10 +549,6 @@ function renderModelBrowserList(data) {
       return row;
     }));
   }
-  const manual = document.createElement("div");
-  manual.className = "model-browser-manual";
-  manual.innerHTML = '<input type="text" placeholder="Enter a model ID manually" aria-label="Manual model ID" id="modelBrowserManualInput" /><button class="button quiet" type="button" id="modelBrowserManualTestBtn">Test</button>';
-  container.append(manual);
 }
 
 function renderRoleAssignment(data) {
@@ -617,11 +613,11 @@ function bindProviderSettings() {
       post("model_test", { provider_id: testButton.dataset.modelTestProvider, model: testButton.dataset.modelTestModel });
       return;
     }
-    if (event.target.id === "modelBrowserManualTestBtn") {
-      const providerId = $("modelBrowserProviderSelect").value;
-      const model = $("modelBrowserManualInput").value.trim();
-      if (providerId && model) post("model_test", { provider_id: providerId, model });
-    }
+  });
+  $("modelBrowserManualTestBtn")?.addEventListener("click", () => {
+    const providerId = $("modelBrowserProviderSelect").value;
+    const model = $("modelBrowserManualInput").value.trim();
+    if (providerId && model) post("model_test", { provider_id: providerId, model });
   });
   $("roleAssignmentList")?.addEventListener("click", (event) => {
     const addButton = event.target.closest("[data-role-add-btn]");

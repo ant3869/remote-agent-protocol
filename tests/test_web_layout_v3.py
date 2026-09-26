@@ -32,7 +32,7 @@ def test_v4_command_frame_and_landmarks_are_wired():
     assert 'class="task-canvas workspace"' in HTML
     assert 'class="runtime-statusline"' in HTML
     assert HTML.count("data-context-view=") == 7
-    assert HTML.count("data-settings-section=") == 5
+    assert HTML.count("data-settings-section=") == 6
     assert 'id="appTitle"' in HTML
     assert 'id="healthCluster"' in HTML
     assert 'id="memoryLayout"' in HTML
