@@ -145,6 +145,7 @@ class VoiceSession:
             on_persist=self._persist_job if cfg.AGENT_HISTORY_FILE else None,
             model_targets=cfg.AGENT_MODEL_TARGETS,
             default_model_targets=cfg.AGENT_DEFAULT_MODEL_TARGETS,
+            model_chains=cfg.AGENT_MODEL_CHAINS,
             workspace_dir=cfg.AGENT_WORKSPACE_DIR,
             scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
             host_repo=cfg.AGENT_HOST_REPO,
@@ -1548,7 +1549,9 @@ class VoiceSession:
         if voice_commands.is_retry_request(text):
             return await self._handle_retry_request()
 
-        parsed = voice_commands.parse_model_switch(text, cfg.AGENT_SPOKEN_ALIASES)
+        parsed = voice_commands.parse_model_switch(
+            text, cfg.AGENT_SPOKEN_ALIASES, cfg.AGENT_MODEL_PROVIDERS
+        )
         if parsed is None:
             return None
         return await self._handle_model_switch(parsed)

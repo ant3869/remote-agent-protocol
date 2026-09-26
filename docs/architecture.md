@@ -376,6 +376,24 @@ for a backend whose own default model is unreliable:
 AGENT_DEFAULT_MODEL_TARGETS_JSON={"code-puppy":"openai"}
 ```
 
+`AGENT_MODEL_TARGETS_JSON` adds targets per agent (provider key -> spoken
+label plus CLI args passed verbatim), and every provider key it names can be
+switched to by voice in both full and brain mode ("switch Hermes to
+OpenRouter"). `AGENT_MODEL_CHAINS_JSON` orders an agent's targets for
+failover: the head is the starting model unless a default target is set, and
+a job failing with `quota`, `auth`, or `model_not_found` is relaunched on the
+next untried target inside the same job id. Only the attempt that ends the
+chain emits `finished`; each switch emits a `model_failover` event (status
+`running`, so the conversation hub ignores it) and is recorded in
+`AgentJob.model_failovers`. A target that succeeds after a failover becomes the
+agent's override for later jobs. Rate limits, capacity errors, timeouts, and
+internal self-check jobs never fail over.
+
+```dotenv
+AGENT_MODEL_TARGETS_JSON={"hermes":{"openrouter":{"label":"OpenRouter Flash","args":["--provider","openrouter","--model","google/gemini-2.5-flash"]}}}
+AGENT_MODEL_CHAINS_JSON={"hermes":["openai","openrouter"]}
+```
+
 Each `AgentJob` also carries `model_label` (the configured override's label,
 known before the job runs) and `answered_model` (best-effort, parsed from the
 harness's own output where it prints one -- empty otherwise, never guessed).

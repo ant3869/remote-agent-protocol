@@ -126,6 +126,38 @@ def _parse_command_map(raw: str, name: str) -> dict[str, list[str]]:
     return value
 
 
+def _parse_model_target_map(raw: str, name: str) -> dict[str, dict[str, dict]]:
+    """Parse per-agent model targets: ``{agent: {provider: {"label", "args"}}}``."""
+    if not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be valid JSON") from exc
+
+    def _valid_target(target: object) -> bool:
+        return (
+            isinstance(target, dict)
+            and isinstance(target.get("label"), str)
+            and target["label"].strip() != ""
+            and isinstance(target.get("args"), list)
+            and bool(target["args"])
+            and all(isinstance(arg, str) and arg for arg in target["args"])
+        )
+
+    if not isinstance(value, dict) or not all(
+        isinstance(agent, str)
+        and isinstance(targets, dict)
+        and all(isinstance(provider, str) and _valid_target(t) for provider, t in targets.items())
+        for agent, targets in value.items()
+    ):
+        raise ValueError(
+            f"{name} must map agent -> provider -> "
+            '{"label": "...", "args": ["--flag", "value", ...]}'
+        )
+    return value
+
+
 APP_NAME = "Remote Agent Protocol"
 APP_TAGLINE = "voice switchboard for local and remote agents"
 # full  = GUI/terminal owns local mic -> STT -> LLM -> TTS -> speakers.
@@ -574,6 +606,31 @@ AGENT_MODEL_TARGETS = {
         }
     },
 }
+# AGENT_MODEL_TARGETS_JSON adds or replaces targets per agent, so any provider
+# a harness supports can be switched to by voice ("switch Hermes to
+# OpenRouter") and used in a fallback chain. The args are passed verbatim to
+# that harness's CLI, so they must be flags the CLI actually accepts.
+# Example: AGENT_MODEL_TARGETS_JSON={"hermes":{"openrouter":{"label":
+#   "OpenRouter Gemini 2.5 Flash","args":["--provider","openrouter","--model",
+#   "google/gemini-2.5-flash"]}}}
+for _agent, _targets in _parse_model_target_map(
+    _env("AGENT_MODEL_TARGETS_JSON", ""), "AGENT_MODEL_TARGETS_JSON"
+).items():
+    AGENT_MODEL_TARGETS[_agent] = {**AGENT_MODEL_TARGETS.get(_agent, {}), **_targets}
+# AGENT_MODEL_CHAINS_JSON: agent -> ordered provider keys into
+# AGENT_MODEL_TARGETS. The first entry is the agent's starting model. When a
+# job fails with a quota, auth, or model-not-found error, the bridge relaunches
+# the same task on the next entry before reporting failure, and keeps
+# whichever entry succeeded for later jobs. Agents without a chain never fail
+# over. Unknown provider keys are logged and skipped at startup.
+# Example: AGENT_MODEL_CHAINS_JSON={"hermes":["openai","openrouter"]}
+AGENT_MODEL_CHAINS = _parse_command_map(
+    _env("AGENT_MODEL_CHAINS_JSON", ""), "AGENT_MODEL_CHAINS_JSON"
+)
+# Every provider key any agent has a target for -- what a spoken switch may name.
+AGENT_MODEL_PROVIDERS = sorted(
+    {provider for targets in AGENT_MODEL_TARGETS.values() for provider in targets}
+)
 # AGENT_DEFAULT_MODEL_TARGETS_JSON: agent name -> provider key applied to
 # AGENT_MODEL_TARGETS automatically at bridge init, so a backend whose own
 # default model is broken (2026-09-25 harness audit: code-puppy's default

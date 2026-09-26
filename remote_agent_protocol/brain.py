@@ -148,6 +148,7 @@ class BrainSession:
             on_persist=self._persist_job if cfg.AGENT_HISTORY_FILE else None,
             model_targets=cfg.AGENT_MODEL_TARGETS,
             default_model_targets=cfg.AGENT_DEFAULT_MODEL_TARGETS,
+            model_chains=cfg.AGENT_MODEL_CHAINS,
             workspace_dir=cfg.AGENT_WORKSPACE_DIR,
             scope_preamble=cfg.AGENT_SCOPE_PREAMBLE,
             host_repo=cfg.AGENT_HOST_REPO,
@@ -582,6 +583,11 @@ class BrainSession:
             # twice, the second time from the acknowledgment reply itself).
             self._control_turn = True
             return consumed
+        model_switch = voice_commands.parse_model_switch(
+            text, cfg.AGENT_SPOKEN_ALIASES, cfg.AGENT_MODEL_PROVIDERS
+        )
+        if model_switch is not None:
+            return self._handle_model_switch(model_switch)
         if cancel_request is not None:
             return await self._handle_agent_cancel(cancel_request)
         parsed = await self._resolve_delegation(text)
@@ -623,6 +629,32 @@ class BrainSession:
         self._emit({"type": "default_agent_changed", "agent": agent})
         self._direct_reply = f"Your default agent is now {agent}."
         return f"[Agent control: the default agent is now {agent}.]"
+
+    def _handle_model_switch(self, parsed: tuple[str | None, str, bool]) -> str:
+        """Apply "switch Hermes to OpenRouter" locally and say exactly what happened.
+
+        The reply is fixed text built from the bridge's own result, so the
+        persona can't claim a switch that didn't take. Brain mode keeps no
+        record of the last failed task, so a spoken "and retry" is answered
+        honestly rather than silently dropped.
+        """
+        self._control_turn = True
+        explicit_agent, provider, retry = parsed
+        agent = explicit_agent or self._default_agent_backend
+        label = self._bridge.set_model_override(agent, provider)
+        if label is None:
+            self._direct_reply = (
+                f"{agent} has no {provider} model configured, sir. Nothing was changed."
+            )
+            return (
+                f"[Agent model control: '{agent}' has no configured {provider} model target; "
+                "nothing changed.]"
+            )
+        logger.info(f"Model override -> {agent}: {label}")
+        self._emit({"type": "agent_model_changed", "agent": agent, "model": label})
+        tail = " Ask again for the task you want it to retry." if retry else ""
+        self._direct_reply = f"{agent} will use {label} from its next task, sir.{tail}"
+        return f"[Agent model control: '{agent}' will use {label} on its next run.]"
 
     async def _handle_agent_cancel(self, cancel_request: tuple[str | None, bool]) -> str:
         """Cancel matching active jobs for real, then let the persona narrate it.

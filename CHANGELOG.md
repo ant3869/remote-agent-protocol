@@ -34,8 +34,22 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   Existing `CLOUD_*`/`OPENROUTER_API_KEY` env config keeps working unchanged
   when no role is assigned, and a one-time "Import from .env" action can move
   it into the new registry without ever editing `.env` itself.
+- Per-harness model fallback chains (`AGENT_MODEL_CHAINS_JSON`): a delegated
+  job that fails with a quota, auth, or model-not-found error is relaunched on
+  the agent's next configured model before it is reported as failed, and the
+  model that worked is kept for later jobs. `AGENT_MODEL_TARGETS_JSON` adds
+  model targets for any provider a harness supports.
+- Brain mode now handles spoken model switches ("switch Hermes to
+  OpenRouter") locally, for every configured provider, and says exactly what
+  changed.
 
 ### Fixed
+
+- The test suite no longer reads or writes real application data: provider
+  keys, the agent registry, job history, UI and s2s state, and the
+  single-instance endpoint file are sandboxed per test run.
+- The "Import from .env" banner in Models & providers could never appear, and
+  the manual model-ID field was wiped by every re-render.
 
 - A non-zero exit with no classified failure reason now keeps a bounded,
   redacted tail of the process's actual output in `failure_detail`, instead

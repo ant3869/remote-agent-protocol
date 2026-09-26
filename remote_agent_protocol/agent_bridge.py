@@ -248,6 +248,17 @@ _AUTH_RE = re.compile(
     r"\bauthentication (?:failed|error)\b|\bnot authenticated\b",
     re.IGNORECASE,
 )
+# A harness launched with a model its provider doesn't serve: code-puppy's
+# "404 model_name:" (empty model), OpenAI's model_not_found, "unknown model".
+_MODEL_NOT_FOUND_RE = re.compile(
+    r"model.?not.?found|model_name:\s*$|no such model|"
+    r"(?:unknown|invalid|unsupported) model\b|"
+    r"model\b.{0,80}\b(?:does not exist|not found|is not available|is not supported)",
+    re.IGNORECASE,
+)
+# Failures a different model can plausibly fix. Rate limits and capacity are
+# transient on the same model, so they are not grounds for switching.
+_MODEL_FAILOVER_KINDS = frozenset({"quota", "auth", "model_not_found"})
 _CAPACITY_RE = re.compile(
     r"provider.*(?:capacity|overloaded)|(?:server|service).*(?:overloaded|at capacity)",
     re.IGNORECASE,
@@ -333,6 +344,9 @@ class AgentJob:
     result_is_fallback: bool = False  # result was reconstructed from output, not agent-authored
     model_label: str = ""  # the CONFIGURED override's label, known before the job runs
     answered_model: str = ""  # best-effort, parsed from the harness's OWN output; "" if unprinted
+    # One "<label>: <failure kind>" entry per model this job gave up on
+    # before the attempt it finished with (AGENT_MODEL_CHAINS_JSON).
+    model_failovers: list[str] = field(default_factory=list)
     host_modified: bool = False  # the job touched the host app's own source
     # Consultation bookkeeping. This is what makes the limits structural: an
     # agent may ask for whatever it likes, but depth and chain travel with the
@@ -350,6 +364,13 @@ class AgentJob:
     _launch_done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _clean_session: bool = field(default=False, repr=False)
     _command_template: tuple[str, ...] | None = field(default=None, repr=False)
+    # Model-chain failover: the provider key this attempt runs on, the args
+    # pinned for it (None = the agent's current override), every provider key
+    # already tried, and the next one to relaunch on when set by _stream.
+    _model_provider: str = field(default="", repr=False)
+    _model_args: tuple[str, ...] | None = field(default=None, repr=False)
+    _models_tried: list[str] = field(default_factory=list, repr=False)
+    _failover_to: str | None = field(default=None, repr=False)
 
 
 def clean_session_template(template: list[str]) -> list[str]:
@@ -516,6 +537,8 @@ def detect_provider_failure(line: str) -> str | None:
         return "rate_limit"
     if _CAPACITY_RE.search(line):
         return "capacity"
+    if _MODEL_NOT_FOUND_RE.search(line):
+        return "model_not_found"
     if _AUTH_RE.search(line):
         return "auth"
     return None
@@ -1196,6 +1219,7 @@ class AgentBridge:
         on_persist: Callable[[AgentJob], "asyncio.Future | None"] | None = None,
         model_targets: dict | None = None,
         default_model_targets: dict[str, str] | None = None,
+        model_chains: dict[str, list[str]] | None = None,
         workspace_dir: str | None = None,
         scope_preamble: str = "",
         host_repo: str | None = None,
@@ -1218,6 +1242,11 @@ class AgentBridge:
                 via set_model_override(), so a broken default model doesn't
                 need a spoken/API override first. Unknown agent/provider
                 pairs are logged and skipped, not raised.
+            model_chains: Agent -> ordered provider keys into model_targets.
+                The first entry is the starting model unless
+                default_model_targets names one; a job failing with a quota,
+                auth, or model-not-found error is relaunched on the next
+                untried entry before it is reported as failed.
             workspace_dir: Default cwd for jobs started without one; None
                 inherits the host process directory (the old behavior).
             scope_preamble: Text added after every task ({cwd} placeholder);
@@ -1245,6 +1274,8 @@ class AgentBridge:
         self._model_targets = model_targets or {}
         self._model_overrides: dict[str, list[str]] = {}
         self._model_labels: dict[str, str] = {}
+        self._model_providers: dict[str, str] = {}
+        self._model_chains: dict[str, list[str]] = {}
         self._session_ids: dict[str, str] = {}
         # Turns resumed on the current session per hermes-family agent. See
         # _maybe_rotate_session: unbounded growth here is what turned an 8s
@@ -1271,6 +1302,21 @@ class AgentBridge:
                     f"AGENT_DEFAULT_MODEL_TARGETS_JSON: no '{provider}' target for "
                     f"'{agent}' in AGENT_MODEL_TARGETS -- ignoring"
                 )
+        for agent, chain in (model_chains or {}).items():
+            known = [
+                provider for provider in chain if provider in self._model_targets.get(agent, {})
+            ]
+            for provider in chain:
+                if provider not in known:
+                    logger.warning(
+                        f"AGENT_MODEL_CHAINS_JSON: no '{provider}' target for '{agent}' "
+                        "in AGENT_MODEL_TARGETS -- skipping that entry"
+                    )
+            if not known:
+                continue
+            self._model_chains[agent] = list(dict.fromkeys(known))
+            if agent not in self._model_overrides:
+                self.set_model_override(agent, self._model_chains[agent][0])
 
     # -- queries ------------------------------------------------------------
 
@@ -1321,7 +1367,79 @@ class AgentBridge:
             return None
         self._model_overrides[agent] = list(target["args"])
         self._model_labels[agent] = str(target["label"])
+        self._model_providers[agent] = provider
         return self._model_labels[agent]
+
+    def model_chain(self, agent: str) -> list[str]:
+        """The configured fallback order of provider keys for ``agent``."""
+        return list(self._model_chains.get(agent, ()))
+
+    def _job_model_args(self, job: AgentJob) -> list[str] | None:
+        """The model args this attempt runs with.
+
+        A failover pins its own target; otherwise the agent's current override
+        applies, read at launch so a switch made while the job waited counts.
+        """
+        if job._model_args is not None:
+            return list(job._model_args)
+        return self._model_overrides.get(job.agent)
+
+    def _next_failover_model(self, job: AgentJob) -> str | None:
+        """The next untried provider in this agent's chain, if the failure warrants one."""
+        if (
+            job.internal
+            or job.status != STATUS_FAILED
+            or job.failure_kind not in _MODEL_FAILOVER_KINDS
+        ):
+            return None
+        chain = self._model_chains.get(job.agent)
+        if not chain:
+            return None
+        current = job._model_provider or self._model_providers.get(job.agent, "")
+        tried = {*job._models_tried, current}
+        return next((provider for provider in chain if provider not in tried), None)
+
+    def _prepare_failover(self, job: AgentJob, provider: str) -> None:
+        """Reset ``job`` to run again on ``provider``, recording what it gave up on."""
+        target = self._model_targets[job.agent][provider]
+        previous_provider = job._model_provider or self._model_providers.get(job.agent, "")
+        previous_label = job.model_label or "its default model"
+        reason = job.failure_kind.replace("_", " ")
+        job._models_tried.append(previous_provider)
+        job.model_failovers.append(f"{previous_label}: {reason}")
+        job._model_provider = provider
+        job._model_args = tuple(target["args"])
+        job.model_label = str(target["label"])
+        note = (
+            f"[{job.agent} hit a {reason} error on {previous_label}; retrying on {job.model_label}]"
+        )
+        logger.warning(f"Agent job {job.job_id} [{job.agent}]: {note[1:-1]}")
+        job.lines = [note]
+        job.status = STATUS_RUNNING
+        job.state = STATE_STARTED
+        job.action = f"Retrying on {job.model_label}"
+        job.tool = ""
+        job.step = None
+        job.step_total = None
+        job.last_completed_step = ""
+        job.summary = ""
+        job.result = ""
+        job.result_is_fallback = False
+        job.failure_kind = ""
+        job.failure_detail = ""
+        job.answered_model = ""
+        job.returncode = None
+        job._last_status = time.monotonic()
+        # The user already heard this job start; the relaunch is not news.
+        job.announce_start = False
+        self._emit_job(
+            job,
+            "model_failover",
+            line=note,
+            from_model=previous_label,
+            to_model=job.model_label,
+            reason=reason,
+        )
 
     def set_scope_preamble(self, preamble: str) -> None:
         """Replace the scope preamble used for future jobs."""
@@ -1366,6 +1484,7 @@ class AgentBridge:
         )
         job._t0 = time.monotonic()
         job._last_status = job._t0
+        job._model_provider = self._model_providers.get(agent, "")
         self._jobs[job.job_id] = job
         if not internal:
             self._idle_notified = False
@@ -1430,10 +1549,19 @@ class AgentBridge:
             job.action = "Waiting for the current turn to finish"
             self._emit_job(job, "started")
         if lock is None:
-            await self._launch(job, task, cwd)
+            await self._launch_with_failover(job, task, cwd)
             return
         async with lock:
+            await self._launch_with_failover(job, task, cwd)
+
+    async def _launch_with_failover(self, job: AgentJob, task: str, cwd: str | None) -> None:
+        """Launch ``job``, relaunching it down its agent's model chain while _stream asks to."""
+        while True:
             await self._launch(job, task, cwd)
+            provider, job._failover_to = job._failover_to, None
+            if provider is None:
+                return
+            self._prepare_failover(job, provider)
 
     def _is_remote(self, agent: str) -> bool:
         """Whether this backend name belongs to a discovered remote host."""
@@ -1460,7 +1588,7 @@ class AgentBridge:
             agent=agent,
             task=task,
             cwd=cwd or "",
-            extra_args=tuple(self._model_overrides.get(job.agent, ())),
+            extra_args=tuple(self._job_model_args(job) or ()),
         )
         proc = await client.start_job(request)
         self._procs[job.job_id] = proc
@@ -1573,7 +1701,7 @@ class AgentBridge:
             template,
             command_task,
             task_file=str(prompt_file) if prompt_file else None,
-            extra_args=self._model_overrides.get(agent),
+            extra_args=self._job_model_args(job),
         )
         if not job._clean_session and agent in _HERMES_SESSION_AGENTS:
             self._maybe_rotate_session(agent, job)
@@ -2071,6 +2199,16 @@ class AgentBridge:
                 # entries like "exit code 1 without reporting details" had
                 # real output that never reached the recorded reason).
                 job.failure_detail = _failure_tail(job.lines) or job.summary
+        if (next_provider := self._next_failover_model(job)) is not None:
+            # Not finished: _launch_with_failover relaunches on the next model,
+            # and only the attempt that ends the chain is announced.
+            job._failover_to = next_provider
+            return
+        if job.status == STATUS_DONE and job.model_failovers and job._model_provider:
+            # Later jobs start on the model that worked instead of failing
+            # through the same exhausted ones again.
+            self.set_model_override(job.agent, job._model_provider)
+            logger.info(f"Agent '{job.agent}' now defaults to {job.model_label}")
         if job.status == STATUS_DONE and not job.result:
             job.result = fallback_result(job.lines)
             job.result_is_fallback = True
@@ -2331,6 +2469,7 @@ class AgentBridge:
             "result_is_fallback": job.result_is_fallback,
             "model_label": job.model_label,
             "answered_model": job.answered_model,
+            "model_failovers": list(job.model_failovers),
             "host_modified": job.host_modified,
             "elapsed_secs": job.secs
             if job.secs is not None

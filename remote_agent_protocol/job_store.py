@@ -42,6 +42,7 @@ def job_to_row(job: Any) -> dict[str, Any]:
         "failure_detail": job.failure_detail,
         "model_label": job.model_label,
         "answered_model": getattr(job, "answered_model", ""),
+        "model_failovers": list(getattr(job, "model_failovers", ())),
         "host_modified": getattr(job, "host_modified", False),
         "lines": list(job.lines)[-_MAX_PERSISTED_LINES:],
     }

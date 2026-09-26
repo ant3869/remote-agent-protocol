@@ -48,6 +48,26 @@ class ModelSwitchCommandTests(unittest.TestCase):
             ("hermes", "openai", False),
         )
 
+    def test_any_configured_provider_can_be_named(self):
+        providers = ["openai", "openrouter", "9router"]
+        self.assertEqual(
+            voice_commands.parse_model_switch("Switch Hermes to OpenRouter.", ALIASES, providers),
+            ("hermes", "openrouter", False),
+        )
+        self.assertEqual(
+            voice_commands.parse_model_switch("switch hermes to open router", ALIASES, providers),
+            ("hermes", "openrouter", False),
+        )
+        self.assertEqual(
+            voice_commands.parse_model_switch("use 9router for codex", ALIASES, providers),
+            ("codex", "9router", False),
+        )
+
+    def test_an_unconfigured_provider_is_not_a_switch(self):
+        self.assertIsNone(
+            voice_commands.parse_model_switch("switch Hermes to OpenRouter", ALIASES, ["openai"])
+        )
+
     def test_plain_model_discussion_is_not_a_control_command(self):
         self.assertIsNone(
             voice_commands.parse_model_switch("is the OpenAI model any good?", ALIASES)

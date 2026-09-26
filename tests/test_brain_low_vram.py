@@ -211,3 +211,43 @@ async def test_a_single_agent_ping_is_also_answered_locally(monkeypatch):
     assert all(task.startswith("RAP self-check") for _agent, task in started)
     assert "Code Puppy" in content
     assert "mock" not in content, "a named roll call reports only that agent"
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_model_switch_is_applied_locally_in_brain_mode(monkeypatch):
+    # Brain mode never wired voice_commands.parse_model_switch, so "switch
+    # Hermes to OpenRouter" fell through to delegation there.
+    monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    monkeypatch.setattr(cfg, "AGENT_MODEL_PROVIDERS", ["openai", "openrouter"])
+    session = brain.BrainSession(personas.PERSONAS[0])
+    session._bridge._model_targets = {
+        "hermes": {"openrouter": {"label": "OpenRouter Flash", "args": ["--model", "x"]}}
+    }
+    started = []
+    monkeypatch.setattr(session._bridge, "start", lambda *a, **k: started.append(a))
+
+    content = await session._turn_content("Switch Hermes to OpenRouter.", None)
+
+    assert started == []
+    assert session._control_turn is True
+    assert session._bridge._model_labels["hermes"] == "OpenRouter Flash"
+    assert "OpenRouter Flash" in content
+    assert session._direct_reply == "hermes will use OpenRouter Flash from its next task, sir."
+
+
+@pytest.mark.asyncio
+async def test_a_switch_to_an_unconfigured_target_says_nothing_changed(monkeypatch):
+    monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    monkeypatch.setattr(cfg, "AGENT_MODEL_PROVIDERS", ["openai", "openrouter"])
+    session = brain.BrainSession(personas.PERSONAS[0])
+    session._bridge._model_targets = {}
+    started = []
+    monkeypatch.setattr(session._bridge, "start", lambda *a, **k: started.append(a))
+
+    await session._turn_content("switch codex to open router", None)
+
+    assert started == []
+    assert "codex" not in session._bridge._model_labels
+    assert session._direct_reply == (
+        "codex has no openrouter model configured, sir. Nothing was changed."
+    )

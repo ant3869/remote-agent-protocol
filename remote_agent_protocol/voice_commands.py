@@ -11,6 +11,7 @@ Pure functions only -- no pipecat imports, fully unit-testable.
 
 import functools
 import re
+from collections.abc import Iterable
 
 # Leading fluff we tolerate before the actual command verb.
 _FILLERS = (
@@ -430,18 +431,41 @@ def parse_delegation(
     return None
 
 
-_MODEL_PROVIDER_ALIASES = {"openai": "openai", "open ai": "openai"}
+def model_provider_aliases(providers: Iterable[str]) -> dict[str, str]:
+    """Spoken forms of provider keys: "openrouter" is also "open router".
+
+    Speech-to-text splits compound brand names unpredictably, so each key is
+    accepted as written, with separators as spaces, and with a leading
+    "open" split off.
+    """
+    spoken: dict[str, str] = {}
+    for provider in providers:
+        key = provider.strip().lower()
+        if not key:
+            continue
+        spaced = re.sub(r"[-_.]+", " ", key)
+        for form in {key, spaced, re.sub(r"^open(?=\w)", "open ", spaced)}:
+            spoken.setdefault(form, provider)
+    return spoken
 
 
-def parse_model_switch(text: str, aliases: dict[str, str]) -> tuple[str | None, str, bool] | None:
-    """Parse a spoken provider/model switch, optionally naming an agent."""
+def parse_model_switch(
+    text: str, aliases: dict[str, str], providers: Iterable[str] = ("openai",)
+) -> tuple[str | None, str, bool] | None:
+    """Parse a spoken provider/model switch, optionally naming an agent.
+
+    ``providers`` are the provider keys configured in AGENT_MODEL_TARGETS;
+    only those are recognized, so a switch can't name a target that doesn't
+    exist.
+    """
     lowered = _strip_fillers(text.strip().lower().rstrip(_TRAILING_PUNCTUATION))
     if not re.search(r"\b(?:change|switch|use)\b", lowered):
         return None
+    provider_aliases = model_provider_aliases(providers)
     provider = next(
         (
-            canonical
-            for spoken, canonical in _MODEL_PROVIDER_ALIASES.items()
+            provider_aliases[spoken]
+            for spoken in sorted(provider_aliases, key=len, reverse=True)
             if re.search(rf"\b{re.escape(spoken)}\b", lowered)
         ),
         None,
