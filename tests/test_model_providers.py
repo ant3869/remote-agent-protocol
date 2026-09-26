@@ -188,7 +188,9 @@ def test_delete_provider_clears_its_catalog_and_test_results(registry):
     registry.upsert_provider(_provider())
     registry.set_catalog("openrouter", ["vendor/model-a"])
     registry.record_provider_test("openrouter", [mp.TestResult(stage="reach", ok=True)])
-    registry.record_model_test("openrouter", "vendor/model-a", [mp.TestResult(stage="chat", ok=True)])
+    registry.record_model_test(
+        "openrouter", "vendor/model-a", [mp.TestResult(stage="chat", ok=True)]
+    )
 
     assert registry.delete_provider("openrouter") is True
 
@@ -233,6 +235,65 @@ def test_loading_a_newer_schema_is_ignored_not_crashed(registry):
     )
     registry.load()  # must not raise
     assert registry.list_providers() == ()
+
+
+def test_env_import_is_available_when_the_registry_is_empty_and_env_is_set(registry):
+    assert mp.env_import_available(registry, base_url="https://x/v1", api_key="") is True
+    assert mp.env_import_available(registry, base_url="", api_key="sk-or-x") is True
+
+
+def test_env_import_is_unavailable_with_nothing_configured(registry):
+    assert mp.env_import_available(registry, base_url="", api_key="") is False
+
+
+def test_env_import_is_unavailable_once_a_provider_exists(registry):
+    registry.upsert_provider(_provider())
+    assert mp.env_import_available(registry, base_url="https://x/v1", api_key="sk-y") is False
+
+
+def test_import_from_env_creates_an_openrouter_provider_and_role_chains(registry):
+    result = mp.import_from_env(
+        registry,
+        base_url=mp.PRESETS["openrouter"].base_url,
+        api_key="sk-or-legacy",
+        brain_model="vendor/brain-model",
+        intent_model="vendor/intent-model",
+    )
+
+    assert result is not None
+    config, key = result
+    assert config.preset == "openrouter"
+    assert key == "sk-or-legacy"
+    assert registry.get_provider(config.id) == config
+    assert [e.model for e in registry.get_role_chain("butler")] == ["vendor/brain-model"]
+    assert [e.model for e in registry.get_role_chain("intent")] == ["vendor/intent-model"]
+    # orchestration wasn't given its own model, so it falls back to the shared brain model,
+    # matching the legacy _cloud_model() behavior this import is standing in for.
+    assert [e.model for e in registry.get_role_chain("orchestration")] == ["vendor/brain-model"]
+
+
+def test_import_from_env_uses_the_custom_preset_for_a_non_openrouter_base_url(registry):
+    result = mp.import_from_env(
+        registry, base_url="https://elsewhere.test/v1", api_key="sk-x", brain_model="m"
+    )
+
+    assert result is not None
+    config, _key = result
+    assert config.preset == "custom"
+
+
+def test_import_from_env_is_a_no_op_once_the_registry_is_non_empty(registry):
+    registry.upsert_provider(_provider())
+
+    result = mp.import_from_env(registry, base_url="https://x/v1", api_key="sk-x", brain_model="m")
+
+    assert result is None
+    assert len(registry.list_providers()) == 1
+
+
+def test_import_from_env_is_a_no_op_without_a_base_url(registry):
+    result = mp.import_from_env(registry, base_url="", api_key="sk-x", brain_model="m")
+    assert result is None
 
 
 @pytest.mark.parametrize(

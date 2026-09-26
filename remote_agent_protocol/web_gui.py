@@ -302,6 +302,7 @@ class WebVoiceApp:
             "provider_refresh_models": self._action_provider_refresh_models,
             "model_test": self._action_model_test,
             "role_assign": self._action_role_assign,
+            "import_env": self._action_import_env,
         }
 
     def run(self) -> None:
@@ -1813,6 +1814,9 @@ class WebVoiceApp:
                 for provider in providers
             },
             "modelTests": model_tests,
+            "envImportAvailable": model_providers.env_import_available(
+                registry, base_url=cfg.CLOUD_LLM_BASE_URL, api_key=cfg.CLOUD_LLM_API_KEY
+            ),
             "roles": {
                 role: [e.to_dict() for e in registry.get_role_chain(role)]
                 for role in model_providers.ROLES
@@ -1834,8 +1838,12 @@ class WebVoiceApp:
     def _catalog_summary(registry: model_providers.ProviderRegistry, provider_id: str) -> dict:
         catalog = registry.get_catalog(provider_id)
         if catalog is None:
-            return {"count": 0, "fetchedAt": 0.0}
-        return {"count": len(catalog.models), "fetchedAt": catalog.fetched_at}
+            return {"count": 0, "fetchedAt": 0.0, "models": []}
+        return {
+            "count": len(catalog.models),
+            "fetchedAt": catalog.fetched_at,
+            "models": list(catalog.models),
+        }
 
     def _action_provider_save(self, payload: dict) -> dict:
         registry = llm_endpoint.get_registry()
@@ -1885,7 +1893,38 @@ class WebVoiceApp:
         self._bump_catalogs()
         return {
             "ok": True,
+            "id": provider_id,
             "message": f"Saved {config.label}.",
+            "providers": self._providers_payload(),
+        }
+
+    def _action_import_env(self, payload: dict) -> dict:
+        registry = llm_endpoint.get_registry()
+        result = model_providers.import_from_env(
+            registry,
+            base_url=cfg.CLOUD_LLM_BASE_URL,
+            api_key=cfg.CLOUD_LLM_API_KEY,
+            brain_model=cfg.CLOUD_LLM_MODEL,
+            intent_model=cfg.CLOUD_INTENT_MODEL,
+            orchestration_model=cfg.CLOUD_ORCHESTRATION_MODEL,
+        )
+        if result is None:
+            return {"ok": False, "error": "Nothing to import, or a provider is already configured."}
+        config, api_key = result
+        if api_key:
+            try:
+                secret_store.set_key(config.id, api_key)
+            except secret_store.SecretBackendUnavailable as exc:
+                return {"ok": False, "error": str(exc)}
+        registry.save()
+        self._bump_catalogs()
+        return {
+            "ok": True,
+            "id": config.id,
+            "message": (
+                f"Imported {config.label} from .env. Once you're happy with it here, you can "
+                f"remove CLOUD_LLM_BASE_URL / CLOUD_LLM_API_KEY / OPENROUTER_API_KEY from .env."
+            ),
             "providers": self._providers_payload(),
         }
 

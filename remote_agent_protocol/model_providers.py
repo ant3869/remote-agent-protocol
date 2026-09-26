@@ -147,6 +147,69 @@ def slug_id(label: str, existing: Iterable[str]) -> str:
     return f"{base}-{suffix}"
 
 
+def env_import_available(registry: ProviderRegistry, *, base_url: str, api_key: str) -> bool:
+    """Whether the one-time ".env import" offer should still be shown.
+
+    Only true for a registry that has never held a provider -- once anything
+    is configured through the UI (imported or not), the legacy env config
+    stays a fallback, and is never offered again.
+    """
+    if registry.list_providers():
+        return False
+    return bool((base_url or "").strip() or (api_key or "").strip())
+
+
+def import_from_env(
+    registry: ProviderRegistry,
+    *,
+    base_url: str,
+    api_key: str,
+    brain_model: str,
+    intent_model: str = "",
+    orchestration_model: str = "",
+) -> tuple[ProviderConfig, str] | None:
+    """Create one provider from the legacy ``CLOUD_*``/``OPENROUTER_API_KEY`` env config.
+
+    Never touches ``.env`` -- the caller is told what to remove once they are
+    happy, and the env values keep working as the fallback in the meantime.
+    A no-op once the registry already holds a provider, so this is only ever
+    offered once (see ``env_import_available``).
+
+    Returns the created provider and the key to store, or None if there was
+    nothing to import. Storing the key is the caller's job: this module
+    never touches ``secret_store``.
+    """
+    base_url = (base_url or "").strip()
+    if registry.list_providers() or not base_url:
+        return None
+    preset_id = "openrouter" if base_url == PRESETS["openrouter"].base_url else "custom"
+    preset = PRESETS[preset_id]
+    now = time.time()
+    provider_id = slug_id(preset.label, existing=())
+    config = ProviderConfig(
+        id=provider_id,
+        preset=preset_id,
+        label=preset.label,
+        base_url=base_url,
+        auth="bearer",
+        created_at=now,
+        updated_at=now,
+    )
+    registry.upsert_provider(config)
+    brain = (brain_model or "").strip()
+    if brain:
+        registry.set_role_chain("butler", [RoleChainEntry(provider_id=provider_id, model=brain)])
+    intent = (intent_model or brain_model or "").strip()
+    if intent:
+        registry.set_role_chain("intent", [RoleChainEntry(provider_id=provider_id, model=intent)])
+    orchestration = (orchestration_model or brain_model or "").strip()
+    if orchestration:
+        registry.set_role_chain(
+            "orchestration", [RoleChainEntry(provider_id=provider_id, model=orchestration)]
+        )
+    return config, (api_key or "").strip()
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     """One OpenAI-compatible endpoint RAP knows about. Never holds a key."""

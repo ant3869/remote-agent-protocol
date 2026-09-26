@@ -228,6 +228,65 @@ def test_role_assign_updates_the_registry(provider_registry):
     assert [e.model for e in provider_registry.get_role_chain("narration")] == ["vendor/small"]
 
 
+def test_import_env_creates_a_provider_from_legacy_cloud_settings(
+    provider_registry, fake_secret_backend, monkeypatch
+):
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", model_providers.PRESETS["openrouter"].base_url)
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "sk-or-legacy")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_MODEL", "vendor/legacy-model")
+    app = WebVoiceApp()
+
+    result = app._action("import_env", {})
+
+    assert result["ok"] is True
+    provider = result["providers"]["providers"][0]
+    assert provider["preset"] == "openrouter"
+    assert secret_store.get_key(provider["id"]) == "sk-or-legacy"
+    assert [e.model for e in provider_registry.get_role_chain("butler")] == ["vendor/legacy-model"]
+
+
+def test_import_env_is_a_no_op_without_legacy_settings(provider_registry, monkeypatch):
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "")
+    app = WebVoiceApp()
+
+    result = app._action("import_env", {})
+
+    assert result["ok"] is False
+
+
+def test_env_import_available_flag_reflects_registry_state(provider_registry, monkeypatch):
+    monkeypatch.setattr(cfg, "CLOUD_LLM_BASE_URL", "https://example.test/v1")
+    monkeypatch.setattr(cfg, "CLOUD_LLM_API_KEY", "sk-x")
+    app = WebVoiceApp()
+
+    assert app._providers_payload()["envImportAvailable"] is True
+
+    _save_openrouter(app)
+
+    assert app._providers_payload()["envImportAvailable"] is False
+
+
+def test_import_env_action_exists_in_the_ui(monkeypatch):
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+
+    assert 'post("import_env")' in script
+    assert 'id="providerEnvImportBanner"' in html
+    assert 'id="providerEnvImportBtn"' in html
+
+
+def test_providers_payload_includes_the_cached_model_list(provider_registry):
+    app = WebVoiceApp()
+    _save_openrouter(app)
+    provider_registry.set_catalog("openrouter", ["vendor/a", "vendor/b"])
+
+    payload = app._providers_payload()
+
+    assert payload["catalogs"]["openrouter"]["models"] == ["vendor/a", "vendor/b"]
+    assert payload["catalogs"]["openrouter"]["count"] == 2
+
+
 def test_providers_payload_never_includes_a_key(provider_registry, fake_secret_backend):
     app = WebVoiceApp()
     _save_openrouter(app, api_key="sk-should-never-appear")
@@ -305,6 +364,56 @@ def test_web_shell_uses_operational_graphite_design_tokens():
     assert "--accent-agent: #a78bfa" in css
     assert "--accent-action: #60a5fa" in css
     assert "--accent-delegate: #fb923c" in css
+
+
+def test_settings_nav_has_a_models_and_providers_section_between_general_and_voice():
+    html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+
+    nav_start = html.index('class="settings-context-nav"')
+    nav = html[nav_start : html.index("</nav>", nav_start)]
+    assert 'data-settings-section="providers"' in nav
+    assert nav.index('data-settings-section="general"') < nav.index(
+        'data-settings-section="providers"'
+    )
+    assert nav.index('data-settings-section="providers"') < nav.index(
+        'data-settings-section="voice"'
+    )
+
+    assert 'data-settings-panel="providers"' in html
+    assert 'id="providersList"' in html
+    assert 'id="providerForm"' in html
+    assert 'id="providerPresetSelect"' in html
+    assert 'id="providerLabelInput"' in html
+    assert 'id="providerBaseUrlInput"' in html
+    assert 'id="providerApiKeyInput"' in html
+    assert 'id="modelBrowserProviderSelect"' in html
+    assert 'id="modelBrowserSearch"' in html
+    assert 'id="modelBrowserList"' in html
+    assert 'id="roleAssignmentList"' in html
+
+
+def test_role_assignment_covers_all_four_roles():
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+
+    assert 'const PROVIDER_ROLES = ["butler", "intent", "orchestration", "narration"];' in script
+
+
+def test_command_palette_has_the_provider_entries():
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+
+    assert '"Open models & providers"' in script
+    assert '"Test providers"' in script
+
+
+def test_provider_actions_use_the_existing_post_helper():
+    script = (WEB_APP / "app.js").read_text(encoding="utf-8")
+
+    assert 'post("provider_save"' in script
+    assert 'post("provider_delete"' in script
+    assert 'post("provider_test"' in script
+    assert 'post("provider_refresh_models"' in script
+    assert 'post("model_test"' in script
+    assert 'post("role_assign"' in script
 
 
 def test_status_and_persona_copy_distinguish_cloud_chat_from_delegation_routing():

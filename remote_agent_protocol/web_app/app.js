@@ -26,6 +26,8 @@ const state = {
   paletteIndex: 0,
   paletteOpener: null,
   setupStep: 0,
+  providers: null,
+  providerModelBrowserQuery: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -175,6 +177,10 @@ async function post(action, payload = {}) {
     state.status = mergeCatalogs(data.status);
     await refreshCatalogsIfStale();
     renderStatus();
+  }
+  if (data.providers) {
+    state.providers = data.providers;
+    renderProviders();
   }
   return data;
 }
@@ -355,6 +361,276 @@ async function refreshCatalogsIfStale() {
   state.status = { ...state.catalogs, ...state.status };
 }
 
+// -- Phase C0: model providers and role assignment --------------------------
+
+const PROVIDER_ROLES = ["butler", "intent", "orchestration", "narration"];
+const PROVIDER_ROLE_LABELS = { butler: "Butler", intent: "Intent", orchestration: "Orchestration", narration: "Narration" };
+
+async function refreshProviders() {
+  try {
+    const response = await fetch("/api/providers");
+    if (!response.ok) return;
+    state.providers = await response.json();
+    renderProviders();
+  } catch (_error) {
+    // Best-effort: the rest of settings still works without this.
+  }
+}
+
+function providerById(providerId) {
+  return (state.providers?.providers || []).find((provider) => provider.id === providerId) || null;
+}
+
+function lastTestBadge(results) {
+  if (!results || !results.length) return { dot: "status-warning", text: "not tested" };
+  const last = results[results.length - 1];
+  return { dot: last.ok ? "status-success" : "status-error", text: `${last.stage}: ${last.ok ? "ok" : (last.detail || "failed")}` };
+}
+
+function renderProviders() {
+  const data = state.providers;
+  if (!data) return;
+  $("providerEnvImportBanner").hidden = !data.envImportAvailable;
+  renderProviderPresetOptions(data.presets || {});
+  renderProvidersList(data);
+  renderModelBrowser(data);
+  renderRoleAssignment(data);
+}
+
+function renderProviderPresetOptions(presets) {
+  const select = $("providerPresetSelect");
+  if (!select) return;
+  const previous = select.value;
+  select.replaceChildren(...Object.values(presets).map((preset) => {
+    const option = document.createElement("option");
+    option.value = preset.id;
+    option.textContent = preset.verified === false ? `${preset.label} (unverified)` : preset.label;
+    return option;
+  }));
+  if (previous && presets[previous]) select.value = previous;
+}
+
+function renderProvidersList(data) {
+  const container = $("providersList");
+  if (!container) return;
+  const providers = data.providers || [];
+  if (!providers.length) {
+    container.innerHTML = '<p class="muted">No providers yet. Add one below.</p>';
+    return;
+  }
+  container.replaceChildren(...providers.map((provider) => {
+    const catalog = (data.catalogs || {})[provider.id] || { count: 0 };
+    const badge = lastTestBadge((data.providerTests || {})[provider.id]);
+    const card = document.createElement("article");
+    card.className = "provider-card";
+    card.innerHTML = `
+      <header><strong>${escapeHtml(provider.label)}</strong><span class="muted">${escapeHtml(provider.preset)}</span></header>
+      <p class="provider-base-url muted">${escapeHtml(provider.base_url)}</p>
+      <p class="provider-meta"><span class="presence-dot ${badge.dot}"></span> ${escapeHtml(badge.text)} · ${catalog.count} model(s) · key ${provider.hasKey ? escapeHtml(provider.keyMasked) : "none"}${provider.enabled ? "" : " · disabled"}</p>
+      <div class="provider-card-actions">
+        <button class="button quiet" type="button" data-provider-action="test" data-provider-id="${provider.id}">Test</button>
+        <button class="button quiet" type="button" data-provider-action="refresh" data-provider-id="${provider.id}">Refresh models</button>
+        <button class="button quiet" type="button" data-provider-action="edit" data-provider-id="${provider.id}">Edit</button>
+        <button class="button destructive" type="button" data-provider-action="delete" data-provider-id="${provider.id}">Delete</button>
+      </div>`;
+    return card;
+  }));
+}
+
+function beginEditProvider(providerId) {
+  const provider = providerById(providerId);
+  if (!provider) return;
+  const form = $("providerForm");
+  form.dataset.editingId = providerId;
+  $("providerPresetSelect").value = provider.preset;
+  $("providerLabelInput").value = provider.label;
+  $("providerBaseUrlInput").value = provider.base_url;
+  $("providerApiKeyInput").value = "";
+  $("providerEnabledCheckbox").checked = provider.enabled;
+  $("providerCancelEditBtn").hidden = false;
+  $("providerSaveBtn").textContent = "Save changes";
+}
+
+function cancelEditProvider() {
+  const form = $("providerForm");
+  form.dataset.editingId = "";
+  form.reset();
+  $("providerCancelEditBtn").hidden = true;
+  $("providerSaveBtn").textContent = "Save & test";
+}
+
+async function submitProviderForm(event) {
+  event.preventDefault();
+  const form = $("providerForm");
+  const editingId = form.dataset.editingId || "";
+  const payload = {
+    id: editingId,
+    preset: $("providerPresetSelect").value,
+    label: $("providerLabelInput").value.trim(),
+    base_url: $("providerBaseUrlInput").value.trim(),
+    api_key: $("providerApiKeyInput").value,
+    enabled: $("providerEnabledCheckbox").checked,
+  };
+  const notice = $("providersNotice");
+  try {
+    const result = await post("provider_save", payload);
+    notice.hidden = false;
+    if (!result.ok) {
+      notice.className = "persona-notice status-error";
+      notice.textContent = result.error || "Could not save this provider.";
+      return;
+    }
+    notice.className = "persona-notice";
+    notice.textContent = result.message || "Saved.";
+    cancelEditProvider();
+    if (!editingId && result.id) await post("provider_test", { id: result.id });
+  } catch (error) {
+    notice.hidden = false;
+    notice.className = "persona-notice status-error";
+    notice.textContent = error.message;
+  }
+}
+
+async function handleProviderCardAction(event) {
+  const button = event.target.closest("[data-provider-action]");
+  if (!button) return;
+  const providerId = button.dataset.providerId;
+  const action = button.dataset.providerAction;
+  if (action === "edit") return beginEditProvider(providerId);
+  if (action === "delete") {
+    const provider = providerById(providerId);
+    if (!confirm(`Delete ${provider ? provider.label : providerId}? This also removes its stored key.`)) return;
+    const result = await post("provider_delete", { id: providerId });
+    if (!result.ok) alert(result.error || "Could not delete this provider.");
+    return;
+  }
+  if (action === "test") return post("provider_test", { id: providerId });
+  if (action === "refresh") return post("provider_refresh_models", { id: providerId });
+}
+
+function renderModelBrowser(data) {
+  const select = $("modelBrowserProviderSelect");
+  if (!select) return;
+  const providers = data.providers || [];
+  const previous = select.value;
+  select.replaceChildren(...providers.map((provider) => {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = provider.label;
+    return option;
+  }));
+  if (previous && providers.some((provider) => provider.id === previous)) select.value = previous;
+  renderModelBrowserList(data);
+}
+
+function renderModelBrowserList(data) {
+  const container = $("modelBrowserList");
+  if (!container) return;
+  const providerId = $("modelBrowserProviderSelect")?.value;
+  const catalog = (data.catalogs || {})[providerId];
+  const rows = catalog?.models || [];
+  const query = state.providerModelBrowserQuery.toLowerCase();
+  const filtered = rows.filter((model) => model.toLowerCase().includes(query));
+  if (!providerId) {
+    container.innerHTML = '<p class="muted">Add a provider to browse its models.</p>';
+    return;
+  }
+  if (!catalog || !catalog.count) {
+    container.innerHTML = '<p class="muted">No cached models. Use Refresh models on the provider card, or enter a model ID manually below.</p>';
+  } else if (!filtered.length) {
+    container.innerHTML = '<p class="muted">No models match that search.</p>';
+  } else {
+    container.replaceChildren(...filtered.slice(0, 200).map((model) => {
+      const tests = (data.modelTests || {})[providerId]?.[model];
+      const badge = lastTestBadge(tests);
+      const row = document.createElement("div");
+      row.className = "model-browser-row";
+      row.innerHTML = `<span class="model-id">${escapeHtml(model)}</span><span class="presence-dot ${badge.dot}"></span><span class="muted">${escapeHtml(badge.text)}</span><button class="button quiet" type="button" data-model-test-provider="${providerId}" data-model-test-model="${escapeHtml(model)}">Test</button>`;
+      return row;
+    }));
+  }
+  const manual = document.createElement("div");
+  manual.className = "model-browser-manual";
+  manual.innerHTML = '<input type="text" placeholder="Enter a model ID manually" aria-label="Manual model ID" id="modelBrowserManualInput" /><button class="button quiet" type="button" id="modelBrowserManualTestBtn">Test</button>';
+  container.append(manual);
+}
+
+function renderRoleAssignment(data) {
+  const container = $("roleAssignmentList");
+  if (!container) return;
+  container.replaceChildren(...PROVIDER_ROLES.map((role) => {
+    const chain = (data.roles || {})[role] || [];
+    const row = document.createElement("div");
+    row.className = "role-assignment-row";
+    const chips = chain.map((entry, index) => `<span class="role-chain-chip">${escapeHtml(providerById(entry.provider_id)?.label || entry.provider_id)}: ${escapeHtml(entry.model)}<button type="button" class="icon-button" data-role="${role}" data-remove-index="${index}" aria-label="Remove">&times;</button></span>`).join("");
+    row.innerHTML = `<strong>${PROVIDER_ROLE_LABELS[role]}</strong><div class="role-chain-chips">${chips || '<span class="muted">Unassigned -- falls back to the local model.</span>'}</div>
+      <div class="role-chain-add"><select data-role-add-provider="${role}"></select><input type="text" placeholder="model id" data-role-add-model="${role}" /><button class="button quiet" type="button" data-role-add-btn="${role}">Add</button></div>`;
+    const providerSelect = row.querySelector(`[data-role-add-provider="${role}"]`);
+    providerSelect.replaceChildren(...(data.providers || []).filter((p) => p.enabled).map((provider) => {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.label;
+      return option;
+    }));
+    return row;
+  }));
+}
+
+async function addRoleChainEntry(role) {
+  const container = $("roleAssignmentList");
+  const providerSelect = container.querySelector(`[data-role-add-provider="${role}"]`);
+  const modelInput = container.querySelector(`[data-role-add-model="${role}"]`);
+  const model = modelInput.value.trim();
+  if (!providerSelect.value || !model) return;
+  const existing = ((state.providers?.roles || {})[role] || []).map((entry) => ({ provider_id: entry.provider_id, model: entry.model }));
+  existing.push({ provider_id: providerSelect.value, model });
+  const result = await post("role_assign", { role, chain: existing });
+  if (!result.ok) alert(result.error || "Could not update this role.");
+}
+
+async function removeRoleChainEntry(role, index) {
+  const existing = ((state.providers?.roles || {})[role] || []).map((entry) => ({ provider_id: entry.provider_id, model: entry.model }));
+  existing.splice(index, 1);
+  const result = await post("role_assign", { role, chain: existing });
+  if (!result.ok) alert(result.error || "Could not update this role.");
+}
+
+function bindProviderSettings() {
+  $("providerForm")?.addEventListener("submit", submitProviderForm);
+  $("providerCancelEditBtn")?.addEventListener("click", cancelEditProvider);
+  $("providersList")?.addEventListener("click", handleProviderCardAction);
+  $("providerEnvImportBtn")?.addEventListener("click", async () => {
+    const result = await post("import_env");
+    const notice = $("providersNotice");
+    notice.hidden = false;
+    notice.className = result.ok ? "persona-notice" : "persona-notice status-error";
+    notice.textContent = result.ok ? result.message : (result.error || "Could not import from .env.");
+  });
+  $("modelBrowserProviderSelect")?.addEventListener("change", () => renderModelBrowserList(state.providers || {}));
+  $("modelBrowserSearch")?.addEventListener("input", (event) => {
+    state.providerModelBrowserQuery = event.target.value;
+    renderModelBrowserList(state.providers || {});
+  });
+  $("modelBrowserList")?.addEventListener("click", (event) => {
+    const testButton = event.target.closest("[data-model-test-provider]");
+    if (testButton) {
+      post("model_test", { provider_id: testButton.dataset.modelTestProvider, model: testButton.dataset.modelTestModel });
+      return;
+    }
+    if (event.target.id === "modelBrowserManualTestBtn") {
+      const providerId = $("modelBrowserProviderSelect").value;
+      const model = $("modelBrowserManualInput").value.trim();
+      if (providerId && model) post("model_test", { provider_id: providerId, model });
+    }
+  });
+  $("roleAssignmentList")?.addEventListener("click", (event) => {
+    const addButton = event.target.closest("[data-role-add-btn]");
+    if (addButton) return addRoleChainEntry(addButton.dataset.roleAddBtn);
+    const removeButton = event.target.closest("[data-remove-index]");
+    if (removeButton) return removeRoleChainEntry(removeButton.dataset.role, Number(removeButton.dataset.removeIndex));
+  });
+}
+
 async function poll() {
   try {
     const response = await fetch(`/api/events?after=${state.latest}`);
@@ -442,6 +718,8 @@ function handleEvent(event) {
     }
     if (event.phase === "wake_word_detected") playWakeChime();
     renderWakeStatus();
+  } else if (["provider_test_result", "model_test_result", "model_assignment"].includes(event.type)) {
+    refreshProviders();
   }
   syncAvatarRuntime();
 }
@@ -1776,6 +2054,8 @@ function commandPaletteItems() {
     { id: "action:export-diagnostics", group: "Actions", label: "Export diagnostics", hint: "", action: () => post("export_diagnostics") },
     { id: "action:start-ollama", group: "Actions", label: "Start Ollama", hint: "", action: () => post("start_ollama") },
     { id: "action:free-vram", group: "Actions", label: "Free VRAM", hint: "", action: () => post("free_vram") },
+    { id: "action:open-providers", group: "Actions", label: "Open models & providers", hint: "", action: () => { navigateTo("settings"); document.querySelector('[data-settings-section="providers"]')?.click(); } },
+    { id: "action:test-providers", group: "Actions", label: "Test providers", hint: "", action: () => { navigateTo("settings"); document.querySelector('[data-settings-section="providers"]')?.click(); (state.providers?.providers || []).forEach((provider) => post("provider_test", { id: provider.id })); } },
   );
 
   (state.status?.personas || []).forEach((persona) => {
@@ -2240,10 +2520,12 @@ function bind() {
     if (event.ctrlKey && event.key.toLowerCase() === "l") $("messageInput").focus();
     if (event.ctrlKey && event.key.toLowerCase() === "m") inputControls.run("mute", { muted: !state.status?.muted });
   });
+  bindProviderSettings();
 }
 
 bind();
 poll();
+refreshProviders();
 refreshConversationChannels();
 refreshConversationHistory();
 setInterval(renderWakeStatus, 250);

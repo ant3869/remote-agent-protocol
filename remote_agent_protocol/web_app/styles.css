@@ -1011,6 +1011,30 @@ textarea { resize: vertical; line-height: 1.5; }
 .settings-actions .destructive { grid-column: 1 / -1; }
 .compact-actions { padding-top: 0; }
 
+.providers-list { display: grid; gap: 10px; padding: 14px; }
+.provider-card { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-field); padding: 10px 12px; display: grid; gap: 6px; }
+.provider-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.provider-base-url { font-family: var(--mono); font-size: 11px; word-break: break-all; }
+.provider-meta { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.provider-card-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.provider-enabled-field { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.provider-form { border-top: 1px solid var(--border-subtle); }
+.provider-model-browser { padding: 14px; border-top: 1px solid var(--border-subtle); display: grid; gap: 8px; }
+.provider-model-browser label { display: grid; gap: 4px; font-size: 12px; }
+.model-browser-list { display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
+.model-browser-row { display: grid; grid-template-columns: 1fr auto auto auto; align-items: center; gap: 8px; font-size: 12px; padding: 6px 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); }
+.model-browser-row .model-id { font-family: var(--mono); word-break: break-all; }
+.model-browser-manual { display: flex; gap: 6px; margin-top: 4px; }
+.model-browser-manual input { flex: 1; }
+.role-assignment { padding: 14px; border-top: 1px solid var(--border-subtle); }
+.role-assignment-list { display: grid; gap: 10px; }
+.role-assignment-row { border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 10px; display: grid; gap: 6px; }
+.role-chain-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.role-chain-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 8px; border-radius: 999px; background: var(--surface-panel); border: 1px solid var(--border-subtle); }
+.role-chain-chip .icon-button { width: 16px; height: 16px; }
+.role-chain-add { display: flex; gap: 6px; flex-wrap: wrap; }
+.role-chain-add input { flex: 1; min-width: 90px; }
+
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: var(--surface-field); }
 ::-webkit-scrollbar-thumb { background: #303036; border: 2px solid var(--surface-field); border-radius: 8px; }
