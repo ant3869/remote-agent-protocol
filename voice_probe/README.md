@@ -124,6 +124,30 @@ silently degrade turns to chat — the report flags those as `latency`.
 > Always confirm the winning classifier stays resident with `ollama ps` while
 > the app is running — the benchmark pass rate is necessary but not sufficient.
 
+## Butler replay eval (`butler_eval.py`)
+
+`butler` replays the roadmap's acceptance corpus -- Ant's own utterances, 1-18
+in `docs/notes/grok-style-orchestration-roadmap.md` -- against a real
+`BrainSession` in tool-calling Butler mode. Each case runs in a seeded world:
+five mock agents with recorded health (Code Puppy out of quota, OpenClaw failing
+auth), earlier tasks, and the conversation so far. Agents never run; dispatches
+are recorded. Grading checks which tools were called, whether and where work
+was sent and with what instructions, and whether the reply stayed within what
+the tools returned.
+
+```bash
+# The ideal model: proves the tools and harness can satisfy every case.
+.venv\Scripts\python -m voice_probe butler
+
+# The configured Butler model (Models & providers, or CLOUD_*): the real gate.
+.venv\Scripts\python -m voice_probe butler --mode live --repeats 3 --fail-under 90
+```
+
+Cases marked `known_gap` describe roadmap behavior RAP does not have yet (today:
+#12 and #15, which the destructive-verb confirmation rule doesn't hold). They
+are reported and never fail a run. Reports go to `data/voice_probe/butler-*.jsonl`
+and `.md`.
+
 ## The test corpus (`corpus.py`)
 
 ~130 prompts, easy → brutal, across every category the system must handle.

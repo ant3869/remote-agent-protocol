@@ -3,6 +3,7 @@ r"""CLI: run the probe, report on a run, or list the corpus.
     .venv\\Scripts\\python -m voice_probe run [--classifier stub|live|off] [options]
     .venv\\Scripts\\python -m voice_probe report [RUN.jsonl]
     .venv\\Scripts\\python -m voice_probe list [--category X] [--difficulty Y]
+    .venv\\Scripts\\python -m voice_probe butler [--mode scripted|live] [--repeats N]
 
 ``run`` executes the corpus and writes a JSONL run file plus Markdown + HTML
 reports next to it under ``data/voice_probe/`` (unless ``--out`` is given), then
@@ -207,6 +208,42 @@ def _print_scoreboard(summary: dict) -> None:
             print(f"    {kind}: {count}")
 
 
+def _cmd_butler(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from remote_agent_protocol import config as cfg
+    from voice_probe import butler_eval
+
+    problems = butler_eval.validate_cases()
+    if problems:
+        print("Butler corpus is malformed:", *problems, sep="\n  ", file=sys.stderr)
+        return 2
+    cases = tuple(c for c in butler_eval.CASES if not args.case or c.id in args.case)
+    if not cases:
+        print("No Butler cases matched --case.", file=sys.stderr)
+        return 2
+    print(f"Replaying {len(cases)} Butler case(s) x{args.repeats} against the {args.mode} model...")
+    try:
+        results = asyncio.run(butler_eval.run_all(cases, mode=args.mode, repeats=args.repeats))
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    summary = butler_eval.summarize(results)
+    for result in results:
+        mark = {"pass": "ok  ", "fail": "FAIL", "gap": "gap "}[result.verdict]
+        print(f"  {mark} {result.roadmap_ref:4} {result.id:26} {'; '.join(result.problems)[:110]}")
+    print(
+        f"\nScore {summary['score']:.0f}% ({summary['passed']}/{summary['counted']} counted), "
+        f"{summary['gaps']} known gap(s)."
+    )
+    out_dir = Path(args.out) if args.out else cfg.DATA_DIR / "voice_probe"
+    jsonl, markdown = butler_eval.write_report(results, args.mode, out_dir)
+    print(f"Run:    {jsonl}\nReport: {markdown}")
+    if args.fail_under is not None:
+        return 0 if summary["score"] >= args.fail_under else 1
+    return 0 if summary["failed"] == 0 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse argv and dispatch to the selected subcommand."""
     parser = argparse.ArgumentParser(prog="voice_probe", description=__doc__)
@@ -278,6 +315,27 @@ def main(argv: list[str] | None = None) -> int:
     list_p = sub.add_parser("list", help="list the corpus without running")
     _add_selectors(list_p)
     list_p.set_defaults(func=_cmd_list)
+
+    butler_p = sub.add_parser(
+        "butler", help="replay the roadmap acceptance corpus against the tool-calling Butler"
+    )
+    butler_p.add_argument(
+        "--mode",
+        choices=["scripted", "live"],
+        default="scripted",
+        help="scripted: the ideal model (checks tools/harness); live: the configured Butler model",
+    )
+    butler_p.add_argument("--repeats", type=int, default=1, help="run each case N times")
+    butler_p.add_argument("--case", action="append", default=[], help="only this case id")
+    butler_p.add_argument("--out", default="", help="report directory (default data/voice_probe)")
+    butler_p.add_argument(
+        "--fail-under",
+        type=float,
+        default=None,
+        metavar="PCT",
+        help="exit non-zero below this score instead of on any failure",
+    )
+    butler_p.set_defaults(func=_cmd_butler)
 
     args = parser.parse_args(argv)
     return args.func(args)

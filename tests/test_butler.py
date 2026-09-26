@@ -537,3 +537,22 @@ async def test_an_unknown_announcement_keeps_the_narration_path(butler_session):
 
     assert session._butler_active("[[announce]] [id=job-404:done] [Agent job update]") is False
     assert session._butler_active("hello") is True
+
+
+@pytest.mark.asyncio
+async def test_redirect_stops_the_attempt_and_relaunches_with_the_correction():
+    bridge = FakeBridge()
+    dispatcher = FakeDispatcher(bridge)
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), dispatcher)
+    await box.call(
+        "start_task",
+        {"agent": "hermes", "instructions": "Search email subjects", "subject": "mail"},
+    )
+
+    result = await box.call("redirect_task", {"instruction": "Search the body, since August."})
+
+    assert bridge.cancelled == ["job-1"]
+    assert result["status"] == "started" and result["task"] == "t1"
+    agent, instructions = dispatcher.calls[-1]
+    assert agent == "hermes"
+    assert instructions.endswith("Correction from the user: Search the body, since August.")

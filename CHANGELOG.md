@@ -21,6 +21,10 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   Finished agent jobs reach the Butler as tool results, not as fake user
   turns, with only read-only tools available, so an update is narrated from
   its data and can't start work by itself.
+- `python -m voice_probe butler`: a replay eval of the roadmap's acceptance
+  corpus against the tool-calling Butler, in a seeded world of mock agents,
+  with a scripted ideal model or the configured live model. The Butler gains
+  `redirect_task` for corrections to a task already under way.
 - `AGENT_DEFAULT_MODEL_TARGETS_JSON` config: pin a backend to a known-good
   `AGENT_MODEL_TARGETS` entry at startup, so a harness whose own default model
   is broken doesn't need a spoken override every session.
@@ -74,7 +78,8 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   to the local model. The role editor shows which provider and model last
   answered each role, and chain entries can be reordered.
 - A job that hit a quota error looked failed while its process was still
-  being stopped, so a cancel in that window was ignored.
+  being stopped or its heartbeat was being cleaned up, so a cancel in that
+  window was ignored and a model failover could be seen as a failure.
 - A cancel that landed while a job's process was being spawned was
   overwritten, so the job was killed and recorded as failed instead of
   cancelled; a status line printed after a cancel could revive it the same

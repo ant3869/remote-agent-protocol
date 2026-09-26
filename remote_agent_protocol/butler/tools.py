@@ -103,6 +103,18 @@ TOOL_SCHEMAS: list[dict] = [
         ["agent"],
     ),
     _fn(
+        "redirect_task",
+        "Correct or narrow a task the user already asked for ('no, the body of the email', "
+        "'only since August'). Stops the attempt if it is still running and relaunches the "
+        "same task with the correction, on the same agent unless another is named.",
+        {
+            "task": _TASK_REF,
+            "instruction": {"type": "string", "description": "The user's correction, verbatim."},
+            "agent": {**_AGENT, "description": "Optional: move it to this agent."},
+        },
+        ["instruction"],
+    ),
+    _fn(
         "task_status",
         "Current state of one task: agent, status, last action, and a result preview.",
         {"task": _TASK_REF},
@@ -266,6 +278,34 @@ class ButlerToolbox:
         if found is None:
             return _error("There is no earlier task to retry; use start_task for new work.")
         return await self._launch(found, name)
+
+    async def _tool_redirect_task(
+        self, instruction: str, task: str | None = None, agent: str | None = None
+    ) -> dict:
+        found = self._ledger.resolve(task)
+        if found is None:
+            return _error("There is no earlier task to correct; use start_task for new work.")
+        if not instruction.strip():
+            return _error("The correction is empty; ask the user what should change.")
+        target = self._agent_name(agent) if agent else None
+        if agent and target is None:
+            return self._unknown_agent(agent)
+        if found.held_token:
+            self._drop_confirmation(found.held_token)
+            target = target or found.held_agent
+            self._ledger.release(found.held_token)
+        latest = found.latest
+        if latest is not None:
+            job = self._bridge.get(latest.job_id)
+            if job is not None and job.status in _OPEN_STATES:
+                await self._bridge.cancel(job.job_id)
+            target = target or latest.agent
+        if target is None:
+            return _error("That task never had an agent; use start_task with the correction.")
+        found.instructions = (
+            f"{found.instructions}\n\nCorrection from the user: {instruction.strip()}"
+        )
+        return await self._launch(found, target)
 
     async def _launch(self, task: ButlerTask, agent: str) -> dict:
         refusal = self._admit(agent, task.instructions)

@@ -84,12 +84,23 @@ read-only tools (`READ_ONLY_TOOLS`); a call to anything else returns an error re
 update can't start or retry work. Nothing from the announcement is persisted as user speech.
 An announcement with no recorded event keeps the old narration path.
 
+## Replay eval (C5)
+
+`python -m voice_probe butler` plays each roadmap acceptance utterance into a real
+`BrainSession` in a seeded world of mock agents and grades the tools called, the
+dispatches, and the reply (`voice_probe/butler_eval.py`). The `scripted` mode plays the
+ideal model to prove the tools can satisfy every case. The `live` mode runs the
+configured Butler model, and it is the gate for turning `BUTLER_TOOLS_ENABLED` on by
+default: at least 90% over three repeats, with no failures on #1, #3, #5, #8, or #13.
+`redirect_task` was added for #6. Cases #12 and #15 are known gaps: the destructive-verb
+confirmation rule doesn't hold "write a secret to a file" or "clean up downloads", and
+changing that rule is the user's call.
+
 ## Out of scope for this slice (next slices)
 
 - Blocked and question events. These need `answer_agent` on the bound session.
 - `redirect_task` / `answer_agent` on bound sessions.
 - `remember` / `recall`.
-- C5 replay eval over the acceptance corpus. It gates turning the flag on by default.
 
 ## Acceptance (this slice)
 

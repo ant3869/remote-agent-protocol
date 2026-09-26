@@ -371,6 +371,7 @@ class AgentJob:
     _model_args: tuple[str, ...] | None = field(default=None, repr=False)
     _models_tried: list[str] = field(default_factory=list, repr=False)
     _failover_to: str | None = field(default=None, repr=False)
+    _quota_stopped: bool = field(default=False, repr=False)
 
 
 def clean_session_template(template: list[str]) -> list[str]:
@@ -1415,6 +1416,7 @@ class AgentBridge:
         )
         logger.warning(f"Agent job {job.job_id} [{job.agent}]: {note[1:-1]}")
         job.lines = [note]
+        job._quota_stopped = False
         job.status = STATUS_RUNNING
         job.state = STATE_STARTED
         job.action = f"Retrying on {job.model_label}"
@@ -2125,12 +2127,10 @@ class AgentBridge:
                 job.summary = "Current model/provider usage or quota is exhausted"
                 await self._terminate(proc)
                 job.returncode = await proc.wait()
-                # Only now: while the process was being stopped the job was
-                # still active, so a cancel in that window must win and not
-                # be mistaken for an already-finished job.
-                if job.status != STATUS_CANCELLED:
-                    job.status = STATUS_FAILED
-                    job.state = STATE_FAILED
+                # The job stays active until _stream settles it: a cancel in
+                # the meantime must win, and nothing may see a failure that a
+                # model failover is about to replace.
+                job._quota_stopped = True
                 return
             inferred = infer_status(line)
             if inferred is not None:
@@ -2169,7 +2169,7 @@ class AgentBridge:
         self._trim_finished_jobs()
         if job.status in {STATUS_CANCELLED, STATUS_DONE, STATUS_FAILED}:
             pass  # cancel() already claimed the status
-        elif timed_out:
+        elif timed_out or job._quota_stopped:
             job.status = STATUS_FAILED
             job.state = STATE_FAILED
         else:

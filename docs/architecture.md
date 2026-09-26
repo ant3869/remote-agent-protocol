@@ -414,7 +414,7 @@ tail of the process's actual output in `failure_detail`.
 With `BUTLER_TOOLS_ENABLED=true`, a brain-mode turn goes to `butler.ButlerLoop`
 instead of the router tiers: one model on the Butler role chain holds the
 conversation and acts through `butler.ButlerToolbox` (`list_agents`,
-`check_agents`, `start_task`, `retry_task`, `task_status`, `list_tasks`,
+`check_agents`, `start_task`, `retry_task`, `redirect_task`, `task_status`, `list_tasks`,
 `cancel_task`, `get_result`, `set_agent_model`), streaming its reply by
 sentence. Every tool result carries a `summary` the model is told to speak
 from. Dispatch always passes orchestrator admission and the destructive-task
