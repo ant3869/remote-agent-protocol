@@ -2106,11 +2106,15 @@ class AgentBridge:
             del job.lines[:-_MAX_KEPT_LINES]
             self._emit_job(job, "output", line=line)
             if failure_kind == "quota":
-                job.status = STATUS_FAILED
-                job.state = STATE_FAILED
                 job.summary = "Current model/provider usage or quota is exhausted"
                 await self._terminate(proc)
                 job.returncode = await proc.wait()
+                # Only now: while the process was being stopped the job was
+                # still active, so a cancel in that window must win and not
+                # be mistaken for an already-finished job.
+                if job.status != STATUS_CANCELLED:
+                    job.status = STATUS_FAILED
+                    job.state = STATE_FAILED
                 return
             inferred = infer_status(line)
             if inferred is not None:

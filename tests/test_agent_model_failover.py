@@ -52,7 +52,9 @@ def _run_job(chain: list[str] | None, *, default: str | None = None, runs: int =
         jobs = []
         for _ in range(runs):
             job_id = await bridge.start("worker", "do the thing")
-            for _ in range(400):
+            # Generous: each attempt starts a Python interpreter, which is slow
+            # when the whole suite runs in parallel with it.
+            for _ in range(3000):
                 job = bridge.get(job_id)
                 if job.status not in {agent_bridge.STATUS_RUNNING, agent_bridge.STATUS_WAITING}:
                     break
@@ -162,7 +164,7 @@ def test_internal_jobs_never_fail_over():
             model_chains={"worker": ["broke", "good"]},
         )
         job_id = await bridge.start("worker", "probe", internal=True)
-        for _ in range(400):
+        for _ in range(3000):
             if bridge.get(job_id).status != agent_bridge.STATUS_RUNNING:
                 break
             await asyncio.sleep(0.02)
@@ -171,3 +173,40 @@ def test_internal_jobs_never_fail_over():
     job = asyncio.run(scenario())
     assert job.status == agent_bridge.STATUS_FAILED
     assert job.model_failovers == []
+
+
+def test_a_job_never_looks_finished_between_attempts():
+    # The quota branch stops the process before the failover; while it waits
+    # for the exit the job must stay active, or a cancel in that window is
+    # dropped and anything polling status sees a failure that isn't final.
+    # Ignoring SIGTERM (POSIX) holds the process through the bridge's kill
+    # grace, which is the window being tested.
+    stalling = (
+        "import signal, sys, time; model = sys._xoptions.get('model'); "
+        "hasattr(signal, 'SIGTERM') and signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "print('Error: insufficient_quota' if model == 'broke' else 'ok', flush=True); "
+        "time.sleep(30 if model == 'broke' else 0)"
+    )
+    seen: list[str] = []
+
+    async def scenario():
+        bridge = agent_bridge.AgentBridge(
+            {"worker": ["{python}", "-u", "-c", stalling, "{task}"]},
+            lambda _event: None,
+            kill_grace_secs=0.5,
+            model_targets=_TARGETS,
+            model_chains={"worker": ["broke", "good"]},
+        )
+        job_id = await bridge.start("worker", "do the thing")
+        for _ in range(6000):
+            job = bridge.get(job_id)
+            seen.append(job.status)
+            if job.status == agent_bridge.STATUS_DONE:
+                break
+            await asyncio.sleep(0.005)
+        return bridge.get(job_id)
+
+    job = asyncio.run(scenario())
+    assert job.status == agent_bridge.STATUS_DONE
+    assert job.model_failovers == ["Model broke: quota"]
+    assert agent_bridge.STATUS_FAILED not in seen

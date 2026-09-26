@@ -710,7 +710,10 @@ class BrainSession:
         """
         self._control_turn = True
         rows, missing = await agent_status.collect_rollcall_rows(
-            self._control_plane, agent, excluded=frozenset(excluded or ())
+            self._control_plane,
+            agent,
+            excluded=frozenset(excluded or ()),
+            fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
         )
         if missing is not None:
             self._direct_reply = f"I could not check another agent: {missing}."

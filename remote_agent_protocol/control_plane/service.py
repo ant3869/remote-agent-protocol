@@ -457,6 +457,9 @@ class AgentControlPlane:
         previous = await self.registry.get(agent_id)
         previous_observation = previous.observation if previous else None
         failure_kind = str(event.get("failure_kind") or "")
+        response_state, response_observed_at, response_secs, response_model = (
+            _job_response_evidence(event, status, failure_kind, now, previous_observation)
+        )
         health = (
             Health.DEGRADED
             if failure_kind in _DEGRADED_FAILURE_KINDS
@@ -498,16 +501,14 @@ class AgentControlPlane:
             observed_at=now,
             expires_at=now + timedelta(seconds=self._freshness_secs),
             current_work=work,
-            issues=(str(event.get("failure_detail") or ""),) if failure_kind else (),
-            response_state=previous_observation.response_state
-            if previous_observation
-            else ResponseState.UNKNOWN,
-            response_observed_at=previous_observation.response_observed_at
-            if previous_observation
-            else None,
+            issues=(failure_kind,) if failure_kind else (),
+            response_state=response_state,
+            response_observed_at=response_observed_at,
             update_state=previous_observation.update_state
             if previous_observation
             else UpdateState.UNKNOWN,
+            response_secs=response_secs,
+            response_model=response_model,
         )
         await self.registry.observe(observation)
         self._emit(JOB_PROGRESS_CHANGED, agent_id, job_id=job_id, data={"activity": activity.value})
@@ -545,6 +546,8 @@ class AgentControlPlane:
                 agent_id,
                 ResponseState.RESPONDED,
                 "RAP received the exact fixed response from this harness.",
+                response_secs=_as_secs(event.get("elapsed_secs")),
+                response_model=_event_model(event),
             )
             self._complete_response_check(job_id, ResponseState.RESPONDED)
             return
@@ -578,6 +581,8 @@ class AgentControlPlane:
         *,
         current_work: ObservedWork | None = None,
         failure_kind: str = "",
+        response_secs: float | None = None,
+        response_model: str = "",
     ) -> None:
         """Persist a bounded self-check fact while retaining discovery evidence."""
         now = datetime.now(UTC)
@@ -607,6 +612,12 @@ class AgentControlPlane:
             issues=(*base.issues, failure_kind) if failure_kind else base.issues,
             response_state=response_state,
             response_observed_at=now,
+            response_secs=response_secs
+            if response_state is ResponseState.RESPONDED
+            else base.response_secs,
+            response_model=response_model
+            if response_state is ResponseState.RESPONDED
+            else base.response_model,
         )
         await self.registry.observe(observation)
         self._emit(
@@ -615,6 +626,52 @@ class AgentControlPlane:
 
 
 _DEGRADED_FAILURE_KINDS = frozenset({"quota", "rate_limit", "capacity", "auth", "authentication"})
+# A real job that fails for one of these says the harness's model can't
+# answer right now -- the same thing a failed self-check would say.
+_RESPONSE_FAILURE_KINDS = _DEGRADED_FAILURE_KINDS | {"model_not_found"}
+
+
+def _job_response_evidence(
+    event: dict[str, Any],
+    status: str,
+    failure_kind: str,
+    now: datetime,
+    previous: AgentObservation | None,
+) -> tuple[ResponseState, datetime | None, float | None, str]:
+    """What a finished RAP job proves about whether the harness answers.
+
+    A job that completed is stronger evidence than any self-check; one that
+    failed on quota, auth, or model errors is a failed response. Anything
+    else (still running, cancelled, a task-level failure) leaves the last
+    response evidence as it was.
+    """
+    if status == "done":
+        return (
+            ResponseState.RESPONDED,
+            now,
+            _as_secs(event.get("elapsed_secs")),
+            _event_model(event),
+        )
+    if status == "failed" and failure_kind in _RESPONSE_FAILURE_KINDS:
+        return ResponseState.FAILED, now, None, ""
+    if previous is None:
+        return ResponseState.UNKNOWN, None, None, ""
+    return (
+        previous.response_state,
+        previous.response_observed_at,
+        previous.response_secs,
+        previous.response_model,
+    )
+
+
+def _event_model(event: dict[str, Any]) -> str:
+    return str(event.get("answered_model") or event.get("model_label") or "")
+
+
+def _as_secs(raw: Any) -> float | None:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 0:
+        return None
+    return round(float(raw), 1)
 
 
 def _response_failure_reason(failure_kind: str) -> str:

@@ -400,6 +400,17 @@ harness's own output where it prints one -- empty otherwise, never guessed).
 A non-zero exit with no classified failure reason keeps a bounded, redacted
 tail of the process's actual output in `failure_detail`.
 
+### Agent health evidence
+
+A roll call ("check all the agents") answers from control-plane evidence,
+never from the agents themselves. An agent is **Up** when it returned RAP's
+fixed self-check reply or finished a real RAP job, with the latency and model
+when known; **Down** when a self-check or a real job failed on quota, auth,
+capacity, rate limits, or an unknown model; and reported as working when a
+RAP job is running on it. Busy agents and responses confirmed within
+`AGENT_HEALTH_FRESH_SECS` (default 120) are not pinged again, so the answer
+comes back in seconds; failures are always re-checked.
+
 ### Remote agent hosts
 
 Another machine offers its own agents over one authenticated protocol

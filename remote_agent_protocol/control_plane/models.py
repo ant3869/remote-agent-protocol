@@ -198,6 +198,10 @@ class AgentObservation:
     response_state: ResponseState = ResponseState.UNKNOWN
     response_observed_at: datetime | None = None
     update_state: UpdateState = UpdateState.UNKNOWN
+    # How long the last confirmed response took and which model gave it,
+    # when known (a self-check or a real RAP job that finished).
+    response_secs: float | None = None
+    response_model: str = ""
 
     def __post_init__(self) -> None:
         if not self.agent_id.strip():
@@ -240,6 +244,8 @@ class AgentObservation:
             if self.response_observed_at
             else None,
             "update_state": self.update_state.value,
+            "response_secs": self.response_secs,
+            "response_model": self.response_model,
         }
 
     @classmethod
@@ -267,6 +273,11 @@ class AgentObservation:
             ),
             response_observed_at=_parse_datetime(raw.get("response_observed_at")),
             update_state=UpdateState(str(raw.get("update_state", UpdateState.UNKNOWN.value))),
+            response_secs=float(raw["response_secs"])
+            if isinstance(raw.get("response_secs"), (int, float))
+            and not isinstance(raw.get("response_secs"), bool)
+            else None,
+            response_model=str(raw.get("response_model") or ""),
         )
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
 
 from remote_agent_protocol.control_plane.models import (
     AgentSnapshot,
@@ -30,11 +31,12 @@ DIAGNOSTIC_LIMITATION = (
 )
 
 _RESPONSE_FAILURE_LABELS = {
-    "quota": "Rate limit",
+    "quota": "Out of quota",
     "rate_limit": "Rate limit",
     "capacity": "Capacity",
     "auth": "Authentication",
     "authentication": "Authentication",
+    "model_not_found": "Model not found",
     "response_timeout": "No response",
     "unexpected_response": "Unexpected response",
 }
@@ -52,13 +54,18 @@ def control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str:
         return f"{agent_id} could not be verified ({result.code})"
     observation = result.observation
     freshness = "stale" if result.is_stale() else "current"
+    busy = _busy_with(observation)
     if observation.response_state is ResponseState.RESPONDED:
-        return f"{observation.display_name}: Up (responded; {freshness})"
+        return (
+            f"{observation.display_name}: Up ({_response_detail(observation)}; {freshness}){busy}"
+        )
     if observation.response_state is ResponseState.FAILED:
         return (
             f"{observation.display_name}: Down ({_response_failure_label(observation.issues)}; "
-            f"{freshness})"
+            f"{freshness}){busy}"
         )
+    if busy:
+        return f"{observation.display_name}: Up{busy}"
     if observation.response_state is ResponseState.PENDING:
         return f"{observation.display_name}: Checking for a response now"
     work = f", {observation.current_work.summary}" if observation.current_work else ""
@@ -75,6 +82,47 @@ def control_summary(agent_id: str, result: AgentSnapshot | ControlError) -> str:
         f"{observation.display_name} on {observation.machine}: {observation.presence.value}, "
         f"{observation.activity.value}, {observation.health.value} ({freshness}{work}); "
         f"{response}{issues}"
+    )
+
+
+def _response_detail(observation) -> str:
+    """Describe a confirmed response, e.g. "responded in 4.2s via OpenAI GPT-5.5"."""
+    detail = "responded"
+    if observation.response_secs is not None:
+        detail += f" in {observation.response_secs:g}s"
+    if observation.response_model:
+        detail += f" via {observation.response_model}"
+    return detail
+
+
+def _busy_with(observation) -> str:
+    """A ", working on a RAP task: <summary>" suffix while a real (non-self-check) job runs."""
+    work = observation.current_work
+    if work is None or work.summary.startswith("RAP self-check"):
+        return ""
+    return f", working on a RAP task: {work.summary}" if work.summary else ", working on a RAP task"
+
+
+def _needs_response_check(
+    result: AgentSnapshot | ControlError, *, fresh_for_secs: float, now: datetime
+) -> bool:
+    """Whether a new self-check would tell the user anything the record doesn't.
+
+    A busy agent is already proving it runs (and would refuse a concurrent
+    check), and a response confirmed moments ago -- by a check or a finished
+    job -- still holds. Failures are always re-checked so a fix shows up
+    immediately.
+    """
+    if not isinstance(result, AgentSnapshot):
+        return True
+    observation = result.observation
+    if _busy_with(observation):
+        return False
+    observed_at = observation.response_observed_at
+    return not (
+        observation.response_state is ResponseState.RESPONDED
+        and observed_at is not None
+        and now - observed_at <= timedelta(seconds=fresh_for_secs)
     )
 
 
@@ -112,12 +160,24 @@ async def _append_response_check_rows(
     selected: Mapping[str, AgentSnapshot | ControlError],
     control_plane,
     request_response_check: Callable[[str], Awaitable[object]] | None,
+    *,
+    fresh_for_secs: float = 0.0,
 ) -> dict[str, AgentSnapshot | ControlError]:
-    """Run bounded fixed-response checks and return their evidence snapshots."""
+    """Run bounded fixed-response checks and return their evidence snapshots.
+
+    Agents that are working on a RAP task, or answered within ``fresh_for_secs``,
+    are reported from that evidence instead of being pinged again.
+    """
     checker = request_response_check or control_plane.request_response_check
-    checks = await asyncio.gather(*(checker(backend) for backend in selected))
+    now = datetime.now(UTC)
+    to_check = [
+        backend
+        for backend, result in selected.items()
+        if _needs_response_check(result, fresh_for_secs=fresh_for_secs, now=now)
+    ]
+    checks = await asyncio.gather(*(checker(backend) for backend in to_check))
     resolved = dict(selected)
-    for backend, check in zip(selected, checks, strict=True):
+    for backend, check in zip(to_check, checks, strict=True):
         if isinstance(check, JobHandle):
             outcome = await control_plane.wait_for_response_check(check.job_id)
             # A non-live test/double handle has no waiter. Preserve the
@@ -146,12 +206,15 @@ async def collect_rollcall_rows(
     *,
     excluded: frozenset[str] = frozenset(),
     request_response_check: Callable[[str], Awaitable[object]] | None = None,
+    fresh_for_secs: float = 0.0,
 ) -> tuple[list[str], str | None]:
     """Return ``(rows, missing_message)``; ``rows`` is empty exactly when nothing matched.
 
-    Always starts a real fixed-response self-check for every matched backend
-    -- "status" is the phrase people actually use for this, and installation
-    discovery alone answers neither readiness nor account health.
+    Starts a real fixed-response self-check for every matched backend unless
+    it is working on a RAP task or confirmed a response within
+    ``fresh_for_secs`` -- "status" is the phrase people actually use for
+    this, and installation discovery alone answers neither readiness nor
+    account health.
     """
     # A named question must not refresh, display, or launch checks for every
     # configured harness.  ``list_agents`` is only appropriate when the user
@@ -171,7 +234,11 @@ async def collect_rollcall_rows(
         return [], missing
     check_rows: list[str] = []
     selected = await _append_response_check_rows(
-        check_rows, selected, control_plane, request_response_check
+        check_rows,
+        selected,
+        control_plane,
+        request_response_check,
+        fresh_for_secs=fresh_for_secs,
     )
     rows = [control_summary(backend, snapshot) for backend, snapshot in selected.items()]
     rows.extend(check_rows)

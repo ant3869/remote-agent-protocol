@@ -462,3 +462,134 @@ def test_unverified_discovery_never_formats_as_healthy() -> None:
 
     assert "no verified response" in summary
     assert "healthy" not in summary
+
+
+def _job_event(status: str, **extra) -> dict:
+    return {
+        "type": "agent_job",
+        "event": "finished" if status in {"done", "failed"} else "started",
+        "job_id": "real-job",
+        "agent": "hermes",
+        "status": status,
+        "task": "Search the email",
+        "action": "Searching the email",
+        **extra,
+    }
+
+
+def _plane_with(adapter_id: str = "hermes") -> tuple[AgentControlPlane, FakeAgentAdapter]:
+    adapter = FakeAgentAdapter(
+        adapter_id,
+        probe=make_observation(adapter_id),
+        discover=make_observation(adapter_id),
+        dispatch=JobHandle("self-check", adapter_id),
+    )
+    return AgentControlPlane({adapter_id: adapter}), adapter
+
+
+@pytest.mark.asyncio
+async def test_a_finished_real_job_confirms_the_harness_responds() -> None:
+    plane, _ = _plane_with()
+    await plane.ingest_bridge_event(
+        _job_event("done", elapsed_secs=3.46, model_label="OpenAI GPT-5.5", result="Found 2.")
+    )
+
+    snapshot = await plane.get_agent_status("hermes")
+
+    assert snapshot.observation.response_state is ResponseState.RESPONDED
+    assert agent_status_reporting.control_summary("hermes", snapshot) == (
+        "hermes: Up (responded in 3.5s via OpenAI GPT-5.5; current)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_quota_failure_on_a_real_job_marks_the_harness_down() -> None:
+    plane, _ = _plane_with()
+    await plane.ingest_bridge_event(_job_event("done", elapsed_secs=2.0))
+    await plane.ingest_bridge_event(
+        _job_event("failed", failure_kind="quota", failure_detail="insufficient_quota")
+    )
+
+    snapshot = await plane.get_agent_status("hermes")
+
+    assert agent_status_reporting.control_summary("hermes", snapshot) == (
+        "hermes: Down (Out of quota; current)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_task_level_failure_leaves_response_evidence_alone() -> None:
+    plane, _ = _plane_with()
+    await plane.ingest_bridge_event(_job_event("done", elapsed_secs=2.0))
+    await plane.ingest_bridge_event(_job_event("failed", failure_kind="interactive_prompt"))
+
+    snapshot = await plane.get_agent_status("hermes")
+
+    assert snapshot.observation.response_state is ResponseState.RESPONDED
+
+
+@pytest.mark.asyncio
+async def test_a_roll_call_reports_a_busy_agent_as_up_without_pinging_it() -> None:
+    plane, adapter = _plane_with()
+    await plane.ingest_bridge_event(_job_event("running"))
+
+    rows, missing = await agent_status_reporting.collect_rollcall_rows(
+        plane, None, fresh_for_secs=120
+    )
+
+    assert missing is None
+    assert adapter.tasks == []
+    assert rows == ["hermes: Up, working on a RAP task: Searching the email"]
+
+
+@pytest.mark.asyncio
+async def test_a_recent_confirmed_response_is_reused_by_the_roll_call() -> None:
+    plane, adapter = _plane_with()
+    await plane.ingest_bridge_event(_job_event("done", elapsed_secs=1.0, model_label="M"))
+
+    rows, _ = await agent_status_reporting.collect_rollcall_rows(plane, None, fresh_for_secs=120)
+
+    assert adapter.tasks == []
+    assert rows == ["hermes: Up (responded in 1s via M; current)"]
+
+
+@pytest.mark.asyncio
+async def test_an_old_or_failed_response_is_checked_again() -> None:
+    plane, adapter = _plane_with()
+    await plane.ingest_bridge_event(_job_event("failed", failure_kind="auth"))
+
+    rows_task = asyncio.create_task(
+        agent_status_reporting.collect_rollcall_rows(plane, None, fresh_for_secs=120)
+    )
+    while not adapter.tasks:
+        await asyncio.sleep(0)
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "self-check",
+            "agent": "hermes",
+            "status": "done",
+            "result": SELF_CHECK_SENTINEL,
+            "elapsed_secs": 4.2,
+        }
+    )
+    rows, _ = await rows_task
+
+    assert rows == ["hermes: Up (responded in 4.2s; current)"]
+
+
+def test_response_timing_survives_a_registry_round_trip() -> None:
+    observation = replace(
+        make_observation("codex"),
+        response_state=ResponseState.RESPONDED,
+        response_secs=2.5,
+        response_model="GPT",
+    )
+
+    restored = AgentObservation.from_dict(observation.to_dict())
+
+    assert (restored.response_secs, restored.response_model) == (2.5, "GPT")
+    legacy = observation.to_dict()
+    del legacy["response_secs"], legacy["response_model"]
+    assert AgentObservation.from_dict(legacy).response_secs is None

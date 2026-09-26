@@ -1589,7 +1589,9 @@ class VoiceSession:
         the roll call is answered here and never delegated.
         """
         self._agent_ack_turn = True
-        rows, missing = await agent_status.collect_rollcall_rows(self._control_plane, agent)
+        rows, missing = await agent_status.collect_rollcall_rows(
+            self._control_plane, agent, fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS
+        )
         return agent_status.format_rollcall(rows, missing)
 
     async def _handle_agent_diagnostic(self, agent: str | None, actual_response: bool) -> str:

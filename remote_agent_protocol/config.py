@@ -801,6 +801,10 @@ AGENT_COMPLETION_GRACE_SECS = float(_env("AGENT_COMPLETION_GRACE_SECS", "2"))
 # restart. Set AGENT_HISTORY_FILE="" to disable persistence entirely.
 AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_history.json"))
 
+# A roll call ("check all the agents") reuses a confirmed response -- from a
+# self-check or a finished job -- this recent instead of pinging again, so the
+# answer comes back in seconds. Failures are always re-checked. 0 disables.
+AGENT_HEALTH_FRESH_SECS = float(_env("AGENT_HEALTH_FRESH_SECS", "120"))
 # The control plane's last-known health/activity snapshot per agent.
 AGENT_REGISTRY_FILE = _env("AGENT_REGISTRY_FILE", str(DATA_DIR / "agent_registry.json"))
 

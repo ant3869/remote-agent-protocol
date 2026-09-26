@@ -39,6 +39,11 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   the agent's next configured model before it is reported as failed, and the
   model that worked is kept for later jobs. `AGENT_MODEL_TARGETS_JSON` adds
   model targets for any provider a harness supports.
+- Agent health reflects real work: a finished RAP job counts as a confirmed
+  response (with its latency and model), a job that fails on quota, auth, or
+  an unknown model marks the agent down, and an agent busy on a RAP task is
+  reported as working instead of "self-check not started". Roll calls reuse a
+  response confirmed in the last `AGENT_HEALTH_FRESH_SECS` seconds.
 - Brain mode now handles spoken model switches ("switch Hermes to
   OpenRouter") locally, for every configured provider, and says exactly what
   changed.
@@ -48,6 +53,8 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - The test suite no longer reads or writes real application data: provider
   keys, the agent registry, job history, UI and s2s state, and the
   single-instance endpoint file are sandboxed per test run.
+- A job that hit a quota error looked failed while its process was still
+  being stopped, so a cancel in that window was ignored.
 - The "Import from .env" banner in Models & providers could never appear, and
   the manual model-ID field was wiped by every re-render.
 
