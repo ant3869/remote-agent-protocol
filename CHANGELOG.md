@@ -12,6 +12,12 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Tool-calling Butler for brain mode (`BUTLER_TOOLS_ENABLED`, off by default):
+  one function-calling model on the Butler role decides every turn through
+  tools -- list/check agents, start/retry/cancel tasks, task status and
+  results, model switches -- and speaks only from what they return. Retries on
+  another agent stay one task, confirmation and admission are enforced inside
+  the tools, and a model outage falls back to the router path for that turn.
 - `AGENT_DEFAULT_MODEL_TARGETS_JSON` config: pin a backend to a known-good
   `AGENT_MODEL_TARGETS` entry at startup, so a harness whose own default model
   is broken doesn't need a spoken override every session.
