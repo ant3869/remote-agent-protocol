@@ -74,8 +74,19 @@ class ButlerLoop:
         self._timeout_secs = timeout_secs
         self._on_tool = on_tool
 
-    async def run(self, messages: list[dict]) -> AsyncIterator[str]:
-        """Yield the reply's text for ``messages`` (system first), running tools as asked."""
+    async def run(
+        self, messages: list[dict], allowed_tools: frozenset[str] | None = None
+    ) -> AsyncIterator[str]:
+        """Yield the reply's text for ``messages`` (system first), running tools as asked.
+
+        ``allowed_tools`` narrows what the model is offered and may run; a call
+        to anything else comes back as an error result instead of executing.
+        """
+        schemas = [
+            schema
+            for schema in TOOL_SCHEMAS
+            if allowed_tools is None or schema["function"]["name"] in allowed_tools
+        ]
         endpoints = self._endpoints()
         if not endpoints:
             raise ButlerUnavailable("no model endpoint is configured for the Butler")
@@ -89,7 +100,9 @@ class ButlerLoop:
             final_round = round_number == self._max_rounds - 1
             current = _Round()
             try:
-                async for delta in self._stream_round(endpoint, conversation, current, final_round):
+                async for delta in self._stream_round(
+                    endpoint, conversation, current, final_round, schemas
+                ):
                     spoke = True
                     yield delta
             except Exception as exc:  # noqa: BLE001 - provider failures vary widely
@@ -135,7 +148,13 @@ class ButlerLoop:
                 }
             )
             for call in calls:
-                result = await self._toolbox.call(call["name"], call["arguments"] or "{}")
+                if allowed_tools is not None and call["name"] not in allowed_tools:
+                    result = {
+                        "error": f"{call['name']} is not available right now.",
+                        "summary": f"{call['name']} is not available right now.",
+                    }
+                else:
+                    result = await self._toolbox.call(call["name"], call["arguments"] or "{}")
                 results.append(result)
                 if self._on_tool is not None:
                     try:
@@ -158,6 +177,7 @@ class ButlerLoop:
         conversation: list[dict],
         current: _Round,
         final_round: bool,
+        schemas: list[dict],
     ) -> AsyncIterator[str]:
         http = self._http()
         if http is None:
@@ -169,8 +189,8 @@ class ButlerLoop:
             "temperature": 0.3,
             "max_tokens": self._max_tokens,
         }
-        if not final_round:
-            payload["tools"] = TOOL_SCHEMAS
+        if not final_round and schemas:
+            payload["tools"] = schemas
             payload["tool_choice"] = "auto"
         timeout = aiohttp.ClientTimeout(total=self._timeout_secs)
         async with http.post(

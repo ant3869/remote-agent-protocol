@@ -18,6 +18,9 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   results, model switches -- and speaks only from what they return. Retries on
   another agent stay one task, confirmation and admission are enforced inside
   the tools, and a model outage falls back to the router path for that turn.
+  Finished agent jobs reach the Butler as tool results, not as fake user
+  turns, with only read-only tools available, so an update is narrated from
+  its data and can't start work by itself.
 - `AGENT_DEFAULT_MODEL_TARGETS_JSON` config: pin a backend to a known-good
   `AGENT_MODEL_TARGETS` entry at startup, so a harness whose own default model
   is broken doesn't need a spoken override every session.

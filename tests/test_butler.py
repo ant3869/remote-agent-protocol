@@ -471,3 +471,69 @@ async def test_brain_answers_plain_chat_without_tools(butler_session):
     assert json.dumps(session._messages[-1]) == json.dumps(
         {"role": "assistant", "content": "How about Sunny?"}
     )
+
+
+# -- agent events (C3) ----------------------------------------------------------------
+
+
+async def _finish_job(session, job_id="job-e1", agent="hermes", status="done", **fields):
+    job = agent_bridge.AgentJob(
+        job_id=job_id, agent=agent, task="Search email for school news", status=status, **fields
+    )
+    job._t0 = 0.0
+    job.secs = 12.0
+    await session._announce_agent_job(job)
+    return job
+
+
+@pytest.mark.asyncio
+async def test_a_finished_job_reaches_the_butler_as_a_tool_result(butler_session):
+    session, dispatched = butler_session
+    await _finish_job(session, result="Two events: a bake sale Oct 3 and picture day Oct 9.")
+    seen: dict = {}
+
+    def model_brain(messages, tools_offered):
+        seen["tail"] = messages[-2:]
+        seen["roles"] = [m["role"] for m in messages]
+        return Say("Hermes found two school events: the bake sale and picture day.")
+
+    model = FakeModel(model_brain)
+    reply = await _turn(session, model, "[[announce]] [id=job-e1:done] [Agent job update: ...]")
+
+    assert reply == "Hermes found two school events: the bake sale and picture day."
+    call, result = seen["tail"]
+    assert (
+        call["role"] == "assistant" and call["tool_calls"][0]["function"]["name"] == "task_status"
+    )
+    event = json.loads(result["content"])
+    assert event["event"] == "agent_finished" and "bake sale" in event["result"]
+    assert "[[announce]]" not in json.dumps(seen["roles"])
+    offered = {tool["function"]["name"] for tool in model.requests[0]["tools"]}
+    assert "start_task" not in offered and "task_status" in offered
+    assert not any("[[announce]]" in str(m.get("content")) for m in session._messages)
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_an_event_turn_cannot_start_work(butler_session):
+    session, dispatched = butler_session
+    await _finish_job(session, job_id="job-e2", status="failed", failure_detail="quota")
+
+    def model_brain(messages, tools_offered):
+        results = tool_results(messages)
+        if len(results) == 1:
+            return Call(("start_task", {"agent": "codex", "instructions": "x", "subject": "x"}))
+        return Say(results[-1]["summary"])
+
+    reply = await _turn(session, FakeModel(model_brain), "[[announce]] [id=job-e2:failed] [..]")
+
+    assert dispatched == []
+    assert reply == "start_task is not available right now."
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_announcement_keeps_the_narration_path(butler_session):
+    session, _ = butler_session
+
+    assert session._butler_active("[[announce]] [id=job-404:done] [Agent job update]") is False
+    assert session._butler_active("hello") is True

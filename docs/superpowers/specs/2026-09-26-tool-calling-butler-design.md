@@ -74,10 +74,19 @@ A short live roster (agent names) and the current time are appended.
 - `BUTLER_TOOLS_ENABLED` (default `false`): turns the loop on in brain mode.
 - `BUTLER_MAX_TOOL_ROUNDS` (default `5`).
 
+## Agent events (C3)
+
+When a job finishes, `BrainSession._announce_agent_job` records a `task_status`-shaped event
+(`ButlerToolbox.job_event`), keyed `<job_id>:<status>` like the `[[announce]]` id that
+`brain_adapter` publishes. When that announcement turn arrives, the Butler receives it as a
+synthetic `task_status` call and result, never as a user message. The model is offered only
+read-only tools (`READ_ONLY_TOOLS`); a call to anything else returns an error result, so an
+update can't start or retry work. Nothing from the announcement is persisted as user speech.
+An announcement with no recorded event keeps the old narration path.
+
 ## Out of scope for this slice (next slices)
 
-- Agent completion, question, and blocked events injected as tool-result-style events (C3).
-  Until then they keep arriving as `[[announce]]` turns, which the loop narrates.
+- Blocked and question events. These need `answer_agent` on the bound session.
 - `redirect_task` / `answer_agent` on bound sessions.
 - `remember` / `recall`.
 - C5 replay eval over the acceptance corpus. It gates turning the flag on by default.

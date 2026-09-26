@@ -424,9 +424,10 @@ id, so "have Codex do it" retries the same task. Only the local time query and
 a yes/no to a held task bypass the model. Tool traffic is never persisted: history keeps the
 user's words and the final reply. If no endpoint can start the turn, it runs
 on the router path instead; if the model fails after a tool ran, the turn ends
-with the tools' own summaries rather than repeating side effects. Job
-completions still arrive as `[[announce]]` turns on the existing narration
-path. Design: `docs/superpowers/specs/2026-09-26-tool-calling-butler-design.md`.
+with the tools' own summaries rather than repeating side effects. A finished
+job reaches the Butler as the result of a synthetic `task_status` call, with
+only read-only tools offered, so an update is narrated from its data and can
+never start work by itself. Design: `docs/superpowers/specs/2026-09-26-tool-calling-butler-design.md`.
 
 ### Agent health evidence
 

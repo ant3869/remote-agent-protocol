@@ -21,6 +21,9 @@ from remote_agent_protocol import agent_bridge
 from remote_agent_protocol import agent_status_reporting as agent_status
 from remote_agent_protocol.butler.ledger import ButlerTask, TaskLedger
 
+READ_ONLY_TOOLS = frozenset(
+    {"list_agents", "check_agents", "task_status", "list_tasks", "get_result"}
+)
 _RESULT_PREVIEW_CHARS = 400
 _RESULT_FULL_CHARS = 4000
 
@@ -433,6 +436,20 @@ class ButlerToolbox:
                 "summary": f"{name} has no {provider} model configured; nothing changed.",
             }
         return {"status": "switched", "summary": f"{name} will use {label} from its next task."}
+
+    def job_event(self, job: agent_bridge.AgentJob) -> dict:
+        """What a finished job means for its Butler task, shaped like a task_status result."""
+        task = self._ledger.by_job(job.job_id)
+        if task is not None:
+            state = self._task_state(task)
+        else:
+            state = _job_status(job, job.job_id, _subject_from_job(job))
+        state["event"] = "agent_finished"
+        if job.status == agent_bridge.STATUS_DONE and job.result:
+            state["result"] = job.result[:_RESULT_FULL_CHARS]
+        if job.failure_detail and job.status != agent_bridge.STATUS_DONE:
+            state["failure_detail"] = job.failure_detail[:600]
+        return state
 
     def _loose_job(self, reference: str | None) -> agent_bridge.AgentJob | None:
         """A bridge job that no Butler task owns (started from the GUI or the router)."""

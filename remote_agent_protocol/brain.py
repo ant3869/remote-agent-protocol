@@ -39,6 +39,7 @@ from remote_agent_protocol import (
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import personas as persona_catalog
 from remote_agent_protocol.butler import (
+    READ_ONLY_TOOLS,
     ButlerLoop,
     ButlerToolbox,
     ButlerUnavailable,
@@ -227,6 +228,10 @@ class BrainSession:
         # never races that task's own append (task-8 review round 1, #5).
         self._hub_job_event_tasks: dict[str, asyncio.Task] = {}
         self._butler_ledger = TaskLedger()
+        # "<job_id>:<status>" -> the finished job's task_status-shaped event.
+        # Keyed like the [[announce]] id brain_adapter publishes, so the
+        # announcement turn can reach the Butler as a tool result.
+        self._agent_events: dict[str, dict] = {}
         self._butler = ButlerLoop(
             toolbox=ButlerToolbox(
                 bridge=self._bridge,
@@ -1212,8 +1217,17 @@ class BrainSession:
     # -- tool-calling Butler ---------------------------------------------------
 
     def _butler_active(self, text: str) -> bool:
-        """Whether this turn goes to the tool-calling Butler instead of the router."""
-        return cfg.BUTLER_TOOLS_ENABLED and not text.startswith(ANNOUNCE_PREFIX)
+        """Whether this turn goes to the tool-calling Butler instead of the router.
+
+        An agent-job announcement qualifies only when its structured event is
+        known; anything else keeps the narration path it already had.
+        """
+        if not cfg.BUTLER_TOOLS_ENABLED:
+            return False
+        if not text.startswith(ANNOUNCE_PREFIX):
+            return True
+        ident = _announce_id(text)
+        return ident is not None and ident in self._agent_events
 
     async def _butler_turn(
         self, text: str, llm_content: str | None, utterance: dict
@@ -1224,8 +1238,11 @@ class BrainSession:
         take the turn, so the caller can use the router path instead. Only the
         user's words and the final reply are kept in history.
         """
-        direct = self._butler_pregate(text)
-        if direct is None:
+        announcement = text.startswith(ANNOUNCE_PREFIX)
+        direct = None if announcement else self._butler_pregate(text)
+        if announcement:
+            stream = self._butler.run(self._butler_event_messages(text), READ_ONLY_TOOLS)
+        elif direct is None:
             messages = [
                 {"role": "system", "content": self._butler_system_instruction()},
                 *self._butler_history(),
@@ -1241,8 +1258,9 @@ class BrainSession:
         async for delta in stream:
             if not started:
                 started = True
-                self._emit({"type": "transcript", "role": "user", "text": text})
-                self._last_user_text = text
+                if not announcement:
+                    self._emit({"type": "transcript", "role": "user", "text": text})
+                    self._last_user_text = text
             if utterance["session_id"] != self._conversation.session_id:
                 return
             full += delta
@@ -1258,8 +1276,45 @@ class BrainSession:
             utterance.update(text=spoken, final=False, revision=utterance["revision"] + 1)
             self._emit(dict(utterance))
             yield SpeechText(pending, utterance)
-        self._messages.append({"role": "user", "content": text})
+        if not announcement:
+            self._messages.append({"role": "user", "content": text})
         self._finish_turn(full.strip(), utterance)
+
+    def _butler_event_messages(self, text: str) -> list[dict]:
+        """An agent event as the result of a task_status call the Butler never made.
+
+        The model hears the outcome the way it hears any tool result -- never
+        as something the user said -- and decides how to tell the user.
+        """
+        ident = _announce_id(text) or ""
+        event = self._agent_events.pop(ident, {})
+        call_id = f"event-{ident.replace(':', '-')}"
+        return [
+            {
+                "role": "system",
+                "content": self._butler_system_instruction()
+                + " An agent just reported back. Tell the user in one or two sentences"
+                " which request it answers and what came of it, with any concrete finding,"
+                " file path, or failure cause from the result. Do not start or retry work"
+                " from this update.",
+            },
+            *self._butler_history(),
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "task_status",
+                            "arguments": json.dumps({"task": event.get("task", "")}),
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": call_id, "content": json.dumps(event)},
+        ]
 
     def _butler_pregate(self, text: str) -> str | None:
         """Replies that must not depend on a model: the time, and a held task's yes/no."""
@@ -1598,6 +1653,9 @@ class BrainSession:
                     "content": f"[Agent result from {job.agent}: {job.result}]",
                 }
             )
+        self._agent_events[f"{job.job_id}:{job.status}"] = self._butler._toolbox.job_event(job)  # noqa: SLF001
+        while len(self._agent_events) > 120:
+            self._agent_events.pop(next(iter(self._agent_events)))
         self._emit(
             {
                 "type": "agent_job_summary",
@@ -1793,6 +1851,11 @@ _MARKER_START = "[["
 # Greedy, so it matches through the LAST sentence terminator followed by space:
 # a flush should release everything that is safely speakable, not one sentence.
 _SENTENCE_END_RE = re.compile(r".*[.!?…][\"')\]]*(?=\s)", re.DOTALL)
+
+
+def _announce_id(text: str) -> str | None:
+    match = re.match(r"\[\[announce\]\]\s*\[id=([\w:-]+)\]", text)
+    return match[1] if match else None
 
 
 async def _single(text: str) -> AsyncIterator[str]:

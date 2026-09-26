@@ -6,9 +6,15 @@ remembers what the user asked for across attempts on different agents.
 
 from remote_agent_protocol.butler.ledger import Attempt, ButlerTask, TaskLedger
 from remote_agent_protocol.butler.loop import ButlerLoop, ButlerUnavailable
-from remote_agent_protocol.butler.tools import TOOL_SCHEMAS, ButlerToolbox, DispatchOutcome
+from remote_agent_protocol.butler.tools import (
+    READ_ONLY_TOOLS,
+    TOOL_SCHEMAS,
+    ButlerToolbox,
+    DispatchOutcome,
+)
 
 __all__ = [
+    "READ_ONLY_TOOLS",
     "TOOL_SCHEMAS",
     "Attempt",
     "ButlerLoop",
