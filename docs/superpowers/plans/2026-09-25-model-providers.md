@@ -28,7 +28,8 @@ Deviation from spec is limited to the two corrected base URLs above; `model_prov
 
 ## Deviations from spec (tracked as we go — appended per task if code disagrees with the spec's "current state")
 
-- (none yet)
+- **Task 4 fixture path.** The plan named `tests/fixtures/fake_openai_server.py`; it lives at `tests/fake_openai_server.py` instead, matching this repo's actual convention for a shared test-only helper module (`tests/aic_mocks.py` is flat, not under a `fixtures/` subfolder, and `tests/` has no `fixtures/` package today).
+- **Task 3 registry test-isolation.** Beyond the plan's explicit tests, added `cfg.MODEL_PROVIDERS_PATH` (mirroring the existing `CONVERSATION_STORE_PATH` pattern) plus a `tests/conftest.py` redirect, so `llm_endpoint.get_registry()`'s process-wide singleton never touches real `data/model_providers.json` during a test run — the same problem `CONVERSATION_STORE_PATH` already exists to solve for the conversation store.
 
 ## Tasks
 
