@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from loguru import logger
+
 from remote_agent_protocol import config as cfg
 
 # The three callers. Each resolves its own model name but shares one endpoint.
@@ -54,6 +56,50 @@ class Endpoint:
     def label(self) -> str:
         """Short description for logs: which model, running where."""
         return f"{'cloud' if self.cloud else 'local'} {self.model}"
+
+
+def apply_cloud_request_options(payload: dict) -> dict:
+    """Apply cloud-only request settings to a chat payload, in place.
+
+    Every hosted request needs a token cap (see ``CLOUD_LLM_MAX_TOKENS``); a
+    caller that already sized its own reply -- the classifier and the
+    orchestrator both pick a small, fixed-shape budget -- keeps that value,
+    since this only fills in the persona's default when none was set.
+    ``reasoning_effort`` is added only when configured: most providers don't
+    accept a value they were never asked to accept, so omitting it is the
+    only safe default.
+    """
+    payload.setdefault("max_tokens", cfg.CLOUD_LLM_MAX_TOKENS)
+    if cfg.CLOUD_LLM_REASONING_EFFORT:
+        payload["reasoning_effort"] = cfg.CLOUD_LLM_REASONING_EFFORT
+    return payload
+
+
+_warned_reasoning_effort_unsupported = False
+
+
+def cloud_retry_without_reasoning_effort(status: int, body: str, payload: dict) -> dict | None:
+    """A retry payload with ``reasoning_effort`` stripped, or None if this wasn't that failure.
+
+    Some OpenAI-compatible providers reject a ``reasoning_effort`` they don't
+    recognize with a 400 instead of ignoring it. One retry without the field
+    keeps the turn alive rather than losing it to a field most providers do
+    accept.
+    """
+    global _warned_reasoning_effort_unsupported
+    if (
+        status != 400
+        or "reasoning_effort" not in payload
+        or "reasoning_effort" not in (body or "").lower()
+    ):
+        return None
+    if not _warned_reasoning_effort_unsupported:
+        _warned_reasoning_effort_unsupported = True
+        logger.warning(
+            "Cloud provider rejected reasoning_effort; retrying once without it. "
+            "Consider clearing CLOUD_LLM_REASONING_EFFORT if this persists."
+        )
+    return {key: value for key, value in payload.items() if key != "reasoning_effort"}
 
 
 def _cloud_model(kind: str) -> str:

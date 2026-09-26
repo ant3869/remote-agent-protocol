@@ -1,6 +1,10 @@
+import importlib
 import json
+import os
 import unittest
 from unittest import mock
+
+import loguru
 
 from remote_agent_protocol import config, ollama_models
 
@@ -85,6 +89,36 @@ class AgentConfigTests(unittest.TestCase):
     def test_rejects_shell_command_strings(self):
         with self.assertRaisesRegex(ValueError, "non-empty string arrays"):
             config._parse_command_map('{"openclaw":"openclaw run"}', "TEST")
+
+
+class CloudReasoningEffortConfigTests(unittest.TestCase):
+    """CLOUD_LLM_REASONING_EFFORT: empty means "don't send it"."""
+
+    def test_empty_is_accepted_without_a_warning(self):
+        with mock.patch.object(loguru.logger, "warning") as mock_warning:
+            self.assertEqual(config._validate_cloud_reasoning_effort(""), "")
+        mock_warning.assert_not_called()
+
+    def test_each_known_value_is_kept(self):
+        for value in ("none", "minimal", "low", "medium", "high"):
+            with self.subTest(value=value):
+                self.assertEqual(config._validate_cloud_reasoning_effort(value), value)
+
+    def test_an_invalid_value_is_ignored_and_warned_once(self):
+        with mock.patch.object(loguru.logger, "warning") as mock_warning:
+            result = config._validate_cloud_reasoning_effort("maximum-overdrive")
+        self.assertEqual(result, "")
+        mock_warning.assert_called_once()
+
+    def test_env_wiring_normalizes_case_and_whitespace(self):
+        # An end-to-end check that the module-level assignment actually runs
+        # the raw env value through _env() -> strip().lower() -> validation.
+        with mock.patch.dict(os.environ, {"CLOUD_LLM_REASONING_EFFORT": "  MEDIUM  "}):
+            reloaded = importlib.reload(config)
+        try:
+            self.assertEqual(reloaded.CLOUD_LLM_REASONING_EFFORT, "medium")
+        finally:
+            importlib.reload(config)  # restore the ambient environment for other tests
 
 
 if __name__ == "__main__":

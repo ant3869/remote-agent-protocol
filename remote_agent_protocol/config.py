@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 
+from loguru import logger
+
 # Repository root (the directory that holds .env and VERSION). Anchoring
 # paths here keeps `python -m remote_agent_protocol` working from any CWD.
 _ROOT = Path(__file__).resolve().parent.parent
@@ -322,6 +324,28 @@ CLOUD_LLM_TIMEOUT_SECS = float(_env("CLOUD_LLM_TIMEOUT_SECS", "20"))
 # reply is a sentence or two, so this is generous for the persona while keeping
 # every reservation small.
 CLOUD_LLM_MAX_TOKENS = int(_env("CLOUD_LLM_MAX_TOKENS", "512"))
+# Some hosted models think before answering, which spends the same latency the
+# cloud path exists to avoid -- measured on this machine, a one-word reply cost
+# ~4.8s/316 output tokens at the default effort versus ~2.2s/135 tokens at
+# "low", with tool calling unaffected. Empty (the default) sends nothing, which
+# leaves each provider's own default effort in place.
+_CLOUD_REASONING_EFFORTS = {"", "none", "minimal", "low", "medium", "high"}
+
+
+def _validate_cloud_reasoning_effort(value: str) -> str:
+    """A recognized effort value, or "" (with a warning) for anything else."""
+    if value in _CLOUD_REASONING_EFFORTS:
+        return value
+    logger.warning(
+        f"Ignoring invalid CLOUD_LLM_REASONING_EFFORT={value!r}; "
+        f"expected one of {sorted(_CLOUD_REASONING_EFFORTS)}"
+    )
+    return ""
+
+
+CLOUD_LLM_REASONING_EFFORT = _validate_cloud_reasoning_effort(
+    _env("CLOUD_LLM_REASONING_EFFORT", "").strip().lower()
+)
 
 # ---------------------------------------------------------------------------
 # Personality & voice -- now driven by PERSONAS

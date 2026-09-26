@@ -21,6 +21,11 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - `subprocess_resolution` module centralizing backend-executable resolution
   (previously duplicated in `agent_bridge.py` and `remote_host.py`); `doctor`
   now warns when a backend resolves to an unexpected binary elsewhere on PATH.
+- `CLOUD_LLM_REASONING_EFFORT` config: sends `reasoning_effort` on every cloud
+  chat request when set, so a thinking-capable hosted model (e.g. via
+  9Router) can run at a lower effort instead of spending the same latency the
+  cloud path exists to avoid. Empty (default) sends nothing. A provider that
+  400s on the field gets one retry without it.
 
 ### Fixed
 

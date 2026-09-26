@@ -568,11 +568,22 @@ async def classify_with_cloud(
             "json_schema": {"name": "routing", "schema": _RESPONSE_SCHEMA, "strict": True},
         },
     }
+    llm_endpoint.apply_cloud_request_options(payload)
     timeout = aiohttp.ClientTimeout(total=timeout_secs)
     async with aiohttp.ClientSession(timeout=timeout) as http:
-        async with http.post(endpoint.chat_url, json=payload, headers=endpoint.headers) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+        for attempt in range(2):
+            async with http.post(endpoint.chat_url, json=payload, headers=endpoint.headers) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    retry_payload = llm_endpoint.cloud_retry_without_reasoning_effort(
+                        resp.status, body, payload
+                    )
+                    if retry_payload is not None and attempt == 0:
+                        payload = retry_payload
+                        continue
+                    resp.raise_for_status()
+                data = await resp.json()
+            break
     content = (data.get("choices") or [{}])[0].get("message", {}).get("content")
     if not content:
         # Seen live: a hosted model can answer 200 with null content, having
