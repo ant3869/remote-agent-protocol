@@ -409,6 +409,25 @@ harness's own output where it prints one -- empty otherwise, never guessed).
 A non-zero exit with no classified failure reason keeps a bounded, redacted
 tail of the process's actual output in `failure_detail`.
 
+### Tool-calling Butler (brain mode)
+
+With `BUTLER_TOOLS_ENABLED=true`, a brain-mode turn goes to `butler.ButlerLoop`
+instead of the router tiers: one model on the Butler role chain holds the
+conversation and acts through `butler.ButlerToolbox` (`list_agents`,
+`check_agents`, `start_task`, `retry_task`, `task_status`, `list_tasks`,
+`cancel_task`, `get_result`, `set_agent_model`), streaming its reply by
+sentence. Every tool result carries a `summary` the model is told to speak
+from. Dispatch always passes orchestrator admission and the destructive-task
+confirmation hold, then goes through the conversation hub like any other
+delegation. `butler.TaskLedger` groups attempts across agents under one task
+id, so "have Codex do it" retries the same task. Only the local time query and
+a yes/no to a held task bypass the model. Tool traffic is never persisted: history keeps the
+user's words and the final reply. If no endpoint can start the turn, it runs
+on the router path instead; if the model fails after a tool ran, the turn ends
+with the tools' own summaries rather than repeating side effects. Job
+completions still arrive as `[[announce]]` turns on the existing narration
+path. Design: `docs/superpowers/specs/2026-09-26-tool-calling-butler-design.md`.
+
 ### Agent health evidence
 
 A roll call ("check all the agents") answers from control-plane evidence,

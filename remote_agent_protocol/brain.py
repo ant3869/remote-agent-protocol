@@ -38,6 +38,13 @@ from remote_agent_protocol import (
 )
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import personas as persona_catalog
+from remote_agent_protocol.butler import (
+    ButlerLoop,
+    ButlerToolbox,
+    ButlerUnavailable,
+    DispatchOutcome,
+    TaskLedger,
+)
 from remote_agent_protocol.control_plane import AgentControlPlane, AgentRegistry
 from remote_agent_protocol.control_plane.adapters.base import AgentTask
 from remote_agent_protocol.control_plane.adapters.factory import build_adapters
@@ -219,6 +226,29 @@ class BrainSession:
         # before reading the hub's turns for a hub-dispatched job, so it
         # never races that task's own append (task-8 review round 1, #5).
         self._hub_job_event_tasks: dict[str, asyncio.Task] = {}
+        self._butler_ledger = TaskLedger()
+        self._butler = ButlerLoop(
+            toolbox=ButlerToolbox(
+                bridge=self._bridge,
+                control_plane=self._control_plane,
+                ledger=self._butler_ledger,
+                dispatch=self._butler_dispatch,
+                admit=lambda agent, task: self._gate_dispatch(agent, task),
+                needs_confirmation=self._needs_confirmation,
+                hold_confirmation=self._butler_hold_confirmation,
+                drop_confirmation=lambda token: (
+                    self.resolve_confirmation(token, "deny") is not None
+                ),
+                aliases=cfg.AGENT_SPOKEN_ALIASES,
+                fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
+            ),
+            endpoints=lambda: llm_endpoint.chain(llm_endpoint.BRAIN),
+            http=lambda: self._http,
+            max_rounds=cfg.BUTLER_MAX_TOOL_ROUNDS,
+            max_tokens=cfg.CLOUD_LLM_MAX_TOKENS,
+            timeout_secs=cfg.CLOUD_LLM_TIMEOUT_SECS,
+            on_tool=self._emit_butler_tool,
+        )
 
     async def start(self) -> None:
         """Start background services that do not allocate audio/STT/TTS models."""
@@ -311,6 +341,14 @@ class BrainSession:
         if not text:
             return ""
         utterance = self._new_utterance(text, delivery)
+        if self._butler_active(text):
+            try:
+                pieces = [
+                    str(piece) async for piece in self._butler_turn(text, llm_content, utterance)
+                ]
+                return SpeechText("".join(pieces), utterance)
+            except ButlerUnavailable as exc:
+                logger.warning(f"Butler unavailable ({exc}); using the router path this turn")
         content = await self._turn_content(text, llm_content)
         if utterance["session_id"] != self._conversation.session_id:
             return ""
@@ -405,6 +443,13 @@ class BrainSession:
         if not text:
             return
         utterance = self._new_utterance(text, "playback_unconfirmed")
+        if self._butler_active(text):
+            try:
+                async for piece in self._butler_turn(text, llm_content, utterance):
+                    yield piece
+                return
+            except ButlerUnavailable as exc:
+                logger.warning(f"Butler unavailable ({exc}); using the router path this turn")
         content = await self._turn_content(text, llm_content)
         if utterance["session_id"] != self._conversation.session_id:
             return
@@ -909,23 +954,7 @@ class BrainSession:
                 forced_reason
                 or "this task changes files, installs software, or otherwise mutates the system"
             )
-            repeat_note = self._denial_repeat_note(agent, task)
-            if repeat_note:
-                reason = f"{reason} {repeat_note}"
-            self._confirm_counter += 1
-            token = f"confirm-{self._confirm_counter}"
-            self._pending_confirmations[token] = (agent, task, cwd, reason)
-            self._emit(
-                {
-                    "type": "agent_confirm",
-                    "token": token,
-                    "agent": agent,
-                    "task": task,
-                    "machine": self._bridge.machine_for(agent),
-                    "reason": reason,
-                    "transcript": self._last_user_text,
-                }
-            )
+            self._hold_for_confirmation(agent, task, cwd, reason)
             return cfg.DELEGATION_CONFIRM_PROMPT.format(agent=agent, task=task)
         # Concurrency/duplicate admission immediately before the real dispatch
         # (never before a confirmation hold -- a held task may never run).
@@ -964,9 +993,30 @@ class BrainSession:
             return cfg.DELEGATION_ACK_PROMPT.format(agent=agent, task=task)
         return cfg.DELEGATION_ACK_PENDING_SELECTION_PROMPT.format(task=task)
 
+    def _hold_for_confirmation(self, agent: str, task: str, cwd: str | None, reason: str) -> str:
+        """Hold (agent, task) until the user approves or denies it; returns its token."""
+        repeat_note = self._denial_repeat_note(agent, task)
+        if repeat_note:
+            reason = f"{reason} {repeat_note}"
+        self._confirm_counter += 1
+        token = f"confirm-{self._confirm_counter}"
+        self._pending_confirmations[token] = (agent, task, cwd, reason)
+        self._emit(
+            {
+                "type": "agent_confirm",
+                "token": token,
+                "agent": agent,
+                "task": task,
+                "machine": self._bridge.machine_for(agent),
+                "reason": reason,
+                "transcript": self._last_user_text,
+            }
+        )
+        return token
+
     async def _dispatch_via_hub(
         self, explicit_agent_id: str | None, text: str, *, cwd: str | None = None
-    ) -> None:
+    ) -> TurnDisposition:
         """Route one already-admitted dispatch through the shared conversation hub.
 
         No current caller supplies a non-``None`` cwd -- every path that
@@ -977,7 +1027,7 @@ class BrainSession:
         ``conversation_dispatch.warn_if_cwd_unsupported``).
         """
         conversation_dispatch.warn_if_cwd_unsupported(cwd)
-        await conversation_dispatch.dispatch_via_hub(
+        return await conversation_dispatch.dispatch_via_hub(
             self._conversation_hub,
             self._hub_dispatched_jobs,
             explicit_agent_id,
@@ -1089,12 +1139,27 @@ class BrainSession:
             # the user, so approval dispatches to it directly rather than
             # deferring to the hub's evidence-based selection.
             self._spawn(
-                self._dispatch_via_hub(agent, self._with_delegation_context(task), cwd=cwd),
+                self._dispatch_confirmed(token, agent, task, cwd),
                 f"brain-confirmed-{agent}",
             )
             return cfg.AGENT_CONFIRM_APPROVED_PROMPT.format(agent=agent, task=task)
+        self._butler_ledger.release(token)
         self._recently_denied.append((agent, task.strip().lower()))
         return cfg.AGENT_CONFIRM_DENIED_PROMPT.format(agent=agent, task=task)
+
+    async def _dispatch_confirmed(self, token: str, agent: str, task: str, cwd: str | None) -> None:
+        """Dispatch an approved task, and link it to the Butler task that held it, if any."""
+        disposition = await self._dispatch_via_hub(
+            agent, self._with_delegation_context(task), cwd=cwd
+        )
+        butler_task = self._butler_ledger.task_for_token(token)
+        if butler_task is None:
+            return
+        task_ref = self._conversation_hub.task(disposition.task_id) if disposition.task_id else None
+        if task_ref is not None and task_ref.attempt_id:
+            self._butler_ledger.attach(butler_task.task_id, task_ref.attempt_id, task_ref.agent_id)
+        else:
+            self._butler_ledger.release(token)
 
     def _denial_repeat_note(self, agent: str, task: str) -> str:
         """Flag a proposal that closely resembles one the user denied this session.
@@ -1141,6 +1206,138 @@ class BrainSession:
                 "task": task,
                 "reason": reason,
                 "decision": decision,
+            }
+        )
+
+    # -- tool-calling Butler ---------------------------------------------------
+
+    def _butler_active(self, text: str) -> bool:
+        """Whether this turn goes to the tool-calling Butler instead of the router."""
+        return cfg.BUTLER_TOOLS_ENABLED and not text.startswith(ANNOUNCE_PREFIX)
+
+    async def _butler_turn(
+        self, text: str, llm_content: str | None, utterance: dict
+    ) -> AsyncIterator[SpeechText]:
+        """One Butler turn, streamed by sentence.
+
+        Raises ``ButlerUnavailable`` before yielding anything when no model can
+        take the turn, so the caller can use the router path instead. Only the
+        user's words and the final reply are kept in history.
+        """
+        direct = self._butler_pregate(text)
+        if direct is None:
+            messages = [
+                {"role": "system", "content": self._butler_system_instruction()},
+                *self._butler_history(),
+                {"role": "user", "content": llm_content or text},
+            ]
+            stream = self._butler.run(messages)
+        else:
+            stream = _single(direct)
+        full = ""
+        spoken = ""
+        pending = ""
+        started = False
+        async for delta in stream:
+            if not started:
+                started = True
+                self._emit({"type": "transcript", "role": "user", "text": text})
+                self._last_user_text = text
+            if utterance["session_id"] != self._conversation.session_id:
+                return
+            full += delta
+            pending += delta
+            ready, pending = _split_sentences(pending)
+            if ready:
+                spoken += ready
+                utterance.update(text=spoken, final=False, revision=utterance["revision"] + 1)
+                self._emit(dict(utterance))
+                yield SpeechText(ready, utterance)
+        if pending.strip():
+            spoken += pending
+            utterance.update(text=spoken, final=False, revision=utterance["revision"] + 1)
+            self._emit(dict(utterance))
+            yield SpeechText(pending, utterance)
+        self._messages.append({"role": "user", "content": text})
+        self._finish_turn(full.strip(), utterance)
+
+    def _butler_pregate(self, text: str) -> str | None:
+        """Replies that must not depend on a model: the time, and a held task's yes/no."""
+        if voice_commands.is_local_runtime_time_query(text):
+            return datetime.now().strftime("It is %I:%M %p on %A, %B %d, %Y.")
+        if not self._pending_confirmations:
+            return None
+        decision = voice_commands.classify_confirmation_reply(text)
+        if decision is None:
+            return None
+        token = next(reversed(self._pending_confirmations))
+        agent, _task, _cwd, _reason = self._pending_confirmations[token]
+        outcome = self.resolve_confirmation(token, decision)
+        if decision != "approve":
+            return "Okay, I won't run it."
+        if outcome is not None and outcome.startswith("[Not dispatched"):
+            reason = outcome.removeprefix("[Not dispatched -- ").rstrip(".]")
+            return f"I couldn't start it: {reason}."
+        return f"Sending it to {agent} now."
+
+    def _butler_system_instruction(self) -> str:
+        agents = ", ".join(self._bridge.backend_names()) or "none"
+        now = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
+        return (
+            f"{self._persona.system_prompt}{cfg.BUTLER_RULES}"
+            f" Configured agents: {agents}. Current local time: {now}."
+        )
+
+    def _butler_history(self) -> list[dict]:
+        """Recent user/assistant turns as the user said them, without scaffolding."""
+        return [
+            {"role": message["role"], "content": message["content"]}
+            for message in self._messages_for_persistence()[-cfg.MEMORY_MAX_MSGS :]
+            if message.get("role") in {"user", "assistant"}
+            and isinstance(message.get("content"), str)
+        ]
+
+    def _needs_confirmation(self, agent: str, task: str) -> bool:
+        return cfg.AGENT_CONFIRM_ENABLED and voice_commands.requires_confirmation(
+            agent, task, destructive_words=cfg.AGENT_DESTRUCTIVE_WORDS
+        )
+
+    def _butler_hold_confirmation(self, agent: str, task: str) -> str:
+        return self._hold_for_confirmation(
+            agent,
+            task,
+            None,
+            "this task changes files, installs software, or otherwise mutates the system",
+        )
+
+    async def _butler_dispatch(self, agent: str, instructions: str) -> DispatchOutcome:
+        """Start admitted work on ``agent`` through the hub and report the job it became."""
+        self._remember_delegation(instructions)
+
+        async def no_dispatch(_disposition: TurnDisposition) -> None:
+            return None  # the tool result reports it; nothing to relay into history
+
+        disposition = await conversation_dispatch.dispatch_via_hub(
+            self._conversation_hub,
+            self._hub_dispatched_jobs,
+            agent,
+            self._with_delegation_context(instructions),
+            on_no_dispatch=no_dispatch,
+        )
+        task_ref = self._conversation_hub.task(disposition.task_id) if disposition.task_id else None
+        if task_ref is None or not task_ref.attempt_id:
+            detail = present_no_dispatch_explanation(disposition.spoken_acknowledgment)
+            return DispatchOutcome(None, agent, detail)
+        return DispatchOutcome(task_ref.attempt_id, task_ref.agent_id)
+
+    def _emit_butler_tool(self, name: str, arguments: dict, result: dict) -> None:
+        self._emit(
+            {
+                "type": "butler_tool",
+                "name": name,
+                "arguments": arguments,
+                "status": result.get("status", "error" if "error" in result else "ok"),
+                "summary": result.get("summary", ""),
             }
         )
 
@@ -1596,6 +1793,10 @@ _MARKER_START = "[["
 # Greedy, so it matches through the LAST sentence terminator followed by space:
 # a flush should release everything that is safely speakable, not one sentence.
 _SENTENCE_END_RE = re.compile(r".*[.!?…][\"')\]]*(?=\s)", re.DOTALL)
+
+
+async def _single(text: str) -> AsyncIterator[str]:
+    yield text
 
 
 def _split_sentences(text: str) -> tuple[str, str]:

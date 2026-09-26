@@ -1801,6 +1801,11 @@ class AgentBridge:
             and (agent is None or job.agent == agent)
         ]
 
+    def recent_jobs(self, limit: int = 20) -> list[AgentJob]:
+        """User-visible jobs the bridge still holds, newest first."""
+        visible = [job for job in self._jobs.values() if not job.internal]
+        return list(reversed(visible))[:limit]
+
     async def cancel_active(self, agent: str | None = None, *, all_jobs: bool = False) -> int:
         """Cancel the newest matching job, or every matching active job."""
         jobs = list(reversed(self.active_jobs(agent)))

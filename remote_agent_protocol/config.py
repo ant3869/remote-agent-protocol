@@ -805,6 +805,29 @@ AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_histo
 # self-check or a finished job -- this recent instead of pinging again, so the
 # answer comes back in seconds. Failures are always re-checked. 0 disables.
 AGENT_HEALTH_FRESH_SECS = float(_env("AGENT_HEALTH_FRESH_SECS", "120"))
+
+# Tool-calling Butler (brain mode). One model holds the conversation and acts
+# through tools (list/check agents, start/retry/cancel tasks, task status,
+# model switches), speaking only from what they return. It runs on the Butler
+# role chain (Models & providers) or the legacy CLOUD_* endpoint, so the model
+# there must support OpenAI-style function calling. When no endpoint can run a
+# turn, that turn uses the router path instead.
+BUTLER_TOOLS_ENABLED = _env_bool("BUTLER_TOOLS_ENABLED", False)
+BUTLER_MAX_TOOL_ROUNDS = int(_env("BUTLER_MAX_TOOL_ROUNDS", "5"))
+BUTLER_RULES = (
+    " You are the front door to the user's agents, and you act only through your tools."
+    " Say only what your tools returned: never claim an agent was contacted, is working,"
+    " or finished unless a tool result says so, and never guess an outcome that hasn't"
+    " arrived. For any question about agents or tasks -- status, availability, progress,"
+    " results -- call a tool (check_agents, list_agents, task_status, list_tasks,"
+    " get_result) and never start new work to answer it. When the user refers to earlier"
+    " work ('it', 'that', 'the email thing', 'have Codex do it'), find it with list_tasks"
+    " or task_status, and use retry_task for another attempt at the same task. start_task"
+    " instructions must be complete on their own; the agent sees nothing of this"
+    " conversation. If a task failed and the user still wants it done, retry it on another"
+    " agent that is up. If a tool says a task needs confirmation, ask the user to confirm."
+    " Plain conversation needs no tools. Keep spoken replies to one or two sentences."
+)
 # The control plane's last-known health/activity snapshot per agent.
 AGENT_REGISTRY_FILE = _env("AGENT_REGISTRY_FILE", str(DATA_DIR / "agent_registry.json"))
 
