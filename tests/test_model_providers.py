@@ -35,6 +35,17 @@ def _provider(provider_id="openrouter", **overrides) -> mp.ProviderConfig:
     return mp.ProviderConfig(**fields)
 
 
+def test_slug_id_derives_a_lowercase_dashed_id_from_a_label():
+    assert mp.slug_id("OpenRouter", existing=[]) == "openrouter"
+    assert mp.slug_id("9Router", existing=[]) == "9router"
+    assert mp.slug_id("My Custom Provider!", existing=[]) == "my-custom-provider"
+
+
+def test_slug_id_disambiguates_against_existing_ids():
+    assert mp.slug_id("OpenRouter", existing=["openrouter"]) == "openrouter-2"
+    assert mp.slug_id("OpenRouter", existing=["openrouter", "openrouter-2"]) == "openrouter-3"
+
+
 def test_provider_config_has_no_secret_bearing_field():
     names = {f.name for f in dataclasses.fields(mp.ProviderConfig)}
     assert names.isdisjoint({"api_key", "key", "token", "secret", "password"})
@@ -140,6 +151,17 @@ def test_model_test_results_round_trip_per_provider_and_model(registry):
 
     assert reloaded.get_model_test("openrouter", "vendor/model-a") == tuple(results)
     assert reloaded.get_model_test("openrouter", "vendor/model-b") == ()
+
+
+def test_list_model_tests_returns_every_cached_result(registry):
+    registry.upsert_provider(_provider())
+    registry.record_model_test("openrouter", "vendor/a", [mp.TestResult(stage="chat", ok=True)])
+    registry.record_model_test("openrouter", "vendor/b", [mp.TestResult(stage="chat", ok=False)])
+
+    listed = {(pid, model): results for pid, model, results in registry.list_model_tests()}
+
+    assert set(listed) == {("openrouter", "vendor/a"), ("openrouter", "vendor/b")}
+    assert listed[("openrouter", "vendor/a")][0].ok is True
 
 
 def test_role_chain_round_trips_in_order(registry):

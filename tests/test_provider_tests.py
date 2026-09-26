@@ -7,6 +7,8 @@ fake server is to make that safe and fast, not to skip it.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from remote_agent_protocol import model_providers as mp
@@ -130,6 +132,18 @@ async def test_a_leaked_key_never_appears_in_an_error_detail(server):
         secret_store._known_secrets.discard("sk-should-be-redacted")
 
     assert "sk-should-be-redacted" not in results[-1].detail
+
+
+@pytest.mark.asyncio
+async def test_refresh_catalog_skips_reach_and_auth(server):
+    server.script.models_body = {"data": [{"id": "vendor/a"}]}
+    provider = _provider(server.base_url)
+
+    result, models = await pt.refresh_catalog(provider, "sk-test")
+
+    assert result.stage == "catalog"
+    assert result.ok is True
+    assert models == ["vendor/a"]
 
 
 # --- model test: chat -> tool call -> JSON ---
@@ -282,6 +296,27 @@ async def test_run_model_test_passes_all_three_stages(server):
 
     assert [r.stage for r in results] == ["chat", "tool_call", "json"]
     assert all(r.ok for r in results)
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_key_is_redacted_even_from_an_exception_message(server, monkeypatch):
+    """Defense in depth: redaction applies to str(exc), not just HTTP error bodies."""
+    from remote_agent_protocol import secret_store
+
+    secret_store.set_key("test-provider", "sk-exception-leak")
+    provider = _provider(server.base_url)
+
+    async def boom(*_args, **_kwargs):
+        raise TimeoutError("connection to sk-exception-leak timed out")
+
+    monkeypatch.setattr(asyncio, "open_connection", boom)
+    try:
+        results, _ = await pt.run_provider_test(provider, "sk-exception-leak")
+    finally:
+        secret_store._known_secrets.discard("sk-exception-leak")
+
+    assert "sk-exception-leak" not in results[0].detail
+    assert "[REDACTED]" in results[0].detail
 
 
 @pytest.mark.asyncio

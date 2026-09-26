@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 SCHEMA_VERSION = 1
+_SLUG_INVALID = re.compile(r"[^a-z0-9]+")
 
 ROLES: tuple[str, ...] = ("butler", "intent", "orchestration", "narration")
 AuthKind = Literal["bearer", "none"]
@@ -130,6 +133,18 @@ PRESETS: dict[str, PresetInfo] = {
         PresetInfo(id="custom", label="Custom", base_url="", auth="bearer"),
     )
 }
+
+
+def slug_id(label: str, existing: Iterable[str]) -> str:
+    """A short, JSON-key-safe provider id derived from a label, unique against ``existing``."""
+    base = _SLUG_INVALID.sub("-", label.strip().lower()).strip("-") or "provider"
+    existing_set = set(existing)
+    if base not in existing_set:
+        return base
+    suffix = 2
+    while f"{base}-{suffix}" in existing_set:
+        suffix += 1
+    return f"{base}-{suffix}"
 
 
 @dataclass(frozen=True)
@@ -436,6 +451,13 @@ class ProviderRegistry:
     def get_model_test(self, provider_id: str, model: str) -> tuple[TestResult, ...]:
         """A model's last test run, or an empty tuple if never tested."""
         return self._model_tests.get((provider_id, model), ())
+
+    def list_model_tests(self) -> tuple[tuple[str, str, tuple[TestResult, ...]], ...]:
+        """Every cached model test result, as ``(provider_id, model, results)``."""
+        return tuple(
+            (provider_id, model, results)
+            for (provider_id, model), results in self._model_tests.items()
+        )
 
     # --- role chains ---
 

@@ -35,12 +35,15 @@ from remote_agent_protocol import (
     diagnostics,
     llm_endpoint,
     logging_setup,
+    model_providers,
     multimodal_prompt,
     ollama_models,
     openai_bridge,
     persona_config,
     personas,
     process_guard,
+    provider_tests,
+    secret_store,
     tts_factory,
     voicebox,
     voices,
@@ -293,6 +296,12 @@ class WebVoiceApp:
             "set_quota_strategy": self._action_set_quota_strategy,
             "check_copilot_auth": self._action_check_copilot_auth,
             "set_persona_orchestration_override": self._action_set_persona_orchestration_override,
+            "provider_save": self._action_provider_save,
+            "provider_delete": self._action_provider_delete,
+            "provider_test": self._action_provider_test,
+            "provider_refresh_models": self._action_provider_refresh_models,
+            "model_test": self._action_model_test,
+            "role_assign": self._action_role_assign,
         }
 
     def run(self) -> None:
@@ -1780,6 +1789,266 @@ class WebVoiceApp:
         self._session.set_persona_orchestration_override(persona, mode)
         return {"ok": True, "status": self._orchestration_payload()}
 
+    def _providers_payload(self) -> dict:
+        """Providers, catalogs, test results, role chains, and presets. No keys."""
+        registry = llm_endpoint.get_registry()
+        providers = registry.list_providers()
+        model_tests: dict[str, dict[str, list[dict]]] = {}
+        for provider_id, model, results in registry.list_model_tests():
+            model_tests.setdefault(provider_id, {})[model] = [r.to_dict() for r in results]
+        return {
+            "providers": [
+                {
+                    **provider.to_dict(),
+                    "hasKey": secret_store.has_key(provider.id),
+                    "keyMasked": secret_store.masked(provider.id) or "",
+                }
+                for provider in providers
+            ],
+            "catalogs": {
+                provider.id: self._catalog_summary(registry, provider.id) for provider in providers
+            },
+            "providerTests": {
+                provider.id: [r.to_dict() for r in registry.get_provider_test(provider.id)]
+                for provider in providers
+            },
+            "modelTests": model_tests,
+            "roles": {
+                role: [e.to_dict() for e in registry.get_role_chain(role)]
+                for role in model_providers.ROLES
+            },
+            "presets": {
+                preset_id: {
+                    "id": preset.id,
+                    "label": preset.label,
+                    "baseUrl": preset.base_url,
+                    "auth": preset.auth,
+                    "verified": preset.verified,
+                    "notes": preset.notes,
+                }
+                for preset_id, preset in model_providers.PRESETS.items()
+            },
+        }
+
+    @staticmethod
+    def _catalog_summary(registry: model_providers.ProviderRegistry, provider_id: str) -> dict:
+        catalog = registry.get_catalog(provider_id)
+        if catalog is None:
+            return {"count": 0, "fetchedAt": 0.0}
+        return {"count": len(catalog.models), "fetchedAt": catalog.fetched_at}
+
+    def _action_provider_save(self, payload: dict) -> dict:
+        registry = llm_endpoint.get_registry()
+        preset_id = str(payload.get("preset") or "custom").strip()
+        preset = model_providers.PRESETS.get(preset_id)
+        if preset is None:
+            return {"ok": False, "error": f"unknown preset: {preset_id!r}"}
+        base_url = str(payload.get("base_url") or "").strip()
+        if not base_url:
+            return {"ok": False, "error": "base_url is required"}
+        extra_headers = payload.get("extra_headers") or {}
+        if not isinstance(extra_headers, dict):
+            return {"ok": False, "error": "extra_headers must be an object"}
+        auth = payload.get("auth")
+        if auth not in ("bearer", "none"):
+            auth = preset.auth
+
+        provider_id = str(payload.get("id") or "").strip()
+        existing = registry.get_provider(provider_id) if provider_id else None
+        label = str(payload.get("label") or "").strip() or (
+            existing.label if existing else preset.label
+        )
+        if not provider_id:
+            provider_id = model_providers.slug_id(
+                label, existing=[p.id for p in registry.list_providers()]
+            )
+        now = time.time()
+        config = model_providers.ProviderConfig(
+            id=provider_id,
+            preset=preset_id,
+            label=label,
+            base_url=base_url,
+            auth=auth,
+            extra_headers={str(k): str(v) for k, v in extra_headers.items()},
+            enabled=bool(payload.get("enabled", True)),
+            created_at=existing.created_at if existing else now,
+            updated_at=now,
+        )
+        registry.upsert_provider(config)
+        api_key = payload.get("api_key")
+        if api_key:  # blank on edit keeps the existing key
+            try:
+                secret_store.set_key(provider_id, str(api_key))
+            except secret_store.SecretBackendUnavailable as exc:
+                return {"ok": False, "error": str(exc)}
+        registry.save()
+        self._bump_catalogs()
+        return {
+            "ok": True,
+            "message": f"Saved {config.label}.",
+            "providers": self._providers_payload(),
+        }
+
+    def _action_provider_delete(self, payload: dict) -> dict:
+        registry = llm_endpoint.get_registry()
+        provider_id = str(payload.get("id") or "").strip()
+        provider = registry.get_provider(provider_id)
+        if provider is None:
+            return {"ok": False, "error": f"unknown provider: {provider_id!r}"}
+        referenced = registry.providers_referenced_by_roles(provider_id)
+        if referenced and not payload.get("force"):
+            return {
+                "ok": False,
+                "error": f"{provider.label} is still assigned to: {', '.join(referenced)}. "
+                f"Delete with force to remove it anyway.",
+            }
+        registry.delete_provider(provider_id)
+        secret_store.delete_key(provider_id)
+        for role in referenced:
+            remaining = [e for e in registry.get_role_chain(role) if e.provider_id != provider_id]
+            registry.set_role_chain(role, remaining)
+        registry.save()
+        self._bump_catalogs()
+        return {
+            "ok": True,
+            "message": f"Deleted {provider.label}.",
+            "providers": self._providers_payload(),
+        }
+
+    def _action_provider_test(self, payload: dict) -> dict:
+        registry = llm_endpoint.get_registry()
+        provider_id = str(payload.get("id") or "").strip()
+        provider = registry.get_provider(provider_id)
+        if provider is None:
+            return {"ok": False, "error": f"unknown provider: {provider_id!r}"}
+        threading.Thread(target=self._run_provider_test, args=(provider_id,), daemon=True).start()
+        return {"ok": True, "message": f"Testing {provider.label}..."}
+
+    def _run_provider_test(self, provider_id: str) -> None:
+        registry = llm_endpoint.get_registry()
+        provider = registry.get_provider(provider_id)
+        if provider is None:
+            return
+        api_key = secret_store.get_key(provider_id) or ""
+        try:
+            results, models = asyncio.run(provider_tests.run_provider_test(provider, api_key))
+        except Exception as exc:  # a test must never crash the server
+            logger.warning(f"Provider test for {provider_id} failed: {exc}")
+            return
+        registry.record_provider_test(provider_id, results)
+        if models:
+            registry.set_catalog(provider_id, models)
+        registry.save()
+        self._bump_catalogs()
+        self._publish(
+            {
+                "type": "provider_test_result",
+                "provider_id": provider_id,
+                "results": [r.to_dict() for r in results],
+            }
+        )
+
+    def _action_provider_refresh_models(self, payload: dict) -> dict:
+        registry = llm_endpoint.get_registry()
+        provider_id = str(payload.get("id") or "").strip()
+        provider = registry.get_provider(provider_id)
+        if provider is None:
+            return {"ok": False, "error": f"unknown provider: {provider_id!r}"}
+        threading.Thread(target=self._run_refresh_models, args=(provider_id,), daemon=True).start()
+        return {"ok": True, "message": f"Refreshing {provider.label}'s models..."}
+
+    def _run_refresh_models(self, provider_id: str) -> None:
+        registry = llm_endpoint.get_registry()
+        provider = registry.get_provider(provider_id)
+        if provider is None:
+            return
+        api_key = secret_store.get_key(provider_id) or ""
+        try:
+            result, models = asyncio.run(provider_tests.refresh_catalog(provider, api_key))
+        except Exception as exc:
+            logger.warning(f"Model refresh for {provider_id} failed: {exc}")
+            return
+        if models:
+            registry.set_catalog(provider_id, models)
+        registry.save()
+        self._bump_catalogs()
+        self._publish(
+            {
+                "type": "provider_test_result",
+                "provider_id": provider_id,
+                "results": [result.to_dict()],
+            }
+        )
+
+    def _action_model_test(self, payload: dict) -> dict:
+        registry = llm_endpoint.get_registry()
+        provider_id = str(payload.get("provider_id") or "").strip()
+        model = str(payload.get("model") or "").strip()
+        provider = registry.get_provider(provider_id)
+        if provider is None:
+            return {"ok": False, "error": f"unknown provider: {provider_id!r}"}
+        if not model:
+            return {"ok": False, "error": "model is required"}
+        threading.Thread(
+            target=self._run_model_test, args=(provider_id, model), daemon=True
+        ).start()
+        return {"ok": True, "message": f"Testing {model}..."}
+
+    def _run_model_test(self, provider_id: str, model: str) -> None:
+        registry = llm_endpoint.get_registry()
+        provider = registry.get_provider(provider_id)
+        if provider is None:
+            return
+        api_key = secret_store.get_key(provider_id) or ""
+        try:
+            results = asyncio.run(provider_tests.run_model_test(provider, api_key, model))
+        except Exception as exc:
+            logger.warning(f"Model test for {provider_id}/{model} failed: {exc}")
+            return
+        registry.record_model_test(provider_id, model, results)
+        registry.save()
+        self._publish(
+            {
+                "type": "model_test_result",
+                "provider_id": provider_id,
+                "model": model,
+                "results": [r.to_dict() for r in results],
+            }
+        )
+
+    def _action_role_assign(self, payload: dict) -> dict:
+        registry = llm_endpoint.get_registry()
+        role = str(payload.get("role") or "").strip()
+        if role not in model_providers.ROLES:
+            return {"ok": False, "error": f"unknown role: {role!r}"}
+        raw_chain = payload.get("chain")
+        if not isinstance(raw_chain, list):
+            return {"ok": False, "error": "chain must be a list"}
+        entries = []
+        for item in raw_chain:
+            if not isinstance(item, dict):
+                return {"ok": False, "error": "each chain entry must be an object"}
+            provider_id = str(item.get("provider_id") or "").strip()
+            model = str(item.get("model") or "").strip()
+            provider = registry.get_provider(provider_id)
+            if provider is None:
+                return {"ok": False, "error": f"unknown provider: {provider_id!r}"}
+            if not provider.enabled:
+                return {"ok": False, "error": f"{provider.label} is disabled"}
+            if not model:
+                return {"ok": False, "error": "each chain entry needs a model"}
+            entries.append(model_providers.RoleChainEntry(provider_id=provider_id, model=model))
+        registry.set_role_chain(role, entries)
+        registry.save()
+        self._publish(
+            {"type": "model_assignment", "role": role, "chain": [e.to_dict() for e in entries]}
+        )
+        return {
+            "ok": True,
+            "message": f"Updated {role}.",
+            "providers": self._providers_payload(),
+        }
+
     def _action_export_diagnostics(self, payload: dict) -> None:
         threading.Thread(target=self._export_diagnostics, daemon=True).start()
 
@@ -2079,6 +2348,9 @@ class WebVoiceApp:
                     return
                 if parsed.path == "/api/catalogs":
                     self._send_json(app._catalogs_payload())
+                    return
+                if parsed.path == "/api/providers":
+                    self._send_json(app._providers_payload())
                     return
                 if parsed.path == "/api/agents":
                     self._send_json(app._agents_payload())

@@ -13,8 +13,12 @@ import pytest
 from remote_agent_protocol import (
     agent_bridge,
     app_state,
+    llm_endpoint,
+    model_providers,
     multimodal_prompt,
     persona_config,
+    provider_tests,
+    secret_store,
     web_gui,
 )
 from remote_agent_protocol import config as cfg
@@ -50,6 +54,244 @@ def default_full_mode(monkeypatch):
     """
     monkeypatch.setattr(cfg, "RAP_MODE", "full")
     monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", True)
+
+
+@pytest.fixture
+def provider_registry(tmp_path):
+    """An isolated registry for the model-providers actions, never real app data."""
+    reg = model_providers.ProviderRegistry(tmp_path / "model_providers.json")
+    llm_endpoint.use_registry(reg)
+    yield reg
+    llm_endpoint.use_registry(None)
+
+
+@pytest.fixture
+def fake_secret_backend():
+    backend = secret_store.InMemoryBackend()
+    secret_store.use_backend(backend)
+    yield backend
+    secret_store.use_backend(None)
+    secret_store._known_secrets.clear()
+
+
+def _save_openrouter(app, provider_id="openrouter", **overrides):
+    payload = {
+        "id": provider_id,
+        "preset": "openrouter",
+        "label": "OpenRouter",
+        "base_url": "https://openrouter.test/v1",
+    }
+    payload.update(overrides)
+    return app._action("provider_save", payload)
+
+
+def test_provider_save_creates_a_provider_and_never_returns_the_key(
+    provider_registry, fake_secret_backend
+):
+    app = WebVoiceApp()
+
+    result = _save_openrouter(app, api_key="sk-or-secret-value")
+
+    assert result["ok"] is True
+    provider = result["providers"]["providers"][0]
+    assert provider["id"] == "openrouter"
+    assert provider["hasKey"] is True
+    assert provider["keyMasked"].endswith("alue")
+    assert "sk-or-secret-value" not in json.dumps(result)
+
+
+def test_provider_save_without_a_base_url_is_rejected(provider_registry):
+    app = WebVoiceApp()
+
+    result = app._action("provider_save", {"preset": "openrouter", "label": "x"})
+
+    assert result["ok"] is False
+
+
+def test_provider_save_rejects_an_unknown_preset(provider_registry):
+    app = WebVoiceApp()
+
+    result = app._action(
+        "provider_save", {"preset": "not-a-preset", "base_url": "https://example.test"}
+    )
+
+    assert result["ok"] is False
+
+
+def test_provider_save_without_an_id_generates_a_slug(provider_registry):
+    app = WebVoiceApp()
+
+    result = _save_openrouter(app, id="")
+
+    assert result["providers"]["providers"][0]["id"] == "openrouter"
+
+
+def test_editing_a_provider_with_a_blank_key_keeps_the_existing_one(
+    provider_registry, fake_secret_backend
+):
+    app = WebVoiceApp()
+    _save_openrouter(app, api_key="sk-original")
+
+    result = _save_openrouter(app, label="OpenRouter renamed")
+
+    assert result["ok"] is True
+    assert secret_store.get_key("openrouter") == "sk-original"
+
+
+def test_provider_delete_removes_it_and_its_key(provider_registry, fake_secret_backend):
+    app = WebVoiceApp()
+    _save_openrouter(app, api_key="sk-x")
+
+    result = app._action("provider_delete", {"id": "openrouter"})
+
+    assert result["ok"] is True
+    assert provider_registry.get_provider("openrouter") is None
+    assert secret_store.get_key("openrouter") is None
+
+
+def test_provider_delete_of_an_unknown_id_is_rejected(provider_registry):
+    app = WebVoiceApp()
+
+    result = app._action("provider_delete", {"id": "ghost"})
+
+    assert result["ok"] is False
+
+
+def test_provider_delete_is_refused_while_a_role_references_it(provider_registry):
+    app = WebVoiceApp()
+    _save_openrouter(app)
+    app._action(
+        "role_assign",
+        {"role": "butler", "chain": [{"provider_id": "openrouter", "model": "vendor/a"}]},
+    )
+
+    result = app._action("provider_delete", {"id": "openrouter"})
+
+    assert result["ok"] is False
+    assert provider_registry.get_provider("openrouter") is not None
+
+
+def test_provider_delete_with_force_also_clears_the_role_chain(provider_registry):
+    app = WebVoiceApp()
+    _save_openrouter(app)
+    app._action(
+        "role_assign",
+        {"role": "butler", "chain": [{"provider_id": "openrouter", "model": "vendor/a"}]},
+    )
+
+    result = app._action("provider_delete", {"id": "openrouter", "force": True})
+
+    assert result["ok"] is True
+    assert provider_registry.get_role_chain("butler") == ()
+
+
+def test_role_assign_rejects_an_unknown_provider(provider_registry):
+    app = WebVoiceApp()
+
+    result = app._action(
+        "role_assign", {"role": "butler", "chain": [{"provider_id": "ghost", "model": "m"}]}
+    )
+
+    assert result["ok"] is False
+
+
+def test_role_assign_rejects_an_unknown_role(provider_registry):
+    app = WebVoiceApp()
+
+    result = app._action("role_assign", {"role": "not-a-role", "chain": []})
+
+    assert result["ok"] is False
+
+
+def test_role_assign_rejects_a_disabled_provider(provider_registry):
+    app = WebVoiceApp()
+    _save_openrouter(app, enabled=False)
+
+    result = app._action(
+        "role_assign",
+        {"role": "butler", "chain": [{"provider_id": "openrouter", "model": "vendor/a"}]},
+    )
+
+    assert result["ok"] is False
+
+
+def test_role_assign_updates_the_registry(provider_registry):
+    app = WebVoiceApp()
+    _save_openrouter(app)
+
+    result = app._action(
+        "role_assign",
+        {"role": "narration", "chain": [{"provider_id": "openrouter", "model": "vendor/small"}]},
+    )
+
+    assert result["ok"] is True
+    assert [e.model for e in provider_registry.get_role_chain("narration")] == ["vendor/small"]
+
+
+def test_providers_payload_never_includes_a_key(provider_registry, fake_secret_backend):
+    app = WebVoiceApp()
+    _save_openrouter(app, api_key="sk-should-never-appear")
+
+    payload = app._providers_payload()
+
+    assert "sk-should-never-appear" not in json.dumps(payload)
+
+
+def test_status_payload_never_includes_a_provider_key(provider_registry, fake_secret_backend):
+    app = WebVoiceApp()
+    _save_openrouter(app, api_key="sk-should-never-leak")
+
+    status = app._status_payload()
+
+    assert "sk-should-never-leak" not in json.dumps(status)
+
+
+def test_provider_test_action_rejects_an_unknown_provider(provider_registry):
+    app = WebVoiceApp()
+
+    result = app._action("provider_test", {"id": "ghost"})
+
+    assert result["ok"] is False
+
+
+def test_model_test_action_requires_a_model(provider_registry):
+    app = WebVoiceApp()
+    _save_openrouter(app)
+
+    result = app._action("model_test", {"provider_id": "openrouter"})
+
+    assert result["ok"] is False
+
+
+def test_provider_test_action_runs_the_pipeline_and_records_the_result(
+    provider_registry, fake_secret_backend, monkeypatch
+):
+    """The action returns immediately; the pipeline itself runs on a background thread."""
+    app = WebVoiceApp()
+    _save_openrouter(app)
+    fake_results = [model_providers.TestResult(stage="reach", ok=True)]
+
+    async def fake_run(provider, api_key):
+        return fake_results, ["vendor/a"]
+
+    monkeypatch.setattr(provider_tests, "run_provider_test", fake_run)
+    started: list[threading.Thread] = []
+    real_thread = threading.Thread
+
+    def capture_thread(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        started.append(thread)
+        return thread
+
+    monkeypatch.setattr(web_gui.threading, "Thread", capture_thread)
+
+    result = app._action("provider_test", {"id": "openrouter"})
+    assert result["ok"] is True
+    started[0].join(timeout=5)
+
+    recorded = provider_registry.get_provider_test("openrouter")
+    assert recorded and recorded[0].ok is True
+    assert provider_registry.get_catalog("openrouter").models == ("vendor/a",)
 
 
 def test_web_shell_uses_operational_graphite_design_tokens():

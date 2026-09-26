@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -72,6 +73,19 @@ def _headers(provider: ProviderConfig, api_key: str) -> dict[str, str]:
 
 def _preset_for(provider: ProviderConfig) -> PresetInfo:
     return PRESETS.get(provider.preset, PRESETS["custom"])
+
+
+def _redacted(result: TestResult) -> TestResult:
+    """A final defense-in-depth pass: no stage's ``detail``/``hint`` ever carries a stored key.
+
+    Most stages already redact an HTTP error body explicitly, but an
+    exception's own message (``str(exc)``) is never checked against
+    ``secret_store`` -- this closes that gap uniformly, at every public entry
+    point, rather than trusting each stage to have done it individually.
+    """
+    return replace(
+        result, detail=secret_store.redact(result.detail), hint=secret_store.redact(result.hint)
+    )
 
 
 async def _reach(provider: ProviderConfig, preset: PresetInfo) -> TestResult:
@@ -177,19 +191,25 @@ async def _catalog(
     )
 
 
+async def refresh_catalog(provider: ProviderConfig, api_key: str) -> tuple[TestResult, list[str]]:
+    """Just the catalog stage, for a plain refresh -- assumes reach/auth already work."""
+    result, models = await _catalog(provider, _preset_for(provider), api_key)
+    return _redacted(result), models
+
+
 async def run_provider_test(
     provider: ProviderConfig, api_key: str
 ) -> tuple[list[TestResult], list[str]]:
     """Reach, then authenticate, then catalog -- each gated by the one before it."""
     preset = _preset_for(provider)
-    results = [await _reach(provider, preset)]
+    results = [_redacted(await _reach(provider, preset))]
     if not results[-1].ok:
         return results, []
-    results.append(await _authenticate(provider, preset, api_key))
+    results.append(_redacted(await _authenticate(provider, preset, api_key)))
     if not results[-1].ok:
         return results, []
     catalog_result, models = await _catalog(provider, preset, api_key)
-    results.append(catalog_result)
+    results.append(_redacted(catalog_result))
     return results, models
 
 
@@ -344,11 +364,11 @@ async def run_model_test(provider: ProviderConfig, api_key: str, model: str) -> 
     The gating just means there is nothing more specific to report once an
     earlier stage has already failed.
     """
-    results = [await _chat(provider, api_key, model)]
+    results = [_redacted(await _chat(provider, api_key, model))]
     if not results[-1].ok:
         return results
-    results.append(await _tool_call(provider, api_key, model))
+    results.append(_redacted(await _tool_call(provider, api_key, model)))
     if not results[-1].ok:
         return results
-    results.append(await _json_output(provider, api_key, model))
+    results.append(_redacted(await _json_output(provider, api_key, model)))
     return results
