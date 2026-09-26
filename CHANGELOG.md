@@ -55,6 +55,14 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   single-instance endpoint file are sandboxed per test run.
 - A job that hit a quota error looked failed while its process was still
   being stopped, so a cancel in that window was ignored.
+- A cancel that landed while a job's process was being spawned was
+  overwritten, so the job was killed and recorded as failed instead of
+  cancelled; a status line printed after a cancel could revive it the same
+  way. Shutting down also cancels jobs that haven't spawned yet, which
+  previously kept running and leaked their process.
+- Every persona's system prompt now pins the character's own name (the one
+  its personality gives, e.g. Bartholomew for Butler), so the model stops
+  answering to or introducing itself by names it was called by mistake.
 - The "Import from .env" banner in Models & providers could never appear, and
   the manual model-ID field was wiped by every re-render.
 

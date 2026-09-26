@@ -11,6 +11,7 @@ in `Persona.system_prompt`. Add a new character below and it inherits the rule
 for free.
 """
 
+import re
 from dataclasses import dataclass
 
 # The one spoken-output contract every persona inherits. Change it here and
@@ -28,6 +29,18 @@ SPEAK_STYLE = (
     "an error, an unanswered request, or what remains unverified."
 )
 
+# "You are Jarvis", "called Jess", "named Ada": the name a personality gives
+# its character. Capitalized, so "You are a calm guide" names no one.
+_PERSONALITY_NAME_RE = re.compile(r"\b(?:[Yy]ou are|called|named) ([A-Z][a-z]+)\b")
+
+
+def identity_rule(name: str) -> str:
+    """Pin the character's name so the model never drifts to another one."""
+    return (
+        f" Your name is {name}. If the user calls you by another name, treat it as a "
+        "mishearing or a question: never adopt it or introduce yourself as anyone else."
+    )
+
 
 @dataclass(frozen=True)
 class Persona:
@@ -44,9 +57,19 @@ class Persona:
     tts_options: dict | None = None  # provider-specific fields (speaker/language/device)
 
     @property
+    def spoken_name(self) -> str:
+        """The name the character answers to: the one its personality gives, else ``name``.
+
+        A copied persona keeps its source's personality under a new display
+        name, so the personality is the better source when it names someone.
+        """
+        match = _PERSONALITY_NAME_RE.search(self.personality)
+        return match.group(1) if match else self.name
+
+    @property
     def system_prompt(self) -> str:
-        """Full system prompt = personality + the shared spoken-style rule."""
-        return self.personality.strip() + SPEAK_STYLE
+        """Full system prompt = personality + pinned name + the shared spoken-style rule."""
+        return self.personality.strip() + identity_rule(self.spoken_name) + SPEAK_STYLE
 
     def model_name(self, default: str) -> str:
         """The Ollama model this persona should use (its own, or the default)."""
