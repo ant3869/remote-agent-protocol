@@ -52,6 +52,43 @@ os.environ.setdefault(
     os.path.join(tempfile.gettempdir(), f"rap_test_model_providers_{os.getpid()}.json"),
 )
 
+# Same again for the agent registry and job history: sessions constructed
+# without mocks would otherwise read the developer's real agent health and
+# replay real job history into test hubs (conversation_hub/migrations.py
+# imports it on construction), and write fictional jobs back into both.
+os.environ.setdefault(
+    "AGENT_REGISTRY_FILE",
+    os.path.join(tempfile.gettempdir(), f"rap_test_agent_registry_{os.getpid()}.json"),
+)
+os.environ.setdefault(
+    "AGENT_HISTORY_FILE",
+    os.path.join(tempfile.gettempdir(), f"rap_test_agent_history_{os.getpid()}.json"),
+)
+
+# Persisted UI/voice state. Tests that construct sessions or drive web
+# actions save these, which would otherwise overwrite the developer's real
+# settings (voice mode, mic mute, selected voice) on every run.
+for _name, _file in (
+    ("APP_STATE_FILE", "app_state.json"),
+    ("S2S_MIC_MUTE_FILE", "s2s_mic_mute.json"),
+    ("S2S_MIC_MUTE_STATUS_FILE", "s2s_mic_mute_status.json"),
+    ("S2S_VOICE_FILE", "s2s_voice.txt"),
+    ("S2S_VOICE_MODE_FILE", "s2s_input_mode.json"),
+    ("S2S_VOICE_MODE_STATUS_FILE", "s2s_input_mode_status.json"),
+    ("S2S_ANNOUNCE_FILE", "s2s_announce.json"),
+):
+    os.environ.setdefault(
+        _name, os.path.join(tempfile.gettempdir(), f"rap_test_{os.getpid()}_{_file}")
+    )
+
+
+@pytest.fixture(autouse=True)
+def _sandboxed_instance_endpoint(tmp_path, monkeypatch):
+    """Keep a test-started web server from replacing a running app's endpoint file."""
+    from remote_agent_protocol import process_guard
+
+    monkeypatch.setattr(process_guard, "_ENDPOINT_FILE", tmp_path / "jess.endpoint.json")
+
 
 @pytest.fixture(autouse=True)
 def _sandboxed_secret_store():

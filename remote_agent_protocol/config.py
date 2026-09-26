@@ -744,6 +744,9 @@ AGENT_COMPLETION_GRACE_SECS = float(_env("AGENT_COMPLETION_GRACE_SECS", "2"))
 # restart. Set AGENT_HISTORY_FILE="" to disable persistence entirely.
 AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_history.json"))
 
+# The control plane's last-known health/activity snapshot per agent.
+AGENT_REGISTRY_FILE = _env("AGENT_REGISTRY_FILE", str(DATA_DIR / "agent_registry.json"))
+
 # The AgentConversationHub's durable store -- one path shared by full voice
 # mode and Brain mode, so switching RAP_MODE between restarts never forks
 # conversation state into two independent histories. Overridable so the test
@@ -755,9 +758,7 @@ CONVERSATION_STORE_PATH = Path(
 # The model-provider registry (Phase C0) -- providers, cached catalogs, test
 # results, and role chains. Holds no secrets; overridable so the test suite
 # can sandbox it away from real application data (see tests/conftest.py).
-MODEL_PROVIDERS_PATH = Path(
-    _env("MODEL_PROVIDERS_PATH", str(DATA_DIR / "model_providers.json"))
-)
+MODEL_PROVIDERS_PATH = Path(_env("MODEL_PROVIDERS_PATH", str(DATA_DIR / "model_providers.json")))
 
 # Context-assembly and retention defaults for the conversation hub (Task 10).
 # CONVERSATION_RECENT_TURN_LIMIT is reserved for a future turn-count cap in

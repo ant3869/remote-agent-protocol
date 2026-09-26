@@ -13,6 +13,7 @@ import time
 from collections import deque
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 
 from loguru import logger
 
@@ -149,7 +150,7 @@ class VoiceSession:
             host_repo=cfg.AGENT_HOST_REPO,
             remotes=self._remotes,
         )
-        agent_registry = AgentRegistry(cfg.DATA_DIR / "agent_registry.json")
+        agent_registry = AgentRegistry(Path(cfg.AGENT_REGISTRY_FILE))
         self._control_plane = AgentControlPlane(
             build_adapters(self._bridge, cfg.AGENT_BACKENDS, cfg.AGENT_MACHINES),
             registry=agent_registry,

@@ -307,8 +307,9 @@ def write_lock(lock_file: Path = _LOCK_FILE) -> None:
     lock_file.write_text(str(os.getpid()))
 
 
-def write_endpoint(port: int, instance_id: str, path: Path = _ENDPOINT_FILE) -> None:
+def write_endpoint(port: int, instance_id: str, path: Path | None = None) -> None:
     """Publish just enough local state for a second launch to reopen the UI."""
+    path = path or _ENDPOINT_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
@@ -318,8 +319,9 @@ def write_endpoint(port: int, instance_id: str, path: Path = _ENDPOINT_FILE) -> 
     temporary.replace(path)
 
 
-def existing_instance_url(path: Path = _ENDPOINT_FILE) -> str | None:
+def existing_instance_url(path: Path | None = None) -> str | None:
     """Verify the saved endpoint belongs to this launch, even after port/PID reuse."""
+    path = path or _ENDPOINT_FILE
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
         port = record["port"]
