@@ -218,15 +218,20 @@ to local and are recorded as fallbacks.
 
 ## Model endpoints (local and cloud)
 
-`llm_endpoint.py` decides where each of the three model calls goes. The persona
-(`BRAIN`), the intent classifier (`INTENT`), and the orchestrator's own reasoning
-(`ORCHESTRATION`) each resolve their own chain: the configured cloud endpoint
-first, then the local Ollama one, which is always last.
+`llm_endpoint.py` decides where each of four model calls goes: the persona
+(`BRAIN`), the intent classifier (`INTENT`), the orchestrator's own reasoning
+(`ORCHESTRATION`), and narration (`NARRATION`, resident-classifier asides on
+background agent work; see `narration.py`). Each resolves its own chain in
+this order: an operator-assigned role chain first, then the legacy
+`CLOUD_*`/`OPENROUTER_API_KEY` env endpoint exactly as before, then the local
+Ollama one, which is always last in the legacy path (a role chain can put a
+local preset anywhere, since ordering there is data the operator chose, not a
+hard-coded rule).
 
-A cloud endpoint counts as configured only when base URL, key, and model are all
-present -- a half-configured one would fall back on every turn, which is slower
-than never trying. Nothing is provider-specific: any endpoint that speaks
-`/chat/completions` works.
+A cloud endpoint counts as configured only when base URL, key, and model are
+all present -- a half-configured one would fall back on every turn, which is
+slower than never trying. Nothing is provider-specific: any endpoint that
+speaks `/chat/completions` works.
 
 The request shapes are not interchangeable, so each caller rebuilds rather than
 forwards. Ollama's `keep_alive`, `options`, `think`, and `format`-as-JSON-schema
@@ -234,6 +239,40 @@ are its own extensions and a hosted API rejects unknown fields; the classifier's
 schema travels as `response_format` instead. The persona falls back only *before*
 its first token -- once the user is hearing a reply, switching models mid-sentence
 would talk over itself.
+
+### Model providers and role assignment (Phase C0)
+
+`model_providers.py` is the registry of configured providers (`data/model_providers.json`,
+schema-versioned, atomic write): presets (base URL, auth style, models/key-info
+paths -- verified against each provider's current docs, not guessed), cached
+model catalogs, cached test results, and each role's ordered fallback chain.
+It holds no secrets by construction -- `ProviderConfig` has no key-shaped
+field at all, and loading a payload drops any stray `api_key`/`token`/etc.
+
+`secret_store.py` is the only place a provider's API key lives: Windows
+Credential Manager (`win32cred`), one generic credential per provider under
+target `RAP/model-provider/<id>`. There is no plaintext fallback -- if
+Credential Manager is unavailable, saving a key fails with a clear error
+rather than writing it anywhere else. `install_log_redaction()` scrubs any
+key this module has ever handed out (via `set_key` or `get_key`) out of every
+loguru sink.
+
+`provider_tests.py` runs two staged pipelines, each stage gated on the one
+before it and bounded by its own timeout: a provider test (reach -> authenticate
+-> catalog) and a model test (chat -> tool call -> JSON mode). Every stage
+result's `detail`/`hint` is redacted through `secret_store` before it is
+returned, cached, or published, so a leaked key can't surface even via an
+HTTP error body or an exception message.
+
+`web_gui.py` exposes this over the existing CSRF'd `/api/action` dispatcher
+(`provider_save`, `provider_delete`, `provider_test`, `provider_refresh_models`,
+`model_test`, `role_assign`, `import_env`) and a read-only `GET /api/providers`.
+Test pipelines run on a background thread and publish their result over the
+existing event stream (`provider_test_result`/`model_test_result`/
+`model_assignment`); the browser side lives in the "Models & providers"
+settings section (`web_app/index.html`, `web_app/app.js`). The key never
+appears in `/api/providers`, `/api/status`, the event stream, or the
+diagnostics export.
 
 ## What is solid
 

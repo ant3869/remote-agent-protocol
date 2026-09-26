@@ -21,6 +21,19 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - `subprocess_resolution` module centralizing backend-executable resolution
   (previously duplicated in `agent_bridge.py` and `remote_host.py`); `doctor`
   now warns when a backend resolves to an unexpected binary elsewhere on PATH.
+- Model providers and role assignment (Phase C0): hold any number of
+  OpenAI-compatible providers at once, with presets for OpenRouter, 9Router,
+  OpenAI, Anthropic, Gemini, xAI, Groq, DeepSeek, Mistral, Together, Ollama,
+  and LM Studio. API keys live only in Windows Credential Manager
+  (`secret_store.py`), never in `.env`, JSON, logs, or any API response. A
+  staged test pipeline (`provider_tests.py`) checks reach, auth, and catalog
+  for a provider, and chat, tool-call, and JSON-mode support for a model.
+  Assign an ordered fallback chain per role (Butler, Intent, Orchestration,
+  Narration) from the new "Models & providers" settings section; assignments
+  apply on the next turn (`llm_endpoint.get_registry()`/`role_endpoint()`).
+  Existing `CLOUD_*`/`OPENROUTER_API_KEY` env config keeps working unchanged
+  when no role is assigned, and a one-time "Import from .env" action can move
+  it into the new registry without ever editing `.env` itself.
 
 ### Fixed
 
