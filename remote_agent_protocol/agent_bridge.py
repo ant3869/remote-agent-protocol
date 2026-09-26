@@ -1592,8 +1592,9 @@ class AgentBridge:
         )
         proc = await client.start_job(request)
         self._procs[job.job_id] = proc
-        job.status = STATUS_RUNNING
-        job.state = STATE_STARTED
+        if job.status != STATUS_CANCELLED:
+            job.status = STATUS_RUNNING
+            job.state = STATE_STARTED
         job._launch_done.set()
         self._emit_job(job, "started")
         logger.info(f"Agent job {job.job_id} [{job.agent}] started on {job.machine}: {job.task}")
@@ -1759,9 +1760,13 @@ class AgentBridge:
 
         self._procs[job.job_id] = proc
         # A job that waited in _launch_and_run was parked at STATUS_WAITING;
-        # restore the normal running state now that it's actually launching.
-        job.status = STATUS_RUNNING
-        job.state = STATE_STARTED
+        # restore the normal running state now that it's actually launching --
+        # unless a cancel landed while the spawn was awaited. cancel() is
+        # waiting on _launch_done to terminate this process, and the job must
+        # finish as cancelled, not as a failure of the killed process.
+        if job.status != STATUS_CANCELLED:
+            job.status = STATUS_RUNNING
+            job.state = STATE_STARTED
         job._launch_done.set()
         self._emit_job(job, "started")
         logger.info(f"Agent job {job.job_id} [{job.agent}] started: {job.task}")
@@ -1822,17 +1827,23 @@ class AgentBridge:
         proactor loop ("I/O operation on closed pipe") and leaks the child
         process on every platform.
         """
-        for job_id in list(self._procs):
-            await self.cancel(job_id)
+        # Every active job, not only those with a process yet: one still
+        # launching would otherwise spawn its child after shutdown and leak it.
+        # Concurrently, since a job queued behind a session lock only launches
+        # once the job ahead of it is cancelled.
+        active = [job_id for job_id, job in self._jobs.items() if job.status in _ACTIVE_STATUSES]
+        await asyncio.gather(*(self.cancel(job_id) for job_id in active))
         tasks = [task for task in self._tasks if not task.done()]
-        if not tasks:
-            return
-        # The streaming tasks observe EOF + exit code and close the transports.
-        _, pending = await asyncio.wait(tasks, timeout=self._kill_grace_secs + 5.0)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        if tasks:
+            # The streaming tasks observe EOF + exit code and close the transports.
+            _, pending = await asyncio.wait(tasks, timeout=self._kill_grace_secs + 5.0)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        # A task's discard callback runs a loop tick after it finishes; drop
+        # finished ones now so nothing outlives shutdown in the bookkeeping.
+        self._tasks.difference_update({task for task in self._tasks if task.done()})
 
     # -- internals ------------------------------------------------------------
 
@@ -2367,6 +2378,8 @@ class AgentBridge:
 
     def _apply_status(self, job: AgentJob, status: dict, *, force: bool = False) -> None:
         """Fold normalized status into a job and emit one progress event."""
+        if job.status == STATUS_CANCELLED:
+            return  # output still draining after a cancel must not revive the job
         state = status["state"]
         before = (job.state, job.action, job.tool, job.step, job.last_completed_step)
         for field_name in (*_STATUS_TEXT_FIELDS, "step", "step_total"):

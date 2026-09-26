@@ -60,7 +60,9 @@ class PureHelperTests(unittest.TestCase):
         self.assertIsNone(
             agent_bridge.extract_answered_model("The model can't answer that right now.")
         )
-        self.assertIsNone(agent_bridge.extract_answered_model("Loaded 65 providers and 1371 models"))
+        self.assertIsNone(
+            agent_bridge.extract_answered_model("Loaded 65 providers and 1371 models")
+        )
 
     def test_build_command_substitutes_task_and_python(self):
         cmd = agent_bridge.build_command(["{python}", "run", "{task}"], "do a thing")
@@ -1508,6 +1510,39 @@ class BridgeLifecycleTests(unittest.TestCase):
         job = self._run(scenario())
         self.assertEqual(job.status, agent_bridge.STATUS_CANCELLED)
         self.assertIn("finished", [e["event"] for e in events])
+
+    def test_shutdown_stops_a_job_that_has_not_spawned_yet(self):
+        """A job still launching when shutdown starts must not leak its child."""
+        events: list[dict] = []
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(MOCK_BACKEND, events.append, kill_grace_secs=0.5)
+            job_id = await bridge.start("mock", "sleep:30 never finishes")
+            await bridge.shutdown()
+            self.assertEqual(bridge._procs, {})
+            self.assertEqual(bridge._tasks, set())
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_CANCELLED)
+        self.assertIn("finished", [e["event"] for e in events])
+
+    def test_a_cancel_during_launch_finishes_as_cancelled_not_failed(self):
+        """The spawn is awaited; a cancel landing then must not be overwritten."""
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(MOCK_BACKEND, lambda _e: None, kill_grace_secs=0.5)
+            job_id = await bridge.start("mock", "sleep:30 never finishes")
+            await asyncio.sleep(0)  # the launch task reaches its first await
+            await bridge.cancel(job_id)
+            for _ in range(200):
+                if bridge.get(job_id).finished_at:
+                    break
+                await asyncio.sleep(0.02)
+            return bridge.get(job_id)
+
+        job = self._run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_CANCELLED)
 
     def test_shutdown_with_no_jobs_is_a_no_op(self):
         async def scenario():
