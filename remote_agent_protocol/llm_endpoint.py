@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -183,6 +184,35 @@ def _role_chain_endpoints(kind: str) -> tuple[Endpoint, ...]:
             )
         )
     return tuple(endpoints)
+
+
+def role_chain(kind: str) -> tuple[Endpoint, ...]:
+    """``kind``'s assigned role chain as endpoints; empty when nothing usable is assigned."""
+    return _role_chain_endpoints(kind)
+
+
+# Which endpoint most recently answered each caller, for the settings panel.
+# Process-local on purpose: it describes this run, not a persisted fact.
+_last_answers: dict[str, dict[str, str]] = {}
+
+
+def record_answer(kind: str, endpoint: Endpoint) -> None:
+    """Note that ``endpoint`` just answered a ``kind`` call."""
+    _last_answers[kind] = {
+        "providerId": endpoint.provider_id,
+        "label": endpoint.label,
+        "model": endpoint.model,
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+def last_answers() -> dict[str, dict[str, str]]:
+    """The last endpoint that answered each role, keyed by role name (``butler``...)."""
+    return {
+        _ROLE_FOR_KIND[kind]: dict(answer)
+        for kind, answer in _last_answers.items()
+        if kind in _ROLE_FOR_KIND
+    }
 
 
 def role_endpoint(kind: str) -> Endpoint | None:

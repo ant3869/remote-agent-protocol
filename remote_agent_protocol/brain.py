@@ -1193,6 +1193,7 @@ class BrainSession:
                 async for delta in self._stream_from(endpoint):
                     spoke = True
                     yield delta
+                llm_endpoint.record_answer(llm_endpoint.BRAIN, endpoint)
                 return
             except Exception as exc:
                 if spoke or index + 1 >= len(endpoints):
@@ -1242,7 +1243,9 @@ class BrainSession:
         endpoints = self._endpoints()
         for index, endpoint in enumerate(endpoints):
             try:
-                return await self._call_endpoint(endpoint)
+                reply = await self._call_endpoint(endpoint)
+                llm_endpoint.record_answer(llm_endpoint.BRAIN, endpoint)
+                return reply
             except Exception as exc:
                 if index + 1 >= len(endpoints):
                     raise

@@ -558,8 +558,15 @@ function renderRoleAssignment(data) {
     const chain = (data.roles || {})[role] || [];
     const row = document.createElement("div");
     row.className = "role-assignment-row";
-    const chips = chain.map((entry, index) => `<span class="role-chain-chip">${escapeHtml(providerById(entry.provider_id)?.label || entry.provider_id)}: ${escapeHtml(entry.model)}<button type="button" class="icon-button" data-role="${role}" data-remove-index="${index}" aria-label="Remove">&times;</button></span>`).join("");
-    row.innerHTML = `<strong>${PROVIDER_ROLE_LABELS[role]}</strong><div class="role-chain-chips">${chips || '<span class="muted">Unassigned -- falls back to the local model.</span>'}</div>
+    const chips = chain.map((entry, index) => {
+      const label = `${providerById(entry.provider_id)?.label || entry.provider_id}: ${entry.model}`;
+      const earlier = index > 0 ? `<button type="button" class="icon-button" data-role="${role}" data-move-index="${index}" data-move-by="-1" aria-label="Try ${escapeHtml(label)} earlier">&lsaquo;</button>` : "";
+      const later = index < chain.length - 1 ? `<button type="button" class="icon-button" data-role="${role}" data-move-index="${index}" data-move-by="1" aria-label="Try ${escapeHtml(label)} later">&rsaquo;</button>` : "";
+      return `<span class="role-chain-chip">${earlier}<span>${index + 1}. ${escapeHtml(label)}</span>${later}<button type="button" class="icon-button" data-role="${role}" data-remove-index="${index}" aria-label="Remove ${escapeHtml(label)}">&times;</button></span>`;
+    }).join("");
+    const answered = (data.lastAnswers || {})[role];
+    const answeredLine = answered ? `<small class="muted role-last-answer">Last answered by ${escapeHtml(answered.label)} (${escapeHtml(answered.model)}) at ${escapeHtml(fmtClock(answered.at))}</small>` : "";
+    row.innerHTML = `<strong>${PROVIDER_ROLE_LABELS[role]}</strong>${answeredLine}<div class="role-chain-chips">${chips || '<span class="muted">Unassigned -- falls back to the local model.</span>'}</div>
       <div class="role-chain-add"><select data-role-add-provider="${role}"></select><input type="text" placeholder="model id" data-role-add-model="${role}" /><button class="button quiet" type="button" data-role-add-btn="${role}">Add</button></div>`;
     const providerSelect = row.querySelector(`[data-role-add-provider="${role}"]`);
     providerSelect.replaceChildren(...(data.providers || []).filter((p) => p.enabled).map((provider) => {
@@ -582,6 +589,15 @@ async function addRoleChainEntry(role) {
   existing.push({ provider_id: providerSelect.value, model });
   const result = await post("role_assign", { role, chain: existing });
   if (!result.ok) alert(result.error || "Could not update this role.");
+}
+
+async function moveRoleChainEntry(role, index, by) {
+  const existing = ((state.providers?.roles || {})[role] || []).map((entry) => ({ provider_id: entry.provider_id, model: entry.model }));
+  const target = index + by;
+  if (target < 0 || target >= existing.length) return;
+  [existing[index], existing[target]] = [existing[target], existing[index]];
+  const result = await post("role_assign", { role, chain: existing });
+  if (!result.ok) alert(result.error || "Could not reorder this role.");
 }
 
 async function removeRoleChainEntry(role, index) {
@@ -622,6 +638,8 @@ function bindProviderSettings() {
   $("roleAssignmentList")?.addEventListener("click", (event) => {
     const addButton = event.target.closest("[data-role-add-btn]");
     if (addButton) return addRoleChainEntry(addButton.dataset.roleAddBtn);
+    const moveButton = event.target.closest("[data-move-index]");
+    if (moveButton) return moveRoleChainEntry(moveButton.dataset.role, Number(moveButton.dataset.moveIndex), Number(moveButton.dataset.moveBy));
     const removeButton = event.target.closest("[data-remove-index]");
     if (removeButton) return removeRoleChainEntry(removeButton.dataset.role, Number(removeButton.dataset.removeIndex));
   });

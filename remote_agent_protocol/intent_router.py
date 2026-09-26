@@ -760,30 +760,43 @@ class IntentRouter:
 
         The local classifier shares a GPU with the persona and times out under
         that pressure; a hosted one does not, and routing every turn correctly
-        matters more than where it runs. A failure falls back rather than
-        degrading the turn to chat.
+        matters more than where it runs. An assigned Intent role chain is
+        tried in order ahead of the legacy ``CLOUD_*`` endpoint. A failure falls
+        back rather than degrading the turn to chat.
         """
-        cloud = llm_endpoint.cloud_endpoint(llm_endpoint.INTENT)
-        if cloud is not None:
+        assigned = llm_endpoint.role_chain(llm_endpoint.INTENT)
+        legacy = llm_endpoint.cloud_endpoint(llm_endpoint.INTENT)
+        remote = assigned or ((legacy,) if legacy is not None else ())
+        for endpoint in remote:
             try:
-                return await classify_with_cloud(
-                    text, endpoint=cloud, timeout_secs=cfg.CLOUD_LLM_TIMEOUT_SECS
+                verdict = await classify_with_cloud(
+                    text, endpoint=endpoint, timeout_secs=cfg.CLOUD_LLM_TIMEOUT_SECS
                 )
             except Exception as exc:
-                if llm_endpoint.cloud_only_enabled(llm_endpoint.INTENT):
-                    raise RuntimeError(
-                        f"{cloud.label} classifier failed in cloud-only mode"
-                    ) from exc
-                logger.warning(f"{cloud.label} classifier failed ({exc}); using the local one")
-        return await classify_with_ollama(
+                logger.warning(f"{endpoint.label} classifier failed ({exc})")
+                continue
+            llm_endpoint.record_answer(llm_endpoint.INTENT, endpoint)
+            return verdict
+        if remote and not assigned and llm_endpoint.cloud_only_enabled(llm_endpoint.INTENT):
+            raise RuntimeError(f"{remote[0].label} classifier failed in cloud-only mode")
+        if remote:
+            logger.warning("Every remote classifier failed; using the local one")
+        verdict = await classify_with_ollama(
             text,
             host=cfg.OLLAMA_HOST,
             model=cfg.INTENT_MODEL,
             timeout_secs=cfg.INTENT_TIMEOUT_SECS,
         )
+        llm_endpoint.record_answer(
+            llm_endpoint.INTENT, llm_endpoint.local_endpoint(llm_endpoint.INTENT)
+        )
+        return verdict
 
     @staticmethod
     async def _default_warm_classify(text: str) -> dict:
+        if llm_endpoint.role_chain(llm_endpoint.INTENT):
+            # Nothing local to preload; one real call proves the chain works.
+            return await IntentRouter._default_classify(text)
         if llm_endpoint.cloud_only_enabled(llm_endpoint.INTENT):
             cloud = llm_endpoint.cloud_endpoint(llm_endpoint.INTENT)
             assert cloud is not None

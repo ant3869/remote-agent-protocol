@@ -521,7 +521,10 @@ class Narrator:
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
-            return _clean_line(data["choices"][0]["message"]["content"])
+            line = _clean_line(data["choices"][0]["message"]["content"])
+            if line:
+                llm_endpoint.record_answer(llm_endpoint.NARRATION, endpoint)
+            return line
         except (TimeoutError, aiohttp.ClientError, KeyError, IndexError, ValueError) as e:
             logger.debug(f"Narration fell back to a stock line: {e}")
             return ""

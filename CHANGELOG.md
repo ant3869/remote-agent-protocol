@@ -53,6 +53,11 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - The test suite no longer reads or writes real application data: provider
   keys, the agent registry, job history, UI and s2s state, and the
   single-instance endpoint file are sandboxed per test run.
+- Intent and Orchestration role assignments were saved but never used: the
+  classifier and orchestration reasoning only read the legacy `CLOUD_*`
+  settings. Both now try their assigned chain first, in order, then fall back
+  to the local model. The role editor shows which provider and model last
+  answered each role, and chain entries can be reordered.
 - A job that hit a quota error looked failed while its process was still
   being stopped, so a cancel in that window was ignored.
 - A cancel that landed while a job's process was being spawned was

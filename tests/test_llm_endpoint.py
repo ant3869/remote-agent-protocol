@@ -275,9 +275,7 @@ def test_role_chain_skips_a_disabled_provider(registry):
 
 
 def test_role_chain_skips_a_missing_provider(registry):
-    registry.set_role_chain(
-        "butler", [mp.RoleChainEntry(provider_id="ghost-provider", model="m")]
-    )
+    registry.set_role_chain("butler", [mp.RoleChainEntry(provider_id="ghost-provider", model="m")])
 
     result = llm_endpoint.chain(llm_endpoint.BRAIN)
 
@@ -340,3 +338,93 @@ def test_narration_uses_its_own_role_assignment_when_configured(registry):
     result = llm_endpoint.chain(llm_endpoint.NARRATION)
 
     assert [e.model for e in result] == ["vendor/small-model"]
+
+
+def _assign(registry, role: str, *models: str) -> None:
+    registry.upsert_provider(_openrouter_provider())
+    registry.set_role_chain(
+        role, [mp.RoleChainEntry(provider_id="openrouter", model=model) for model in models]
+    )
+
+
+def _router_http(seen: list[tuple[str, str]], refuse: set[str]):
+    class Http:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def post(self, url, json, headers=None):
+            seen.append((url, json.get("model", "")))
+            if json.get("model") in refuse:
+                return _Resp({}, status=429)
+            if "/api/chat" in url:
+                return _Resp({"message": {"content": "local answer"}})
+            return _Resp({"choices": [{"message": {"content": f"from {json['model']}"}}]})
+
+    return Http
+
+
+def test_orchestration_uses_its_assigned_role_chain_in_order(registry, cloud):
+    """The Orchestration role assignment was ignored: only CLOUD_* was read."""
+    import asyncio
+
+    from remote_agent_protocol.orchestration.providers.local import LocalProvider
+
+    _assign(registry, "orchestration", "vendor/first", "vendor/second")
+    seen: list[tuple[str, str]] = []
+    provider = LocalProvider(session_factory=_router_http(seen, refuse={"vendor/first"}))
+
+    result = asyncio.run(provider.complete("decide something"))
+
+    assert result.text == "from vendor/second"
+    assert [model for _url, model in seen] == ["vendor/first", "vendor/second"]
+    assert llm_endpoint.last_answers()["orchestration"]["model"] == "vendor/second"
+
+
+def test_intent_classification_uses_its_assigned_role_chain(registry, monkeypatch):
+    import asyncio
+
+    from remote_agent_protocol import intent_router
+
+    _assign(registry, "intent", "vendor/router")
+    calls: list[str] = []
+
+    async def fake_cloud(text, *, endpoint, timeout_secs):
+        calls.append(endpoint.model)
+        return {"intent": "chat", "category": "none", "confidence": 0.9}
+
+    async def no_local(*_a, **_k):
+        raise AssertionError("an assigned chain that answers must not reach the local model")
+
+    monkeypatch.setattr(intent_router, "classify_with_cloud", fake_cloud)
+    monkeypatch.setattr(intent_router, "classify_with_ollama", no_local)
+
+    verdict = asyncio.run(intent_router.IntentRouter._default_classify("hello"))
+
+    assert verdict["intent"] == "chat"
+    assert calls == ["vendor/router"]
+    assert llm_endpoint.last_answers()["intent"]["model"] == "vendor/router"
+
+
+def test_intent_falls_back_to_the_local_model_when_the_chain_fails(registry, monkeypatch):
+    import asyncio
+
+    from remote_agent_protocol import intent_router
+
+    _assign(registry, "intent", "vendor/router")
+
+    async def failing_cloud(text, *, endpoint, timeout_secs):
+        raise RuntimeError("401")
+
+    async def local(text, *, host, model, timeout_secs):
+        return {"intent": "chat", "category": "none", "confidence": 0.5, "local": True}
+
+    monkeypatch.setattr(intent_router, "classify_with_cloud", failing_cloud)
+    monkeypatch.setattr(intent_router, "classify_with_ollama", local)
+
+    verdict = asyncio.run(intent_router.IntentRouter._default_classify("hello"))
+
+    assert verdict["local"] is True
+    assert llm_endpoint.last_answers()["intent"]["model"] == cfg.INTENT_MODEL

@@ -274,6 +274,15 @@ settings section (`web_app/index.html`, `web_app/app.js`). The key never
 appears in `/api/providers`, `/api/status`, the event stream, or the
 diagnostics export.
 
+Every caller honors its role: the persona (Butler) streams through
+`llm_endpoint.chain()`, and the intent classifier and orchestration reasoning
+try `llm_endpoint.role_chain()` entries in order before the legacy `CLOUD_*`
+endpoint, falling back to the local model when every remote entry fails.
+Each successful call is noted with `llm_endpoint.record_answer()`, and
+`/api/providers` returns `lastAnswers` (per role: provider label, model,
+time) so the role editor shows what actually answered. Chain entries can be
+reordered in place.
+
 ## What is solid
 
 - Voice and typed input use the same session and routing path.

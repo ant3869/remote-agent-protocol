@@ -87,12 +87,16 @@ class LocalProvider(ModelProvider):
 
         ``capability`` is unused -- there is only one local model configured.
         """
-        cloud = llm_endpoint.cloud_endpoint(llm_endpoint.ORCHESTRATION)
-        if cloud is not None:
+        assigned = llm_endpoint.role_chain(llm_endpoint.ORCHESTRATION)
+        legacy = llm_endpoint.cloud_endpoint(llm_endpoint.ORCHESTRATION)
+        for endpoint in assigned or ((legacy,) if legacy is not None else ()):
             try:
-                return await self._complete_cloud(cloud, prompt, max_tokens=max_tokens)
+                result = await self._complete_cloud(endpoint, prompt, max_tokens=max_tokens)
             except Exception as exc:
-                logger.warning(f"{cloud.label} reasoning failed ({exc}); using the local model")
+                logger.warning(f"{endpoint.label} reasoning failed ({exc}); trying the next")
+                continue
+            llm_endpoint.record_answer(llm_endpoint.ORCHESTRATION, endpoint)
+            return result
         payload = {
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
@@ -106,6 +110,10 @@ class LocalProvider(ModelProvider):
                 resp.raise_for_status()
                 data = await resp.json()
         text = str(data.get("message", {}).get("content", ""))
+        llm_endpoint.record_answer(
+            llm_endpoint.ORCHESTRATION,
+            llm_endpoint.Endpoint(base_url=self._host, model=self._model, cloud=False),
+        )
         return CompletionResult(text=text, model=self._model)
 
     async def _complete_cloud(

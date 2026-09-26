@@ -1821,6 +1821,7 @@ class WebVoiceApp:
                 role: [e.to_dict() for e in registry.get_role_chain(role)]
                 for role in model_providers.ROLES
             },
+            "lastAnswers": llm_endpoint.last_answers(),
             "presets": {
                 preset_id: {
                     "id": preset.id,
