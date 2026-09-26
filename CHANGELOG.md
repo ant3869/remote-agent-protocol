@@ -82,6 +82,9 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   settings. Both now try their assigned chain first, in order, then fall back
   to the local model. The role editor shows which provider and model last
   answered each role, and chain entries can be reordered.
+- The Butler echoed a model's malformed tool-call arguments back to the
+  provider, which rejected the whole turn; they are now replaced with `{}` in
+  history and the tool reports the problem to the model.
 - A job that hit a quota error looked failed while its process was still
   being stopped or its heartbeat was being cleaned up, so a cancel in that
   window was ignored and a model failover could be seen as a failure.

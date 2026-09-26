@@ -849,7 +849,11 @@ BUTLER_RULES = (
     " or task_status, and use retry_task for another attempt at the same task. start_task"
     " instructions must be complete on their own; the agent sees nothing of this"
     " conversation. If a task failed and the user still wants it done, retry it on another"
-    " agent that is up. If a tool says a task needs confirmation, ask the user to confirm."
+    " agent that is up. When they say to keep trying agents until one works, retry the most"
+    " recent failed task on the next agent that is up right away -- don't ask which task."
+    " In 'have Codex check on Code Puppy', Codex does the work and Code Puppy is only the"
+    " subject: start the task on Codex. If a tool says a task needs confirmation, ask the"
+    " user to confirm."
     " Plain conversation needs no tools. Keep spoken replies to one or two sentences."
 )
 # The control plane's last-known health/activity snapshot per agent.

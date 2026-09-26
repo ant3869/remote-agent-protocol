@@ -587,3 +587,47 @@ async def test_the_butler_sends_reasoning_effort_and_retries_without_it_on_a_400
     assert reply == "Hello."
     assert model.requests[0]["reasoning_effort"] == "low"
     assert "reasoning_effort" not in model.requests[1]
+
+
+@pytest.mark.asyncio
+async def test_malformed_tool_arguments_never_reach_the_provider_again():
+    """A provider rejects history with non-JSON arguments; the loop must send valid JSON."""
+    from aiohttp import web
+
+    bridge = FakeBridge()
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), FakeDispatcher(bridge))
+
+    class StrictModel(FakeModel):
+        async def handle(self, request):
+            body = await request.json()
+            self.requests.append(body)
+            for message in body["messages"]:
+                for call in message.get("tool_calls") or ():
+                    try:
+                        json.loads(call["function"]["arguments"])
+                    except ValueError:
+                        return web.Response(status=400, text="`arguments` must be valid JSON")
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            if len(self.requests) == 1:
+                call = {
+                    "index": 0,
+                    "id": "c1",
+                    "function": {"name": "list_tasks", "arguments": "{bro"},
+                }
+                chunks = [{"choices": [{"delta": {"tool_calls": [call]}}]}]
+            else:
+                result = json.loads(body["messages"][-1]["content"])
+                chunks = [{"choices": [{"delta": {"content": result["summary"]}}]}]
+            for chunk in chunks:
+                await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            await response.write_eof()
+            return response
+
+    model = StrictModel(lambda m, t: Say("unused"))
+    reply = await _run_loop(model, box)
+
+    assert reply == "The arguments for list_tasks were not valid JSON."
+    echoed = model.requests[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"]
+    assert echoed == "{}"

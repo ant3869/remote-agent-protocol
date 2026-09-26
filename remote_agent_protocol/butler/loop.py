@@ -130,6 +130,11 @@ class ButlerLoop:
             calls = [current.tool_calls[i] for i in sorted(current.tool_calls)]
             for index, call in enumerate(calls):
                 call["id"] = call["id"] or f"call_{round_number}_{index}"
+                # Providers validate the history they are sent: echoing a
+                # call whose arguments aren't a JSON object back to them
+                # fails the whole turn. The tool still sees the raw text and
+                # reports the problem to the model as its result.
+                call["history_arguments"] = _normalized_arguments(call["arguments"])
             conversation.append(
                 {
                     "role": "assistant",
@@ -140,7 +145,7 @@ class ButlerLoop:
                             "type": "function",
                             "function": {
                                 "name": call["name"],
-                                "arguments": call["arguments"] or "{}",
+                                "arguments": call["history_arguments"],
                             },
                         }
                         for call in calls
@@ -242,6 +247,15 @@ class ButlerLoop:
             if text:
                 current.text += text
                 yield text
+
+
+def _normalized_arguments(raw: str) -> str:
+    """``raw`` if it is a JSON object, else ``"{}"`` -- always valid to send back."""
+    try:
+        value = json.loads(raw or "{}")
+    except ValueError:
+        return "{}"
+    return raw if isinstance(value, dict) else "{}"
 
 
 def _safe_json(raw: str) -> dict:
