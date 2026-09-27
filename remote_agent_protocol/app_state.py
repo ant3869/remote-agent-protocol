@@ -48,8 +48,12 @@ class AppState:
     avatar_reduced_motion: bool | None = None
     avatar_show_state: bool = True
     avatar_panel_collapsed: bool = False
+    # "stage": the avatar is the centerpiece with chat in a side drawer;
+    # "console": chat-first, avatar small in the context rail.
+    ui_layout: str = "stage"
 
 
+UI_LAYOUTS = frozenset({"stage", "console"})
 _SAVE_LOCK = threading.Lock()
 
 AVATAR_QUALITIES = frozenset({"low", "medium", "high"})
@@ -74,6 +78,11 @@ def _tri_bool_or(value: object, default: bool | None) -> bool | None:
 
 def _avatar_id_or(value: object, default: str) -> str:
     return value if isinstance(value, str) and _AVATAR_ID_RE.fullmatch(value) else default
+
+
+def ui_layout_or(value: object, default: str = "stage") -> str:
+    """``value`` when it names a known layout, else ``default``."""
+    return value if isinstance(value, str) and value in UI_LAYOUTS else default
 
 
 def _quality_or(value: object, default: str) -> str:
@@ -204,6 +213,7 @@ def load_state(path: str | Path) -> AppState:
         agent_prompts={
             str(key): value for key, value in agent_prompts.items() if isinstance(value, str)
         },
+        ui_layout=ui_layout_or(raw.get("ui_layout")),
     )
     return normalize_avatar_settings(raw, state)
 

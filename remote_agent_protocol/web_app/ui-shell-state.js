@@ -99,7 +99,31 @@
     return false;
   }
 
+  const LAYOUTS = Object.freeze(["stage", "console"]);
+
+  function normalizeLayout(value, fallback = "stage") {
+    return LAYOUTS.includes(value) ? value : fallback;
+  }
+
+  function nextLayout(current) {
+    return normalizeLayout(current) === "stage" ? "console" : "stage";
+  }
+
+  // The server's saved choice wins; the browser copy only paints the first
+  // frame before the status payload arrives.
+  function layoutFromState(serverValue, localValue) {
+    return normalizeLayout(serverValue, normalizeLayout(localValue));
+  }
+
+  function slotFor(mode) {
+    return normalizeLayout(mode) === "stage" ? "avatarSlotStage" : "avatarSlotRail";
+  }
+
   root.RapUiShell = {
+    layoutFromState,
+    nextLayout,
+    normalizeLayout,
+    slotFor,
     applyResponsiveDisclosures,
     createMomentaryControl,
     healthSummary,

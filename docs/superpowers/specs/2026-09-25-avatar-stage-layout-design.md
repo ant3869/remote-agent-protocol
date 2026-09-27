@@ -1,7 +1,7 @@
 # Design: Avatar Stage Layout (Stage ↔ Console toggle)
 
 **Product:** Remote Agent Protocol
-**Status:** Proposed for user review
+**Status:** Implemented 2026-09-27 (approved by Ant)
 **Date:** 2026-09-25
 **Constraint carried forward:** `docs/notes/2026-09-17-control-plane-avatar-handoff.md`. Don't alter the Butler art, frame sequence, or state mapping.
 

@@ -1,0 +1,111 @@
+/* Stage layout: the avatar is the centerpiece of the Control view and the
+   conversation sits in a drawer on the right. Console is the chat-first layout
+   from layout-v4.css, untouched. The same avatar panel element is moved between
+   #avatarSlotRail and #avatarSlotStage by app.js, so the renderer never restarts. */
+
+.layout-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-self: center;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+}
+.layout-toggle button {
+  min-height: 34px;
+  padding: 6px 11px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: 600 12px var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.layout-toggle button + button { border-left: 1px solid var(--border-subtle); }
+.layout-toggle button:hover { background: var(--surface-hover); color: var(--text-secondary); }
+.layout-toggle button[aria-pressed="true"] { background: rgba(167, 139, 250, 0.14); color: var(--text-primary); }
+.layout-toggle button:focus-visible { outline: 2px solid var(--accent-agent); outline-offset: -2px; }
+
+/* One more header column for the toggle, at every breakpoint layout-v4 defines. */
+.command-header { grid-template-columns: var(--frame-context) minmax(130px, .45fr) minmax(200px, 380px) max-content auto auto; }
+
+.stage-column { display: none; }
+
+.app-shell[data-layout="stage"] #controlView.active {
+  grid-template: "confirm confirm" auto "stage conversation" minmax(0, 1fr) / minmax(0, 1fr) clamp(320px, 28vw, 420px);
+}
+.app-shell[data-layout="stage"] .stage-column {
+  grid-area: stage;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-width: 0;
+  min-height: 0;
+  padding: 20px 28px;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 60% 55% at 50% 42%, rgba(96, 165, 250, 0.08), transparent 70%),
+    var(--surface-field);
+}
+.app-shell[data-layout="stage"] .activity-panel { display: none; }
+.app-shell[data-layout="stage"] .conversation-workbench { border-left: 1px solid var(--border-subtle); }
+.app-shell[data-layout="stage"] .conversation-workbench .chat-log { padding: 14px 16px; }
+.app-shell[data-layout="stage"] .conversation-workbench .message { max-width: 94%; }
+
+/* 512px frames: past ~560 CSS px they soften on a 1x display. */
+.avatar-slot-stage { width: min(62vh, 100%, 560px); }
+.avatar-slot-stage .avatar-panel { margin: 0; border: 0; background: transparent; }
+.avatar-slot-stage .avatar-panel-head { padding: 0 2px 8px; background: transparent; }
+.avatar-slot-stage .avatar-panel-body { padding: 0; }
+.avatar-slot-stage .avatar-canvas-host,
+.avatar-slot-stage .avatar-canvas-host canvas { width: 100%; max-height: none; min-height: 0; }
+.avatar-slot-stage .avatar-canvas-host {
+  aspect-ratio: 1 / 1;
+  border-radius: 22px;
+  box-shadow: 0 0 70px rgba(96, 165, 250, 0.12), 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+.avatar-slot-stage .avatar-status-row { justify-content: center; gap: 18px; padding-top: 10px; font-size: 13px; }
+
+.stage-caption {
+  max-width: min(64ch, 100%);
+  min-height: 1.5em;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1.5;
+  text-align: center;
+}
+.stage-caption.speaking { color: var(--text-primary); }
+
+@media (max-width: 1180px) {
+  .command-header { grid-template-columns: 220px minmax(120px, .4fr) minmax(160px, 1fr) max-content auto; }
+}
+@media (max-width: 900px) {
+  .command-header { grid-template-columns: 48px minmax(110px, .5fr) minmax(140px, 1fr) max-content auto; }
+  /* The rail only holds persona details once the avatar has moved to the
+     stage; give its height to the stage and the chat instead. */
+  .app-shell[data-layout="stage"]:has(#controlView.active) {
+    grid-template: "header header" var(--frame-header) "rail canvas" minmax(0, 1fr) "rail status" var(--frame-status) / var(--frame-rail) minmax(0, 1fr);
+  }
+  .app-shell[data-layout="stage"]:has(#controlView.active) .context-rail { display: none; }
+  .app-shell[data-layout="stage"] #controlView.active {
+    grid-template: "confirm" auto "stage" auto "conversation" minmax(0, 1fr) / minmax(0, 1fr);
+  }
+  .app-shell[data-layout="stage"] .stage-column { padding: 14px; }
+  .app-shell[data-layout="stage"] .conversation-workbench { min-height: 420px; border-left: 0; border-top: 1px solid var(--border-subtle); }
+  .avatar-slot-stage { width: min(34vh, 100%, 380px); }
+}
+@media (max-width: 620px) {
+  .command-header { grid-template-columns: 42px minmax(0, 1fr) auto max-content auto; }
+  .layout-toggle button { padding: 6px 8px; }
+  .app-shell[data-layout="stage"]:has(#controlView.active) {
+    grid-template: "header" var(--frame-header) "canvas" minmax(0, 1fr) "rail" var(--frame-rail) "status" var(--frame-status) / minmax(0, 1fr);
+  }
+  .app-shell[data-layout="stage"] .conversation-workbench { min-height: auto; }
+  .app-shell[data-layout="stage"] .conversation-workbench .chat-log { min-height: 45vh; }
+  .app-shell[data-layout="stage"] .avatar-slot-stage .avatar-panel { display: block; }
+  .avatar-slot-stage { width: min(40vh, 100%, 360px); }
+}

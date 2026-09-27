@@ -736,6 +736,7 @@ function handleEvent(event) {
     refreshProviders();
   }
   syncAvatarRuntime();
+  renderStageCaption();
 }
 
 function updateWakePhase(phase) {
@@ -896,9 +897,69 @@ function renderCompactHealth() {
   }
 }
 
+// -- Stage / Console layout ---------------------------------------------------
+// Stage makes the avatar the centerpiece with the chat in a drawer; Console is
+// the chat-first layout. The avatar panel element itself is moved between the
+// two slots, so its renderer keeps running through a switch.
+
+const LAYOUT_STORAGE_KEY = "rap.uiLayout";
+let serverLayoutApplied = false;
+
+function storedLayout() {
+  try {
+    return localStorage.getItem(LAYOUT_STORAGE_KEY);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function currentLayout() {
+  return document.querySelector(".app-shell")?.dataset.layout || "stage";
+}
+
+function applyLayout(mode, { persist = false } = {}) {
+  const next = uiShell.normalizeLayout(mode);
+  const shell = document.querySelector(".app-shell");
+  if (shell) shell.dataset.layout = next;
+  const panel = $("avatarPanel");
+  const slot = document.getElementById(uiShell.slotFor(next));
+  if (panel && slot && panel.parentElement !== slot) slot.appendChild(panel);
+  document.querySelectorAll("[data-layout-mode]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.layoutMode === next));
+  });
+  try {
+    localStorage.setItem(LAYOUT_STORAGE_KEY, next);
+  } catch (_error) {
+    // Only speeds up first paint; the server keeps the real choice.
+  }
+  if (persist) post("set_ui_layout", { mode: next });
+}
+
+function toggleLayout() {
+  serverLayoutApplied = true;
+  applyLayout(uiShell.nextLayout(currentLayout()), { persist: true });
+}
+
+// The saved choice arrives with the first status payload; after that the
+// operator's own toggles win.
+function syncLayoutFromStatus(status) {
+  if (serverLayoutApplied || !status?.uiLayout) return;
+  serverLayoutApplied = true;
+  const next = uiShell.layoutFromState(status.uiLayout, storedLayout());
+  if (next !== currentLayout()) applyLayout(next);
+}
+
+function renderStageCaption() {
+  const caption = $("stageCaption");
+  if (!caption) return;
+  caption.textContent = state.avatar.latestAssistantText || "";
+  caption.classList.toggle("speaking", Boolean(state.avatar.speaking));
+}
+
 function renderStatus() {
   const s = state.status;
   if (!s) return;
+  syncLayoutFromStatus(s);
   $("appShellTitle").textContent = s.appName;
   $("personaName").textContent = s.persona;
   $("personaBlurb").textContent = s.personaBlurb || "";
@@ -2062,6 +2123,7 @@ function commandPaletteItems() {
   items.push(
     { id: "action:focus-message", group: "Actions", label: "Focus message", hint: "Ctrl L", action: () => $("messageInput").focus() },
     { id: "action:toggle-mic", group: "Actions", label: "Toggle mic", hint: "Ctrl M", action: () => inputControls.run("mute", { muted: !state.status?.muted }) },
+    { id: "action:toggle-layout", group: "Actions", label: "Switch to Stage/Console layout", hint: "Ctrl Shift A", action: toggleLayout },
     { id: "action:cycle-voice-mode", group: "Actions", label: "Cycle voice mode", hint: "", action: () => inputControls.run("voice_mode", { mode: nextMode(state.status?.voiceMode, state.status?.mode) }) },
     { id: "action:new-chat", group: "Actions", label: "New chat", hint: "", action: () => { post("restart_chat"); } },
     { id: "action:refresh-memory", group: "Actions", label: "Refresh memory", hint: "", action: () => { navigateTo("memory"); post("refresh_memory", { query: $("memorySearch").value }); } },
@@ -2531,12 +2593,26 @@ function bind() {
       }
       return;
     }
+    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      toggleLayout();
+      return;
+    }
     if (event.ctrlKey && event.key.toLowerCase() === "l") $("messageInput").focus();
     if (event.ctrlKey && event.key.toLowerCase() === "m") inputControls.run("mute", { muted: !state.status?.muted });
   });
   bindProviderSettings();
+  document.querySelectorAll("[data-layout-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      serverLayoutApplied = true;
+      if (button.dataset.layoutMode !== currentLayout()) {
+        applyLayout(button.dataset.layoutMode, { persist: true });
+      }
+    });
+  });
 }
 
+applyLayout(uiShell.layoutFromState(undefined, storedLayout()));
 bind();
 poll();
 refreshProviders();

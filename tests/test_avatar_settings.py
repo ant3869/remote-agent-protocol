@@ -118,3 +118,45 @@ def test_saved_avatar_state_uses_snake_case_fields(tmp_path):
 
     assert raw["avatar_quality"] == "medium"
     assert "avatar" not in raw
+
+
+def test_ui_layout_defaults_to_stage_and_survives_a_round_trip(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"persona": "Jess"}', encoding="utf-8")
+    assert app_state.load_state(path).ui_layout == "stage"
+
+    path.write_text('{"ui_layout": "sideways"}', encoding="utf-8")
+    assert app_state.load_state(path).ui_layout == "stage"
+
+    app_state.save_state(path, app_state.AppState(ui_layout="console"))
+    assert app_state.load_state(path).ui_layout == "console"
+
+
+def test_set_ui_layout_action_validates_persists_and_reports(monkeypatch):
+    app = WebVoiceApp()
+    saved = []
+    monkeypatch.setattr(web_gui.app_state, "save_state", lambda path, state: saved.append(state))
+
+    result = app._action("set_ui_layout", {"mode": "console"})
+    bad = app._action("set_ui_layout", {"mode": "sideways"})
+
+    assert result["ok"] is True
+    assert result["status"]["uiLayout"] == "console"
+    assert saved[-1].ui_layout == "console"
+    assert bad["ok"] is False
+    assert bad["status"]["uiLayout"] == "console"
+
+
+def test_stage_layout_markup_is_wired():
+    from pathlib import Path
+
+    web = Path(web_gui.__file__).with_name("web_app")
+    html = (web / "index.html").read_text(encoding="utf-8")
+
+    assert 'data-layout="stage"' in html
+    assert 'id="avatarSlotRail"' in html and 'id="avatarSlotStage"' in html
+    assert 'data-layout-mode="stage"' in html and 'data-layout-mode="console"' in html
+    assert html.index("/layout-v4.css") < html.index("/layout-stage.css")
+    rail = html.index('id="avatarSlotRail"')
+    assert rail < html.index('id="avatarPanel"') < html.index('id="avatarSlotStage"')
+    assert (web / "layout-stage.css").is_file()

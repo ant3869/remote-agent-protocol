@@ -12,6 +12,12 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Stage layout for the Control Center (the new default): Butler large and
+  centered with a live caption of what he's saying, and the conversation in a
+  drawer on the right. A Stage/Console toggle in the header, `Ctrl+Shift+A`,
+  or the command palette switches to the chat-first Console layout and back
+  without reloading or restarting the avatar; the choice is saved across
+  restarts (`ui_layout`).
 - Tool-calling Butler for brain mode (`BUTLER_TOOLS_ENABLED`, off by default):
   one function-calling model on the Butler role decides every turn through
   tools -- list/check agents, start/retry/cancel tasks, task status and

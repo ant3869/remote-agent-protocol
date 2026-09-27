@@ -79,3 +79,17 @@ test("tab trapping wraps focus inside the command palette", () => {
   assert.equal(trapModalTab(backward, container), true);
   assert.equal(last.focusCalled, true);
 });
+
+test("layout helpers default to Stage and let the server's choice win", () => {
+  const { layoutFromState, nextLayout, normalizeLayout, slotFor } = globalThis.RapUiShell;
+  assert.equal(normalizeLayout("console"), "console");
+  assert.equal(normalizeLayout("nonsense"), "stage");
+  assert.equal(nextLayout("stage"), "console");
+  assert.equal(nextLayout("console"), "stage");
+  assert.equal(nextLayout(undefined), "console");
+  assert.equal(layoutFromState("console", "stage"), "console");
+  assert.equal(layoutFromState(undefined, "console"), "console");
+  assert.equal(layoutFromState("bogus", "bogus"), "stage");
+  assert.equal(slotFor("stage"), "avatarSlotStage");
+  assert.equal(slotFor("console"), "avatarSlotRail");
+});

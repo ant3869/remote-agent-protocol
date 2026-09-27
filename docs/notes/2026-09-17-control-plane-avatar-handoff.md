@@ -73,4 +73,6 @@ request before changing animation behavior.
 
   Reduced motion turns all of it off. The debug API's `setState` also accepts
   visual state names (`working`, `failed`) directly.
-
+- **Stage layout (2026-09-27).** The avatar now leads the Control view by default. It is
+  capped at 560 CSS px because the `runtime_512_v1` frames soften past that on a 1x
+  display. A `runtime_1024_v1` frame set would allow a larger stage.

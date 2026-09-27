@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import mimetypes
 import os
@@ -261,6 +262,7 @@ class WebVoiceApp:
             "mute": self._action_mute,
             "voice_mode": self._action_voice_mode,
             "avatar_settings": self._action_avatar_settings,
+            "set_ui_layout": self._action_set_ui_layout,
             "ptt": self._action_ptt,
             "context_active": self._action_context_active,
             "persona": self._action_persona,
@@ -777,6 +779,7 @@ class WebVoiceApp:
             avatar_reduced_motion=self._app_state.avatar_reduced_motion,
             avatar_show_state=self._app_state.avatar_show_state,
             avatar_panel_collapsed=self._app_state.avatar_panel_collapsed,
+            ui_layout=self._app_state.ui_layout,
         )
         app_state.save_state(cfg.APP_STATE_FILE, state)
         self._app_state = state
@@ -951,6 +954,7 @@ class WebVoiceApp:
             "voice": self._voice,
             "toolUser": self._session.default_agent_backend(),
             "avatar": app_state.avatar_settings_payload(self._app_state),
+            "uiLayout": self._app_state.ui_layout,
             "agentBackends": self._session.agent_backends(),
             "agentMachines": {
                 backend: self._session.agent_machine(backend)
@@ -1584,6 +1588,14 @@ class WebVoiceApp:
             payload.get("settings"), self._app_state
         )
         self._save_state()
+
+    def _action_set_ui_layout(self, payload: dict) -> dict | None:
+        mode = payload.get("mode")
+        if app_state.ui_layout_or(mode, "") == "":
+            return {"ok": False, "error": f"unknown layout: {mode!r}"}
+        self._app_state = dataclasses.replace(self._app_state, ui_layout=mode)
+        self._save_state()
+        return None
 
     def _action_ptt(self, payload: dict) -> None:
         self._session.set_push_to_talk(bool(payload.get("active")))
