@@ -36,7 +36,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as websocket_connect
 
 from remote_agent_protocol import config as cfg
-from remote_agent_protocol import process_guard
+from remote_agent_protocol import llm_endpoint, process_guard
 from remote_agent_protocol.doctor import model_registered, ollama_tags
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -316,7 +316,15 @@ def ensure_llm_backend() -> str | None:
     really Ollama behind a proxy, so a stopped Ollama surfaces only a minute
     into the launch -- as an HTTP 500 raised inside the frontend's LLM warmup,
     which then exits and takes the whole stack down.
+
+    A cloud-only brain (``CLOUD_LLM_LOCAL_FALLBACK=false`` with a cloud endpoint)
+    never answers from Ollama, so it isn't started or required. What still
+    touches it -- narration without an assigned role, the router fallback's
+    classifier -- degrades to stock lines or plain chat without it.
     """
+    if llm_endpoint.cloud_only_enabled():
+        logger.info("Cloud-only brain: Ollama is not required and was not started")
+        return None
     tags = ollama_tags(cfg.OLLAMA_HOST, 2.0)
     if tags is None:
         address = local_ollama_address()

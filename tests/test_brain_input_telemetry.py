@@ -16,17 +16,19 @@ def brain_app(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "RAP_MODE", "brain")
     monkeypatch.setattr(cfg, "APP_STATE_FILE", str(tmp_path / "state.json"))
     monkeypatch.setattr(cfg, "S2S_MIC_MUTE_FILE", str(tmp_path / "muted.flag"))
-    monkeypatch.setattr(cfg, "S2S_VOICE_MODE_FILE", str(tmp_path / "input-mode.json"), raising=False)
+    monkeypatch.setattr(
+        cfg, "S2S_VOICE_MODE_FILE", str(tmp_path / "input-mode.json"), raising=False
+    )
     monkeypatch.setattr(cfg, "S2S_VOICE_MODE_STATUS_FILE", "", raising=False)
     monkeypatch.setattr(cfg, "S2S_VOICE_MODE_ACK_TIMEOUT", 0.0, raising=False)
-    monkeypatch.setattr(web_gui.wake_word, "settings_from_config", lambda *_a, **_k: _wake_settings(tmp_path))
+    monkeypatch.setattr(
+        web_gui.wake_word, "settings_from_config", lambda *_a, **_k: _wake_settings(tmp_path)
+    )
     return WebVoiceApp(), tmp_path / "input-mode.json"
 
 
 def _wake_settings(tmp_path):
-    target = web_gui.wake_word.WakeWordTarget(
-        "alice", "Alice", 0.61, str(tmp_path / "alice.onnx")
-    )
+    target = web_gui.wake_word.WakeWordTarget("alice", "Alice", 0.61, str(tmp_path / "alice.onnx"))
     return web_gui.wake_word.WakeWordSettings(
         enabled=True,
         threshold=0.61,
@@ -59,9 +61,7 @@ def test_switching_from_free_talk_refreshes_enabled_wake_model(monkeypatch, tmp_
     monkeypatch.setattr(cfg, "S2S_VOICE_MODE_ACK_TIMEOUT", 0.0, raising=False)
     mode_file = tmp_path / "input-mode.json"
     monkeypatch.setattr(cfg, "S2S_VOICE_MODE_FILE", str(mode_file))
-    alice = web_gui.wake_word.WakeWordTarget(
-        "alice", "Alice", 0.63, str(tmp_path / "Alice.onnx")
-    )
+    alice = web_gui.wake_word.WakeWordTarget("alice", "Alice", 0.63, str(tmp_path / "Alice.onnx"))
 
     def settings(_cfg, *, enabled):
         return web_gui.wake_word.WakeWordSettings(
@@ -118,9 +118,7 @@ def test_brain_mode_rejects_push_to_talk_owned_by_missing_external_control(brain
     assert "push to talk" in result["error"].lower()
 
 
-def test_brain_mode_does_not_claim_mode_changed_when_bridge_write_fails(
-    brain_app, monkeypatch
-):
+def test_brain_mode_does_not_claim_mode_changed_when_bridge_write_fails(brain_app, monkeypatch):
     app, _mode_file = brain_app
     original = app._voice_mode
     monkeypatch.setattr(app, "_write_s2s_voice_mode", lambda _mode: None)
@@ -150,9 +148,7 @@ def test_publish_folds_external_telemetry_under_state_lock(brain_app, monkeypatc
 def test_turn_timing_event_updates_all_live_latency_readouts():
     app = WebVoiceApp()
 
-    app._ingest_turn_timing(
-        {"stt_s": 0.32, "response_start_s": 0.91, "first_audio_s": 1.27}
-    )
+    app._ingest_turn_timing({"stt_s": 0.32, "response_start_s": 0.91, "first_audio_s": 1.27})
 
     assert app._status_payload()["latency"] == {
         "stt": 0.32,
@@ -167,9 +163,10 @@ def test_turn_timing_event_updates_all_live_latency_readouts():
 def test_partial_turn_timing_keeps_real_stt_and_total_without_fake_phase_values():
     app = WebVoiceApp()
 
-    assert app._ingest_turn_timing(
-        {"stt_s": 0.3, "response_start_s": None, "first_audio_s": 1.1}
-    ) is True
+    assert (
+        app._ingest_turn_timing({"stt_s": 0.3, "response_start_s": None, "first_audio_s": 1.1})
+        is True
+    )
 
     assert app._status_payload()["latency"] == {
         "stt": 0.3,
@@ -263,6 +260,7 @@ def test_failed_free_talk_request_rolls_back_to_confirmed_wake_word(brain_app, m
     app._voice_mode = "wake_word"
     calls = []
     generation = iter([31, 32])
+
     def write_mode(mode):
         calls.append(("write", mode))
         return next(generation)
@@ -324,5 +322,34 @@ def test_brain_ui_keeps_real_input_modes_enabled():
 
     inert_block = script.split("const BRAIN_INERT", 1)[1].split("];", 1)[0]
     assert '"modeBtn"' not in inert_block
-    assert 'nextMode(state.status?.voiceMode, state.status?.mode)' in script
-    assert 'voiceModeRows(s.mode)' in script
+    assert "nextMode(state.status?.voiceMode, state.status?.mode)" in script
+    assert "voiceModeRows(s.mode)" in script
+
+
+def test_a_turn_without_response_timing_does_not_show_the_previous_turns_phases():
+    app = WebVoiceApp()
+    app._ingest_turn_timing({"stt_s": 0.3, "response_start_s": 0.9, "first_audio_s": 1.2})
+
+    app._ingest_turn_timing({"stt_s": 3.5, "response_start_s": None, "first_audio_s": 26.3})
+
+    assert app._status_payload()["latency"] == {
+        "stt": 3.5,
+        "llm": None,
+        "tts": None,
+        "total": 26.3,
+    }
+
+
+def test_ollama_being_off_is_not_a_fault_when_every_model_is_in_the_cloud(monkeypatch):
+    from remote_agent_protocol import dashboard, llm_endpoint
+
+    down = dashboard.OllamaHealth.down("connection refused")
+    monkeypatch.setattr(llm_endpoint, "cloud_only_enabled", lambda *_a: True)
+    assert WebVoiceApp._ollama_health_event(down) == {
+        "type": "health",
+        "ok": True,
+        "label": "Ollama off (cloud only)",
+    }
+
+    monkeypatch.setattr(llm_endpoint, "cloud_only_enabled", lambda *_a: False)
+    assert WebVoiceApp._ollama_health_event(down)["ok"] is False

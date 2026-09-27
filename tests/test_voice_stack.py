@@ -961,3 +961,13 @@ def test_reopen_windows_are_not_shorter_than_the_end_of_turn_wait():
     """A tail that arrives after the turn closed has to be able to rejoin it."""
     assert cfg.S2S_VAD_SPECULATIVE_REOPEN_MS >= cfg.S2S_VAD_MIN_SILENCE_MS * 0.5
     assert cfg.S2S_VAD_UNANSWERED_REOPEN_MS >= cfg.S2S_VAD_SPECULATIVE_REOPEN_MS
+
+
+def test_a_cloud_only_brain_neither_needs_nor_starts_ollama(monkeypatch):
+    started = []
+    monkeypatch.setattr(voice_stack.llm_endpoint, "cloud_only_enabled", lambda *_a: True)
+    monkeypatch.setattr(voice_stack, "ollama_tags", lambda *_args: None)
+    monkeypatch.setattr(voice_stack, "start_ollama", lambda address: started.append(address))
+
+    assert voice_stack.ensure_llm_backend() is None
+    assert started == []

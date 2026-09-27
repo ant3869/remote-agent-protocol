@@ -162,11 +162,15 @@ async def _append_response_check_rows(
     request_response_check: Callable[[str], Awaitable[object]] | None,
     *,
     fresh_for_secs: float = 0.0,
+    wait_secs: float | None = None,
 ) -> dict[str, AgentSnapshot | ControlError]:
     """Run bounded fixed-response checks and return their evidence snapshots.
 
     Agents that are working on a RAP task, or answered within ``fresh_for_secs``,
-    are reported from that evidence instead of being pinged again.
+    are reported from that evidence instead of being pinged again. The checks
+    run together and are awaited for at most ``wait_secs`` in total: a slow
+    agent is reported as still checking rather than holding every other answer
+    (and a voice turn) hostage, and its result is recorded when it arrives.
     """
     checker = request_response_check or control_plane.request_response_check
     now = datetime.now(UTC)
@@ -176,10 +180,29 @@ async def _append_response_check_rows(
         if _needs_response_check(result, fresh_for_secs=fresh_for_secs, now=now)
     ]
     checks = await asyncio.gather(*(checker(backend) for backend in to_check))
+    waits = {
+        backend: asyncio.ensure_future(control_plane.wait_for_response_check(check.job_id))
+        for backend, check in zip(to_check, checks, strict=True)
+        if isinstance(check, JobHandle)
+    }
+    if waits:
+        _, still_waiting = await asyncio.wait(waits.values(), timeout=wait_secs)
+        for task in still_waiting:
+            task.cancel()
     resolved = dict(selected)
     for backend, check in zip(to_check, checks, strict=True):
         if isinstance(check, JobHandle):
-            outcome = await control_plane.wait_for_response_check(check.job_id)
+            wait = waits[backend]
+            if not wait.done() or wait.cancelled():
+                # Still running: the registry already says a check is pending,
+                # which is exactly what the user should hear for this agent.
+                current = await control_plane.get_agent_status(backend, refresh=False)
+                if isinstance(current, AgentSnapshot):
+                    resolved[backend] = current
+                else:
+                    rows.append(f"{backend}: still answering its self-check")
+                continue
+            outcome = wait.result()
             # A non-live test/double handle has no waiter. Preserve the
             # established pending wording and do not replace the selected
             # snapshot with unrelated registry state.
@@ -207,6 +230,7 @@ async def collect_rollcall_rows(
     excluded: frozenset[str] = frozenset(),
     request_response_check: Callable[[str], Awaitable[object]] | None = None,
     fresh_for_secs: float = 0.0,
+    wait_secs: float | None = None,
 ) -> tuple[list[str], str | None]:
     """Return ``(rows, missing_message)``; ``rows`` is empty exactly when nothing matched.
 
@@ -239,6 +263,7 @@ async def collect_rollcall_rows(
         control_plane,
         request_response_check,
         fresh_for_secs=fresh_for_secs,
+        wait_secs=wait_secs,
     )
     rows = [control_summary(backend, snapshot) for backend, snapshot in selected.items()]
     rows.extend(check_rows)

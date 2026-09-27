@@ -829,6 +829,11 @@ AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_histo
 # self-check or a finished job -- this recent instead of pinging again, so the
 # answer comes back in seconds. Failures are always re-checked. 0 disables.
 AGENT_HEALTH_FRESH_SECS = float(_env("AGENT_HEALTH_FRESH_SECS", "120"))
+# How long a roll call waits for self-checks in total. Agents that haven't
+# answered by then are reported as still checking, and their result is
+# recorded when it arrives -- a slow harness (Hermes can take 30s+) must not
+# hold a spoken answer past the voice frontend's patience.
+AGENT_CHECK_WAIT_SECS = float(_env("AGENT_CHECK_WAIT_SECS", "8"))
 
 # Tool-calling Butler (brain mode). One model holds the conversation and acts
 # through tools (list/check agents, start/retry/cancel tasks, task status,

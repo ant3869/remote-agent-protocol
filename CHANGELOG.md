@@ -12,6 +12,10 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Turn timing on the Stage: under Butler's caption, the voice frontend's
+  phases for the last turn (transcribe, think, voice, total) and the Butler's
+  own steps -- each model call and tool with its seconds, the running one
+  counting live -- so a slow answer shows exactly where the time went.
 - Stage layout for the Control Center (the new default): Butler large and
   centered with a live caption of what he's saying, and the conversation in a
   drawer on the right. A Stage/Console toggle in the header, `Ctrl+Shift+A`,
@@ -74,11 +78,22 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
-- Butler avatar motion: smoothed lip-sync with a minimum hold per mouth
-  shape, eased expression dissolves, a listening tilt that settles instead of
-  snapping, idle glances and occasional double blinks, a pulsing eye glow while
-  working, a faint hologram sweep, and a 30 fps draw cap. Art and frames are
-  unchanged; reduced motion disables all of it.
+- A roll call no longer waits on its slowest agent: self-checks are awaited
+  for `AGENT_CHECK_WAIT_SECS` (default 8) in total, and an agent still
+  answering is reported as checking. A 32-second Hermes check had pushed a
+  spoken status answer past the voice frontend's timeout.
+- A cloud-only setup (`CLOUD_LLM_LOCAL_FALLBACK=false`) neither needs nor
+  starts Ollama, and the header shows "Ollama off (cloud only)" instead of a
+  failure when it isn't running.
+- The latency readouts no longer keep the previous turn's think/voice times
+  when the frontend couldn't measure them for this turn.
+- Butler avatar motion: a listening tilt that settles instead of snapping,
+  idle glances and occasional double blinks, a pulsing eye glow while
+  working, and a faint hologram sweep. The mouth follows the voice level
+  directly, portrait frames dissolve in 45 ms, and the materialize/glitch
+  flipbook frames cut instead of blending, so a second head never shows
+  through during a finish or failure effect. Art and frames are unchanged;
+  reduced motion disables all of it.
 - The Control Center had no favicon, which logged a 404 on every load.
 - The test suite no longer reads or writes real application data: provider
   keys, the agent registry, job history, UI and s2s state, and the

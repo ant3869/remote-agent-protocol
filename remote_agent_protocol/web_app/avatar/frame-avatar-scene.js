@@ -6,15 +6,10 @@ const ASSET_BASE = "/assets/avatars/butler/runtime_512_v1/";
 // (for example, previously wrong-MIME) response from an earlier server.
 const ASSET_REVISION = "20260920";
 const FRAME_LOAD_TIMEOUT_MS = 6000;
-const FRAME_INTERVAL_MS = 1000 / 30;
-// Mouth shapes change on speech timing; everything else is an expression
-// change that reads better as a slower, eased dissolve.
-const VISEMES = new Set(["base", "halfsmile", "ah_small", "e_sound", "oh", "oo", "open", "fv", "grit"]);
-const VISEME_FADE_MS = 40;
-const EXPRESSION_FADE_MS = 150;
-const VISEME_HOLD_MS = 60;
-const LEVEL_ATTACK_MS = 25;
-const LEVEL_RELEASE_MS = 90;
+// Portrait frames share one registration, so a short dissolve only softens
+// the cut. Materialize/glitch frames are a flipbook whose head moves between
+// frames: blending those shows two heads, so they cut.
+const FRAME_FADE_MS = 45;
 const POSE_SETTLE_MS = 240;
 const MATERIALIZE_DURATIONS = [55, 55, 55, 55, 55, 72, 72, 72, 72, 72, 95, 110, 220];
 const FAILURE_DURATIONS = [80, 65, 65, 75, 70, 75, 80, 100, 650];
@@ -61,21 +56,10 @@ export function stateForResolved(state) {
   return Object.hasOwn(STATE_FRAMES, state) ? state : "idle";
 }
 
+const isEffectFrame = (name) => /^(materialize|glitch)_/.test(name);
+
 export function transitionMs(previous, next) {
-  return VISEMES.has(previous) && VISEMES.has(next) ? VISEME_FADE_MS : EXPRESSION_FADE_MS;
-}
-
-// Exponential approach toward ``target`` over ``dtMs``: fast when rising
-// (a syllable onset) and slower when falling, so the mouth doesn't chatter.
-export function smoothToward(current, target, dtMs, riseMs = LEVEL_ATTACK_MS, fallMs = LEVEL_RELEASE_MS) {
-  const tau = target > current ? riseMs : fallMs;
-  if (!(dtMs > 0) || !(tau > 0)) return target;
-  return current + (target - current) * (1 - Math.exp(-dtMs / tau));
-}
-
-function easeInOut(value) {
-  const t = Math.max(0, Math.min(1, value));
-  return t * t * (3 - 2 * t);
+  return isEffectFrame(previous) || isEffectFrame(next) ? 0 : FRAME_FADE_MS;
 }
 
 export function frameForState(state) {
@@ -169,10 +153,7 @@ export async function createAvatarScene(host, settings) {
   let nextBlinkAt = 0;
   let glance = null;
   let nextGlanceAt = 0;
-  let audioTarget = 0;
   let audioLevel = 0;
-  let speechFrame = "base";
-  let speechFrameAt = 0;
   let lastDrawAt = 0;
   let pose = { y: 0, scale: 1, angle: 0 };
   let audioAt = -Infinity;
@@ -232,7 +213,7 @@ export async function createAvatarScene(host, settings) {
   const stream = new AvatarEnvelopeStream((sample) => {
     const rms = Math.max(0, Math.min(1, Number(sample?.rms) || 0));
     const peak = Math.max(rms, Math.min(1, Number(sample?.peak) || 0));
-    audioTarget = Math.max(0, Math.min(1, rms * 1.45 + (peak - rms) * 0.22));
+    audioLevel = Math.max(0, Math.min(1, rms * 1.45 + (peak - rms) * 0.22));
     audioAt = performance.now();
   });
   if (settings.lipSync) stream.start();
@@ -306,14 +287,7 @@ export async function createAvatarScene(host, settings) {
     if (blinking) return blinking;
     if (visualState !== "speaking") return glanceFrame(now) || frameForState(visualState);
     const level = debugLevel ?? audioLevel;
-    const candidate = now - audioAt < 350 || debugLevel !== null
-      ? frameForLevel(level)
-      : fallbackViseme(now);
-    if (candidate !== speechFrame && now - speechFrameAt >= VISEME_HOLD_MS) {
-      speechFrame = candidate;
-      speechFrameAt = now;
-    }
-    return speechFrame;
+    return now - audioAt < 350 || debugLevel !== null ? frameForLevel(level) : fallbackViseme(now);
   };
 
   const setFrame = (name, now) => {
@@ -392,17 +366,12 @@ export async function createAvatarScene(host, settings) {
     animationFrame = 0;
     if (disposed || !visible || document.hidden) return;
     const dt = lastDrawAt ? now - lastDrawAt : 0;
-    if (lastDrawAt && dt < FRAME_INTERVAL_MS - 1) {
-      scheduleDraw();
-      return;
-    }
     lastDrawAt = now;
-    audioLevel = reducedMotion() ? audioTarget : smoothToward(audioLevel, audioTarget, dt);
     setFrame(desiredFrame(now), now);
     context.clearRect(0, 0, 512, 512);
     const transform = motion(now, dt);
     const fade = transitionMs(previousFrame, currentFrame);
-    const transition = reducedMotion() ? 1 : easeInOut((now - frameChangedAt) / fade);
+    const transition = reducedMotion() || fade <= 0 ? 1 : Math.min(1, (now - frameChangedAt) / fade);
     if (transition < 1) drawImage(previousFrame, 1 - transition, transform);
     if (visualState === "working" && currentFrame === "glow_eyes" && images.base && !reducedMotion() && !effect) {
       // The eyes glow in and out while he works rather than staring fixed.

@@ -497,9 +497,10 @@ class WebVoiceApp:
         self._latency.update(evt.get("bucket", ""), evt.get("kind", ""), evt.get("value", 0.0))
 
     def _fold_turn_timing(self, evt: dict) -> None:
+        # One event describes one whole turn: a phase it couldn't measure is
+        # unknown for this turn, not the previous turn's value.
         for bucket in ("stt", "llm", "tts", "total"):
-            if bucket in evt:
-                self._latency.update(bucket, "processing", evt[bucket])
+            self._latency.values[bucket] = evt.get(bucket)
 
     def _fold_turn(self, evt: dict) -> None:
         if evt.get("event") == "user_stopped":
@@ -574,8 +575,7 @@ class WebVoiceApp:
 
     def _health_poller(self) -> None:
         while not self._stop.is_set():
-            health = dashboard.ollama_health(cfg.OLLAMA_HOST)
-            self._publish({"type": "health", "ok": health.ok, "label": health.label})
+            self._publish(self._ollama_health_event(dashboard.ollama_health(cfg.OLLAMA_HOST)))
             tts = dashboard.tts_health(
                 self._tts_provider,
                 voicebox_url=voicebox.base_url(),
@@ -596,6 +596,13 @@ class WebVoiceApp:
             )
             self._refresh_cloud_model_catalog()
             self._stop.wait(4)
+
+    @staticmethod
+    def _ollama_health_event(health: dashboard.OllamaHealth) -> dict:
+        # A cloud-only setup never calls Ollama, so it being off is expected.
+        if not health.ok and llm_endpoint.cloud_only_enabled():
+            return {"type": "health", "ok": True, "label": "Ollama off (cloud only)"}
+        return {"type": "health", "ok": health.ok, "label": health.label}
 
     def _persona_names(self) -> list[str]:
         return [persona.name for persona in self._personas]

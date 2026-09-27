@@ -159,6 +159,7 @@ class ButlerToolbox:
         drop_confirmation: DropConfirmation,
         aliases: Mapping[str, str],
         fresh_for_secs: float = 0.0,
+        check_wait_secs: float | None = None,
     ):
         """Initialize the toolbox.
 
@@ -173,6 +174,7 @@ class ButlerToolbox:
             drop_confirmation: Discards a held confirmation by token.
             aliases: Spoken agent names -> backend names.
             fresh_for_secs: How recent a confirmed response may be reused by check_agents.
+            check_wait_secs: The most check_agents waits for self-checks in total.
         """
         self._bridge = bridge
         self._control_plane = control_plane
@@ -184,6 +186,7 @@ class ButlerToolbox:
         self._drop_confirmation = drop_confirmation
         self._aliases = {k.lower(): v for k, v in aliases.items()}
         self._fresh_for_secs = fresh_for_secs
+        self._check_wait_secs = check_wait_secs
 
     @property
     def ledger(self) -> TaskLedger:
@@ -256,7 +259,10 @@ class ButlerToolbox:
         rows: list[str] = []
         for target in targets:
             found, missing_note = await agent_status.collect_rollcall_rows(
-                self._control_plane, target, fresh_for_secs=self._fresh_for_secs
+                self._control_plane,
+                target,
+                fresh_for_secs=self._fresh_for_secs,
+                wait_secs=self._check_wait_secs,
             )
             rows.extend(found or [missing_note or "nothing to check"])
         return {"agents": rows, "summary": "; ".join(rows)}

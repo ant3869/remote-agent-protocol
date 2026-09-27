@@ -143,6 +143,15 @@
       <section id="stageColumn" class="stage-column" aria-label="Assistant stage">
         <div id="avatarSlotStage" class="avatar-slot avatar-slot-stage"></div>
         <p id="stageCaption" class="stage-caption" aria-hidden="true"></p>
+        <section id="stageTelemetry" class="stage-telemetry" aria-label="Turn timing">
+          <dl class="stage-latency">
+            <div title="End of speech until the words were recognized"><dt>Transcribe</dt><dd id="stageLatStt">--</dd></div>
+            <div title="Recognized words until the reply started"><dt>Think</dt><dd id="stageLatLlm">--</dd></div>
+            <div title="Reply start until the first audio played"><dt>Voice</dt><dd id="stageLatTts">--</dd></div>
+            <div title="End of speech until the first audio played"><dt>Total</dt><dd id="stageLatTotal">--</dd></div>
+          </dl>
+          <div id="stageTurn" class="stage-turn" hidden><span class="stage-turn-head">Butler turn <strong id="stageTurnTotal">--</strong></span><ol id="stageSteps" class="stage-steps"></ol></div>
+        </section>
       </section>
       <section class="conversation-workbench" aria-labelledby="conversationHeading">
         <header class="transcript-toolbar"><div><p class="section-label">Conversation</p><h3 id="conversationHeading">Transcription chat</h3></div><span class="panel-meta">voice · text · agent events</span></header>
@@ -218,7 +227,7 @@
 <script type="importmap">{"imports":{"three":"/vendor/three/three.module.min.js","three/addons/":"/vendor/three/addons/"}}</script>
 <script type="module" src="/avatar/avatar-entry.js"></script>
 <script type="module" src="/ui-lifecycle.js"></script>
-<script src="/ui-icons.js"></script><script src="/input-control-state.js"></script><script src="/ui-shell-state.js"></script><script src="/conversation.js"></script><script src="/app.js"></script>
+<script src="/ui-icons.js"></script><script src="/input-control-state.js"></script><script src="/ui-shell-state.js"></script><script src="/stage-telemetry.js"></script><script src="/conversation.js"></script><script src="/app.js"></script>
 <script>
   document.querySelectorAll("[data-settings-section]").forEach((button) => button.addEventListener("click", () => {
     document.querySelectorAll("[data-settings-section]").forEach((item) => { const active = item === button; item.classList.toggle("active", active); if (active) item.setAttribute("aria-current", "page"); else item.removeAttribute("aria-current"); });

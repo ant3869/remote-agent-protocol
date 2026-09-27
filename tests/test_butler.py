@@ -234,13 +234,14 @@ async def test_get_result_returns_the_full_result():
 # -- loop ----------------------------------------------------------------------------
 
 
-async def _run_loop(model: FakeModel, box, *, extra_endpoints=(), rounds=5):
+async def _run_loop(model: FakeModel, box, *, extra_endpoints=(), rounds=5, on_timing=None):
     async with ServedModel(model) as endpoint, aiohttp.ClientSession() as http:
         loop = ButlerLoop(
             toolbox=box,
             endpoints=lambda: (*extra_endpoints, endpoint),
             http=lambda: http,
             max_rounds=rounds,
+            on_timing=on_timing,
         )
         messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "go"}]
         return "".join([piece async for piece in loop.run(messages)])
@@ -264,6 +265,29 @@ async def test_the_loop_runs_tools_and_speaks_from_their_results():
     assert model.requests[0]["tools"], "tools must be offered"
     assistant_call = model.requests[1]["messages"][-2]
     assert assistant_call["tool_calls"][0]["function"]["name"] == "check_agents"
+
+
+@pytest.mark.asyncio
+async def test_the_turn_timeline_names_each_model_call_and_tool_with_its_seconds():
+    bridge = FakeBridge()
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers("hermes"), FakeDispatcher(bridge))
+
+    def model_brain(messages, tools_offered):
+        return Say("done") if tool_results(messages) else Call(("check_agents", {}))
+
+    snapshots: list[dict] = []
+    await _run_loop(FakeModel(model_brain), box, on_timing=snapshots.append)
+
+    assert [s["active"]["kind"] for s in snapshots if s["active"]] == ["model", "tool", "model"]
+    final = snapshots[-1]
+    assert final["done"] is True and final["active"] is None
+    assert [(step["kind"], step["label"] == "check_agents") for step in final["steps"]] == [
+        ("model", False),
+        ("tool", True),
+        ("model", False),
+    ]
+    assert all(step["secs"] >= 0 for step in final["steps"])
+    assert final["elapsed"] >= sum(step["secs"] for step in final["steps"]) - 0.05
 
 
 @pytest.mark.asyncio

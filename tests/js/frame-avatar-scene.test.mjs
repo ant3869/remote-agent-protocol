@@ -9,7 +9,6 @@ import {
   frameForState,
   frameUrls,
   preloadFrames,
-  smoothToward,
   transitionMs,
 } from "../../remote_agent_protocol/web_app/avatar/frame-avatar-scene.js";
 
@@ -169,19 +168,12 @@ test("visual state names pass through, so the debug API can set them directly", 
 });
 
 
-test("mouth shapes swap quickly while expression changes dissolve slowly", () => {
-  assert.ok(transitionMs("oh", "open") < transitionMs("base", "lookup"));
-  assert.equal(transitionMs("base", "ah_small"), transitionMs("e_sound", "oo"));
-  assert.ok(transitionMs("glow_eyes", "confused") >= 120);
-});
-
-
-test("audio level rises faster than it falls", () => {
-  const rise = smoothToward(0, 1, 30);
-  const fall = 1 - smoothToward(1, 0, 30);
-  assert.ok(rise > fall, `${rise} should exceed ${fall}`);
-  assert.equal(smoothToward(0.2, 0.8, 0), 0.8, "no elapsed time snaps to the target");
-  assert.ok(smoothToward(0, 1, 10_000) > 0.999);
+test("portrait frames dissolve briefly; effect frames cut so no second head shows", () => {
+  assert.ok(transitionMs("oh", "open") <= 50);
+  assert.equal(transitionMs("base", "lookup"), transitionMs("e_sound", "oo"));
+  assert.equal(transitionMs("materialize_12", "materialize_13"), 0);
+  assert.equal(transitionMs("materialize_13", "smile"), 0);
+  assert.equal(transitionMs("base", "glitch_01"), 0);
 });
 
 

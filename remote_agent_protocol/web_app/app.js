@@ -732,6 +732,9 @@ function handleEvent(event) {
     }
     if (event.phase === "wake_word_detected") playWakeChime();
     renderWakeStatus();
+  } else if (event.type === "butler_timing") {
+    state.butlerTiming = { ...event, receivedAt: Date.now(), replayed: Boolean(event.replayed_snapshot) };
+    renderStageTelemetry();
   } else if (["provider_test_result", "model_test_result", "model_assignment"].includes(event.type)) {
     refreshProviders();
   }
@@ -956,6 +959,25 @@ function renderStageCaption() {
   caption.classList.toggle("speaking", Boolean(state.avatar.speaking));
 }
 
+let stageTelemetryTimer = null;
+
+function renderStageTelemetry() {
+  const view = window.RapStageTelemetry?.timelineView(state.butlerTiming, Date.now());
+  const turn = $("stageTurn");
+  if (!turn) return;
+  turn.hidden = !view;
+  if (view) {
+    $("stageTurnTotal").textContent = view.stalled ? `${view.total} (no update)` : view.total;
+    $("stageSteps").innerHTML = view.steps.map((step) => `<li class="stage-step ${step.kind}${step.active ? " active" : ""}"><span>${escapeHtml(step.label)}</span><strong>${step.secs}</strong></li>`).join("");
+  }
+  const live = Boolean(view?.live);
+  if (live && !stageTelemetryTimer) stageTelemetryTimer = setInterval(renderStageTelemetry, 100);
+  if (!live && stageTelemetryTimer) {
+    clearInterval(stageTelemetryTimer);
+    stageTelemetryTimer = null;
+  }
+}
+
 function renderStatus() {
   const s = state.status;
   if (!s) return;
@@ -1007,6 +1029,10 @@ function renderStatus() {
   $("latLlm").textContent = fmtSeconds(s.latency?.llm);
   $("latTts").textContent = fmtSeconds(s.latency?.tts);
   $("latTotal").textContent = fmtSeconds(s.latency?.total);
+  $("stageLatStt").textContent = fmtSeconds(s.latency?.stt);
+  $("stageLatLlm").textContent = fmtSeconds(s.latency?.llm);
+  $("stageLatTts").textContent = fmtSeconds(s.latency?.tts);
+  $("stageLatTotal").textContent = fmtSeconds(s.latency?.total);
   $("settingsPersona").textContent = s.persona;
   $("settingsVoice").textContent = s.voice;
   $("settingsTtsProvider").textContent = s.tts?.provider || "--";

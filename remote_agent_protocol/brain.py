@@ -246,6 +246,7 @@ class BrainSession:
                 ),
                 aliases=cfg.AGENT_SPOKEN_ALIASES,
                 fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
+                check_wait_secs=cfg.AGENT_CHECK_WAIT_SECS,
             ),
             endpoints=lambda: llm_endpoint.chain(llm_endpoint.BRAIN),
             http=lambda: self._http,
@@ -253,6 +254,7 @@ class BrainSession:
             max_tokens=cfg.CLOUD_LLM_MAX_TOKENS,
             timeout_secs=cfg.CLOUD_LLM_TIMEOUT_SECS,
             on_tool=self._emit_butler_tool,
+            on_timing=lambda timeline: self._emit({"type": "butler_timing", **timeline}),
         )
 
     async def start(self) -> None:
@@ -764,6 +766,7 @@ class BrainSession:
             agent,
             excluded=frozenset(excluded or ()),
             fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
+            wait_secs=cfg.AGENT_CHECK_WAIT_SECS,
         )
         if missing is not None:
             self._direct_reply = f"I could not check another agent: {missing}."

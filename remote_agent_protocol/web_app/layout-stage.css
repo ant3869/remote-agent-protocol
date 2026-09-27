@@ -80,6 +80,52 @@
 }
 .stage-caption.speaking { color: var(--text-primary); }
 
+/* Where the last turn's time went: the voice frontend's phases, then the
+   Butler's own model calls and tools, the running one ticking live. */
+.stage-telemetry {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: min(100%, 640px);
+  font-variant-numeric: tabular-nums;
+}
+.stage-latency {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  width: 100%;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-panel);
+}
+.stage-latency > div { padding: 7px 10px; text-align: center; }
+.stage-latency > div + div { border-left: 1px solid var(--border-subtle); }
+.stage-latency dt { color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.stage-latency dd { margin: 2px 0 0; color: var(--text-primary); font-size: 15px; font-weight: 600; }
+.stage-turn { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; }
+.stage-turn[hidden] { display: none; }
+.stage-turn-head { color: var(--text-muted); font-size: 12px; }
+.stage-turn-head strong { color: var(--text-primary); }
+.stage-steps { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.stage-step {
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 3px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.stage-step strong { color: var(--text-primary); font-weight: 600; }
+.stage-step.model { border-color: rgba(96, 165, 250, 0.35); }
+.stage-step.tool { border-color: rgba(167, 139, 250, 0.4); }
+.stage-step.active { background: rgba(96, 165, 250, 0.12); animation: stage-step-pulse 1.2s ease-in-out infinite; }
+@keyframes stage-step-pulse { 50% { border-color: rgba(96, 165, 250, 0.8); } }
+@media (prefers-reduced-motion: reduce) { .stage-step.active { animation: none; } }
+
 @media (max-width: 1180px) {
   .command-header { grid-template-columns: 220px minmax(120px, .4fr) minmax(160px, 1fr) max-content auto; }
 }
@@ -108,4 +154,7 @@
   .app-shell[data-layout="stage"] .conversation-workbench .chat-log { min-height: 45vh; }
   .app-shell[data-layout="stage"] .avatar-slot-stage .avatar-panel { display: block; }
   .avatar-slot-stage { width: min(40vh, 100%, 360px); }
+  .stage-latency { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stage-latency > div:nth-child(3) { border-left: 0; }
+  .stage-latency > div:nth-child(n + 3) { border-top: 1px solid var(--border-subtle); }
 }

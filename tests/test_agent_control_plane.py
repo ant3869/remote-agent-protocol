@@ -278,6 +278,36 @@ async def test_rollcall_reports_the_result_of_its_new_response_check() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_slow_response_check_is_reported_as_running_without_blocking_the_rollcall() -> None:
+    adapter = FakeAgentAdapter(
+        "codex",
+        probe=make_observation("codex"),
+        dispatch=JobHandle("self-check-slow", "codex"),
+    )
+    plane = AgentControlPlane({"codex": adapter})
+
+    rows, missing = await asyncio.wait_for(
+        agent_status_reporting.collect_rollcall_rows(plane, "codex", wait_secs=0.05), 2
+    )
+
+    assert missing is None
+    assert rows == ["Codex: Checking for a response now"]
+    # The late answer still lands in the record for the next question.
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "self-check-slow",
+            "agent": "codex",
+            "status": "done",
+            "result": SELF_CHECK_SENTINEL,
+        }
+    )
+    current = await plane.get_agent_status("codex", refresh=False)
+    assert current.observation.response_state is ResponseState.RESPONDED
+
+
+@pytest.mark.asyncio
 async def test_response_check_does_not_compete_with_a_busy_rap_job() -> None:
     busy = replace(
         make_observation("codex"),

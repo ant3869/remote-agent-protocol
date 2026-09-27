@@ -11,6 +11,7 @@ turn ends with a sentence built from the tool results that did come back.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
@@ -21,10 +22,59 @@ from remote_agent_protocol import llm_endpoint
 from remote_agent_protocol.butler.tools import TOOL_SCHEMAS, ButlerToolbox
 
 ToolListener = Callable[[str, dict, dict], None]
+TimingListener = Callable[[dict], None]
 
 
 class ButlerUnavailable(RuntimeError):
     """No endpoint could run the turn before it had any effect."""
+
+
+class _Timeline:
+    """Where one turn's time went: each model call and tool, in order.
+
+    Every change is reported as a full snapshot, so a listener that misses one
+    still shows the right picture from the next.
+    """
+
+    def __init__(self, listener: TimingListener | None):
+        self._listener = listener
+        self._t0 = time.monotonic()
+        self._steps: list[dict] = []
+        self._active: dict | None = None
+        self._active_t0 = 0.0
+
+    def start(self, kind: str, label: str) -> None:
+        self.finish()
+        self._active = {"kind": kind, "label": label}
+        self._active_t0 = time.monotonic()
+        self._report(done=False)
+
+    def finish(self) -> None:
+        if self._active is None:
+            return
+        self._steps.append({**self._active, "secs": round(time.monotonic() - self._active_t0, 2)})
+        self._active = None
+
+    def close(self) -> None:
+        self.finish()
+        self._report(done=True)
+
+    def _report(self, *, done: bool) -> None:
+        if self._listener is None:
+            return
+        now = time.monotonic()
+        snapshot = {
+            "steps": list(self._steps),
+            "active": (
+                {**self._active, "secs": round(now - self._active_t0, 2)} if self._active else None
+            ),
+            "elapsed": round(now - self._t0, 2),
+            "done": done,
+        }
+        try:
+            self._listener(snapshot)
+        except Exception as exc:  # noqa: BLE001 - UI listeners must not break turns
+            logger.warning(f"Butler timing listener raised: {exc}")
 
 
 @dataclass
@@ -71,6 +121,7 @@ class ButlerLoop:
         max_tokens: int = 600,
         timeout_secs: float = 60.0,
         on_tool: ToolListener | None = None,
+        on_timing: TimingListener | None = None,
     ):
         """Initialize the loop.
 
@@ -82,6 +133,9 @@ class ButlerLoop:
             max_tokens: Output cap per model call.
             timeout_secs: Per-call timeout.
             on_tool: Called with (name, arguments, result) after each tool runs.
+            on_timing: Called with a snapshot of the turn's timeline (finished
+                steps with their seconds, the running step, elapsed, done)
+                whenever a model call or tool starts, and once at the end.
         """
         self._toolbox = toolbox
         self._endpoints = endpoints
@@ -90,6 +144,7 @@ class ButlerLoop:
         self._max_tokens = max_tokens
         self._timeout_secs = timeout_secs
         self._on_tool = on_tool
+        self._on_timing = on_timing
 
     async def run(
         self, messages: list[dict], allowed_tools: frozenset[str] | None = None
@@ -107,6 +162,21 @@ class ButlerLoop:
         endpoints = self._endpoints()
         if not endpoints:
             raise ButlerUnavailable("no model endpoint is configured for the Butler")
+        timeline = _Timeline(self._on_timing)
+        try:
+            async for piece in self._run(messages, allowed_tools, schemas, endpoints, timeline):
+                yield piece
+        finally:
+            timeline.close()
+
+    async def _run(
+        self,
+        messages: list[dict],
+        allowed_tools: frozenset[str] | None,
+        schemas: list[dict],
+        endpoints: tuple[llm_endpoint.Endpoint, ...],
+        timeline: _Timeline,
+    ) -> AsyncIterator[str]:
         conversation = list(messages)
         results: list[dict] = []
         spoke = False
@@ -117,6 +187,7 @@ class ButlerLoop:
             endpoint = endpoints[endpoint_index]
             final_round = round_number == self._max_rounds - 1
             current = _Round()
+            timeline.start("model", endpoint.label)
             try:
                 async for delta in self._stream_round(
                     endpoint, conversation, current, final_round, schemas
@@ -189,7 +260,9 @@ class ButlerLoop:
                         "summary": f"{call['name']} is not available right now.",
                     }
                 else:
+                    timeline.start("tool", call["name"])
                     result = await self._toolbox.call(call["name"], call["arguments"] or "{}")
+                    timeline.finish()
                 results.append(result)
                 if self._on_tool is not None:
                     try:

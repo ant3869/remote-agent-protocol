@@ -1590,7 +1590,10 @@ class VoiceSession:
         """
         self._agent_ack_turn = True
         rows, missing = await agent_status.collect_rollcall_rows(
-            self._control_plane, agent, fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS
+            self._control_plane,
+            agent,
+            fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
+            wait_secs=cfg.AGENT_CHECK_WAIT_SECS,
         )
         return agent_status.format_rollcall(rows, missing)
 
