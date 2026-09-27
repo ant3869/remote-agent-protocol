@@ -91,8 +91,9 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   idle glances and occasional double blinks, a pulsing eye glow while
   working, and a faint hologram sweep. The mouth follows the voice level
   directly, portrait frames dissolve in 45 ms, and the materialize/glitch
-  flipbook frames cut instead of blending, so a second head never shows
-  through during a finish or failure effect. Art and frames are unchanged;
+  flipbook frames cut instead of blending. The still fallback portrait behind
+  the canvas is removed once the animation draws, so it no longer shows
+  through the transparent frames as a second head when he moves. Art and frames are unchanged;
   reduced motion disables all of it.
 - The Control Center had no favicon, which logged a 404 on every load.
 - The test suite no longer reads or writes real application data: provider

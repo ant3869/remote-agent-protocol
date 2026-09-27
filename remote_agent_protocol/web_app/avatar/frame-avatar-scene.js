@@ -155,6 +155,7 @@ export async function createAvatarScene(host, settings) {
   let nextGlanceAt = 0;
   let audioLevel = 0;
   let lastDrawAt = 0;
+  let live = false;
   let pose = { y: 0, scale: 1, angle: 0 };
   let audioAt = -Infinity;
   let fallbackFrame = "base";
@@ -382,6 +383,13 @@ export async function createAvatarScene(host, settings) {
       drawImage(currentFrame, transition, transform);
     }
     if (!effect) drawSweep(now);
+    // The host paints a still portrait as a fallback until the canvas draws.
+    // The frames are transparent around the figure, so once he moves that
+    // portrait would show through as a second head; the canvas owns it now.
+    if (!live) {
+      live = true;
+      host.classList.add("avatar-live");
+    }
     scheduleDraw();
   };
   const onVisibilityChange = () => scheduleDraw();
@@ -445,7 +453,7 @@ export async function createAvatarScene(host, settings) {
       cancelAnimationFrame(animationFrame);
       document.removeEventListener?.("visibilitychange", onVisibilityChange);
       stream.dispose();
-      host.classList.remove("avatar-frame-butler");
+      host.classList.remove("avatar-frame-butler", "avatar-live");
       canvas.remove();
     },
   };

@@ -103,7 +103,10 @@ function fakeHost() {
   const classes = new Set();
   return {
     child: null,
-    classList: { add: (value) => classes.add(value), remove: (value) => classes.delete(value) },
+    classList: {
+      add: (value) => classes.add(value),
+      remove: (...values) => values.forEach((value) => classes.delete(value)),
+    },
     replaceChildren(value) { this.child = value; },
     hasClass: (value) => classes.has(value),
   };
@@ -200,7 +203,9 @@ test("working state pulses the eye glow over the base portrait", async (t) => {
     callback?.(now);
   }
   const last = drawn.slice(-2);
+  assert.equal(host.hasClass("avatar-live"), true, "the still fallback portrait must not sit behind a moving figure");
   scene.dispose();
+  assert.equal(host.hasClass("avatar-live"), false);
 
   assert.ok(last[0].includes("base.webp"), last.join(", "));
   assert.ok(last[1].includes("glow_eyes.webp"), last.join(", "));
