@@ -131,6 +131,15 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
+- The assistant no longer repeats itself within a turn: a sentence nearly the
+  same as one already spoken that turn is dropped, history keeps what was
+  actually said, and asking an agent for the same thing again within two
+  minutes reports the task already running instead of starting a second.
+- Agents that answered their self-check with any packaging -- a full stop,
+  backticks, a "Done" line, a usage footer -- were reported as giving an
+  unexpected response and re-checked on every question. The answer token now
+  counts wherever it stands as a word of its own (an echo of the request
+  still doesn't).
 - Every status question re-checked every agent, even ones that had answered
   seconds earlier: the installation probe that starts a roll call replaced the
   agent's record and erased its check answer, so the freshness window never

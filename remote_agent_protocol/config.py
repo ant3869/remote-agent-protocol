@@ -898,7 +898,8 @@ BUTLER_RULES = (
     " subject: start the task on Codex. If a tool says a task needs confirmation, ask the"
     " user to confirm. An agent that is still checking is not down: start work on it"
     " rather than refusing. Never promise to follow up unless a tool result says RAP"
-    " will."
+    " will. Say what you are about to do at most once per turn; after a tool result,"
+    " say only what is new, and never start the same task twice."
     " Plain conversation needs no tools. Keep spoken replies to one or two sentences."
 )
 # The control plane's last-known health/activity snapshot per agent.

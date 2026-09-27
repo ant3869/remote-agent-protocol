@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -542,7 +543,7 @@ class AgentControlPlane:
         self._self_check_agents.discard(agent_id)
         response = str(event.get("result") or "").strip()
         failure_kind = str(event.get("failure_kind") or "")
-        if status == "done" and response == SELF_CHECK_SENTINEL:
+        if status == "done" and _is_self_check_reply(response):
             await self._record_response_result(
                 agent_id,
                 ResponseState.RESPONDED,
@@ -721,3 +722,20 @@ def _keep_response_evidence(
         response_secs=previous.response_secs,
         response_model=previous.response_model,
     )
+
+
+_SENTINEL_RE = re.compile(rf"(?<![A-Za-z0-9_]){SELF_CHECK_SENTINEL}(?![A-Za-z0-9_])")
+
+
+def _is_self_check_reply(response: str) -> bool:
+    """Whether a harness answered the self-check, allowing for its packaging.
+
+    Harnesses wrap a one-word answer differently -- a full stop, backticks, a
+    "Done:" line, a usage footer -- so an exact match reported working agents
+    as giving unexpected responses. The token must still appear as a word of
+    its own, and any echo of RAP's own request is removed first so repeating
+    the question back doesn't count as answering it.
+    """
+    answer = response.replace(SELF_CHECK_PROMPT, " ")
+    answer = re.sub(rf"exactly\s+{SELF_CHECK_SENTINEL}", " ", answer, flags=re.IGNORECASE)
+    return bool(_SENTINEL_RE.search(answer))

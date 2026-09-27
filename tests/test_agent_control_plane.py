@@ -727,3 +727,24 @@ async def test_a_second_roll_call_reuses_the_answer_the_first_one_got() -> None:
 
     assert len(adapter.tasks) == 1, "no second self-check"
     assert rows == ["Codex: Up (responded; current)"]
+
+
+@pytest.mark.parametrize(
+    ("reply", "answered"),
+    [
+        ("RAP_SELF_CHECK_OK", True),
+        ("RAP_SELF_CHECK_OK.", True),
+        ("`RAP_SELF_CHECK_OK`", True),
+        ("Done.\nRAP_SELF_CHECK_OK\n\ntokens used: 1,204", True),
+        ("**RAP_SELF_CHECK_OK**", True),
+        ("Self check OK", False),
+        ("RAP_SELF_CHECK_OKAY", False),
+        (SELF_CHECK_PROMPT, False),
+        ("You asked me to reply with exactly RAP_SELF_CHECK_OK.", False),
+    ],
+)
+def test_a_self_check_answer_is_accepted_however_the_harness_packages_it(reply, answered):
+    """09-27 01:01: Codex, Hermes and Code Puppy answered but read as 'unexpected response'."""
+    from remote_agent_protocol.control_plane.service import _is_self_check_reply
+
+    assert _is_self_check_reply(reply) is answered

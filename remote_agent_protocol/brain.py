@@ -9,6 +9,7 @@ frontends can use it through ``openai_bridge``.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import re
 import time
@@ -1309,6 +1310,7 @@ class BrainSession:
         full = ""
         spoken = ""
         pending = ""
+        said: list[str] = []
         started = False
         async for delta in stream:
             if not started:
@@ -1321,11 +1323,13 @@ class BrainSession:
             full += delta
             pending += delta
             ready, pending = _split_sentences(pending)
+            ready = _drop_repeats(ready, said)
             if ready:
                 spoken += ready
                 utterance.update(text=spoken, final=False, revision=utterance["revision"] + 1)
                 self._emit(dict(utterance))
                 yield SpeechText(ready, utterance)
+        pending = _drop_repeats(pending, said)
         if pending.strip():
             spoken += pending
             utterance.update(text=spoken, final=False, revision=utterance["revision"] + 1)
@@ -1333,7 +1337,9 @@ class BrainSession:
             yield SpeechText(pending, utterance)
         if not announcement:
             self._messages.append({"role": "user", "content": text})
-        self._finish_turn(full.strip(), utterance)
+        # What was spoken, not the raw stream: history with the model's
+        # repeats in it teaches the next turn to repeat itself.
+        self._finish_turn(spoken.strip() or full.strip(), utterance)
 
     def _announce_check_results(self, rows: list[str]) -> None:
         """Voice how the agents still answering a roll call's self-check turned out.
@@ -1949,6 +1955,34 @@ def _announce_id(text: str) -> str | None:
 
 async def _single(text: str) -> AsyncIterator[str]:
     yield text
+
+
+_SENTENCE_RE = re.compile(r"[^.!?…]+[.!?…]*[\"')\]]*\s*")
+
+
+def _sentence_key(sentence: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9']+", sentence.lower()))
+
+
+def _drop_repeats(text: str, said: list[str]) -> str:
+    """``text`` without sentences this turn has already said, near enough.
+
+    A tool-calling model often restates its opening line after each tool
+    round ("I'll ask Code Puppy what he can do for you" three times on
+    09-27); speaking each copy makes the assistant sound stuck. ``said`` is
+    the turn's running list of spoken sentence keys and is extended here.
+    """
+    kept = []
+    for sentence in _SENTENCE_RE.findall(text):
+        key = _sentence_key(sentence)
+        if not key:
+            kept.append(sentence)
+            continue
+        if any(difflib.SequenceMatcher(None, key, prior).ratio() >= 0.82 for prior in said):
+            continue
+        said.append(key)
+        kept.append(sentence)
+    return "".join(kept)
 
 
 def _split_sentences(text: str) -> tuple[str, str]:

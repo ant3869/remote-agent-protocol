@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -539,8 +540,31 @@ class ButlerToolbox:
             return self._unknown_agent(agent)
         if not instructions.strip():
             return _error("The task has no instructions; ask the user what they want done.")
+        already = self._recent_duplicate(name, subject, instructions)
+        if already is not None:
+            # Models re-issue start_task after each tool round; the work is
+            # already under way, so report it instead of starting it twice.
+            state = self._task_state(already)
+            state["summary"] = f"Already started: {state['summary']}"
+            return state
         task = self._ledger.create(subject, instructions)
         return await self._launch(task, name)
+
+    def _recent_duplicate(self, agent: str, subject: str, instructions: str):
+        """An open task on ``agent`` for the same request, started in the last two minutes."""
+        wanted = _words(f"{subject} {instructions}")
+        for task in self._ledger.newest_first():
+            if time.time() - task.created_at > 120:
+                break
+            latest = task.latest
+            if latest is None or latest.agent != agent:
+                continue
+            if self._task_state(task)["status"] not in _OPEN_STATES:
+                continue
+            have = _words(f"{task.subject} {task.instructions}")
+            if wanted and len(wanted & have) / len(wanted | have) >= 0.6:
+                return task
+        return None
 
     async def _tool_retry_task(self, agent: str, task: str | None = None) -> dict:
         name = self._agent_name(agent)
@@ -865,6 +889,10 @@ def _duration(secs: float) -> str:
     if hours >= 1:
         return f"{hours:g} hour{'s' if hours != 1 else ''}"
     return f"{secs / 60:g} minutes"
+
+
+def _words(text: str) -> set[str]:
+    return {word for word in re.findall(r"[a-z0-9]+", text.lower()) if len(word) > 2}
 
 
 def _subject_from_job(job: agent_bridge.AgentJob) -> str:

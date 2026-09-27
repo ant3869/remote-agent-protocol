@@ -869,3 +869,44 @@ async def test_what_the_model_says_before_its_tools_run_is_released_before_they_
 
     assert released_before_tool == ["I'll check now, sir. "]
     assert "".join(seen) == "I'll check now, sir. Nothing is running."
+
+
+def test_a_turn_does_not_say_the_same_sentence_twice():
+    """09-27 01:03: 'I'll ask Code Puppy what he can do for you' spoken three times."""
+    from remote_agent_protocol.brain import _drop_repeats
+
+    said: list[str] = []
+    first = _drop_repeats("I'll ask Code Puppy what he can do for you, handsome. ", said)
+    second = _drop_repeats(
+        "I'll ask Code Puppy what he can do for you. I've got Code Puppy on it. ", said
+    )
+    third = _drop_repeats("Got it. I'll ask code puppy what he can do for you! ", said)
+
+    assert first == "I'll ask Code Puppy what he can do for you, handsome. "
+    assert second == "I've got Code Puppy on it. "
+    assert third == "Got it. "
+
+
+@pytest.mark.asyncio
+async def test_starting_the_same_request_again_reports_the_task_already_running():
+    bridge = FakeBridge()
+    dispatcher = FakeDispatcher(bridge)
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), dispatcher)
+    args = {
+        "agent": "code puppy",
+        "instructions": "Tell the user what tasks you can complete for them.",
+        "subject": "Code Puppy capabilities",
+    }
+
+    first = await box.call("start_task", args)
+    second = await box.call(
+        "start_task", {**args, "instructions": "Tell the user what tasks you can complete."}
+    )
+    other = await box.call(
+        "start_task",
+        {"agent": "code puppy", "instructions": "Fix the failing tests", "subject": "tests"},
+    )
+
+    assert len(dispatcher.calls) == 2, "the repeat was not dispatched; the new request was"
+    assert second["summary"].startswith("Already started:") and second["task"] == first["task"]
+    assert other["task"] != first["task"]
