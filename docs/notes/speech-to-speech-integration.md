@@ -127,6 +127,21 @@ already installed, the spaCy model is what is actually missing.
 Match the model version to the installed spaCy major.minor (`spacy 3.8.x` ->
 `en_core_web_sm-3.8.0`).
 
+The frontend's venv also needs a **CUDA build of PyTorch**. PyPI serves Windows
+only CPU wheels, so a plain `uv sync` can swap the CUDA build out without a
+word; Parakeet and Kokoro then log one "falling back to CPU" warning and every
+turn's transcription takes seconds instead of a fraction of one. The local
+checkout's `pyproject.toml` carries a `[tool.uv.sources]` pin of torch and
+torchaudio to PyTorch's cu128 index on Windows (upstream does not; an RTX
+50-series card needs cu128 or newer), and the stack launcher warns at startup
+if the venv holds a CPU-only build anyway. To reinstall by hand:
+
+```cmd
+uv pip install --python .venv\Scripts\python.exe torch torchaudio ^
+  --index-url https://download.pytorch.org/whl/cu128 ^
+  --reinstall-package torch --reinstall-package torchaudio
+```
+
 ## Starting it
 
 ```cmd
@@ -178,6 +193,16 @@ Two constraints shape the implementation:
 - **The socket must not coalesce.** Each chunk is a sentence someone is waiting
   to hear, so the handler disables Nagle; otherwise the kernel batches the small
   writes and hands the frontend one late delivery.
+- **The frontend must speak a chunk when it arrives.** Every chunk the brain
+  streams ends on a sentence and carries a top-level `rap` field. The local
+  frontend checkout marks those deltas complete and speaks them at once; its own
+  sentence splitter would otherwise hold "I'll check on that." until the next
+  sentence began, which on a tool-calling turn is after the tools finish.
+- **The frontend must speak a chunk when it arrives.** Every chunk the brain
+  streams ends on a sentence and carries a top-level `rap` field. The frontend
+  marks those deltas complete and speaks them at once; its own sentence splitter
+  would otherwise hold "I'll check on that." until the next sentence began,
+  which on a tool-calling turn is after the tools finish.
 
 Non-streaming callers still work. Both GUI brain mode and the headless bridge
 forward sentence chunks incrementally; neither waits for `complete()` and then

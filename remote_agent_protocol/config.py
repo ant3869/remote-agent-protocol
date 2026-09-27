@@ -847,6 +847,11 @@ AGENT_CHECK_WAIT_SECS = float(_env("AGENT_CHECK_WAIT_SECS", "8"))
 # turn, that turn uses the router path instead.
 BUTLER_TOOLS_ENABLED = _env_bool("BUTLER_TOOLS_ENABLED", False)
 BUTLER_MAX_TOOL_ROUNDS = int(_env("BUTLER_MAX_TOOL_ROUNDS", "5"))
+# Output cap per Butler model call. Reasoning models count their thinking
+# against it: measured 2026-09-27, a tool round used 376-403 of 512 tokens at
+# "low" effort, so a slightly longer think left nothing to say. A round that
+# still comes back empty is retried once with twice this.
+BUTLER_MAX_TOKENS = int(_env("BUTLER_MAX_TOKENS", str(max(CLOUD_LLM_MAX_TOKENS, 1024))))
 # The Butler's tasks (subject, instructions, which agents tried them) survive a
 # restart here, so "how's the email thing?" still resolves. Empty disables.
 BUTLER_TASKS_FILE = _env("BUTLER_TASKS_FILE", str(DATA_DIR / "butler_tasks.json"))
@@ -896,7 +901,9 @@ BUTLER_RULES = (
     " recent failed task on the next agent that is up right away -- don't ask which task."
     " In 'have Codex check on Code Puppy', Codex does the work and Code Puppy is only the"
     " subject: start the task on Codex. If a tool says a task needs confirmation, ask the"
-    " user to confirm. An agent that is still checking is not down: start work on it"
+    " user to confirm; when start_task says it has started, the work is already under"
+    " way, so never ask permission for it. An agent that is still checking is not down:"
+    " start work on it"
     " rather than refusing. Never promise to follow up unless a tool result says RAP"
     " will. Say what you are about to do at most once per turn; after a tool result,"
     " say only what is new, and never start the same task twice."
@@ -922,6 +929,10 @@ MODEL_PROVIDERS_PATH = Path(_env("MODEL_PROVIDERS_PATH", str(DATA_DIR / "model_p
 # CONVERSATION_RECENT_TURN_LIMIT is reserved for a future turn-count cap in
 # ContextAssembler -- context.py's ContextBudget is char-budgeted only today.
 CONVERSATION_CONTEXT_CHAR_BUDGET = int(_env("CONVERSATION_CONTEXT_CHAR_BUDGET", "48000"))
+# An agent's channel turns older than this (measured back from the request being
+# sent) stay out of its next task, so a channel reopened days later starts clean
+# instead of replaying last week's exchange -- stale errors included. 0 keeps all.
+CONVERSATION_RECENT_TURN_MAX_AGE_HOURS = float(_env("CONVERSATION_RECENT_TURN_MAX_AGE_HOURS", "6"))
 CONVERSATION_RECENT_TURN_LIMIT = int(_env("CONVERSATION_RECENT_TURN_LIMIT", "40"))
 CONVERSATION_CHANNEL_TURN_RETENTION = int(_env("CONVERSATION_CHANNEL_TURN_RETENTION", "5000"))
 CONVERSATION_PROGRESS_RETENTION = int(_env("CONVERSATION_PROGRESS_RETENTION", "500"))
@@ -1195,7 +1206,7 @@ AGENT_PROMISE_NOUNS = ("agent", "bat computer")
 RUNTIME_CONTEXT_TEMPLATE = (
     "\n\nCurrent local date and time: {now}. Your tool agent is '{agent}'.{hermes_note}"
 )
-HERMES_GENDER_NOTE = " Hermes is female; do not refer to her with male-coded terms."
+HERMES_GENDER_NOTE = " Hermes is female: refer to her as she/her, never he/him."
 
 # What the LLM is told INSTEAD of your raw command once the job is actually
 # dispatched -- so her acknowledgment is truthful, short, and in-character.

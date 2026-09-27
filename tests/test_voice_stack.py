@@ -17,9 +17,12 @@ def _no_running_instance(monkeypatch):
     """Answer the launcher's single-instance guard for every test in this file.
 
     Whether this machine happens to be running the app is never what these
-    tests are about, but it would otherwise decide their outcome.
+    tests are about, but it would otherwise decide their outcome. The same goes
+    for a developer .env that makes the brain cloud-only: the shipped default
+    keeps the local fallback, and the tests that need cloud-only say so.
     """
     monkeypatch.setattr(voice_stack.process_guard, "instance_is_running", lambda: False)
+    monkeypatch.setattr(cfg, "CLOUD_LLM_LOCAL_FALLBACK", True)
 
 
 def test_frontend_is_found_next_to_this_repo(monkeypatch, tmp_path):
@@ -859,6 +862,101 @@ def test_a_frontend_left_by_an_earlier_run_is_stopped_before_starting_a_new_one(
     assert reaped == 4242
     # /T as well: the frontend spawns an audio child that outlives it.
     assert killed and "4242" in killed[0] and "/T" in killed[0]
+
+
+def _server_stage(tmp_path):
+    return voice_stack.Stage(
+        name="speech-to-speech server",
+        args=[str(tmp_path / "run-rap-brain.cmd"), "--ws_port", "5"],
+        cwd=tmp_path,
+        pid_file=tmp_path / "s2s_server.pid",
+    )
+
+
+class _LaunchedProcess(_FakeProcess):
+    pid = 5151
+
+
+def test_a_server_left_by_an_earlier_run_is_stopped_and_this_one_recorded(monkeypatch, tmp_path):
+    """2026-09-27 01:36: the 00:57 run's speech server was still up at 01:24 with its
+    own CPU copies of Parakeet and Kokoro, slowing the new run's transcription;
+    nothing recorded it, so nothing could stop it."""
+    stage = _server_stage(tmp_path)
+    stage.pid_file.write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+    killed: list[list[str]] = []
+    monkeypatch.setattr(voice_stack, "process_is_running", lambda pid: pid == 4242)
+    monkeypatch.setattr(
+        voice_stack,
+        "process_command_line",
+        lambda pid: 'cmd.exe /c ""H:\\s2s\\run-rap-brain.cmd" --ws_port 8767"',
+    )
+    monkeypatch.setattr(voice_stack.sys, "platform", "win32")
+    monkeypatch.setattr(
+        voice_stack.subprocess, "run", lambda args, **kw: killed.append(args) or None
+    )
+    monkeypatch.setattr(voice_stack.subprocess, "Popen", lambda *a, **k: _LaunchedProcess())
+
+    voice_stack._spawn(stage, {})
+
+    assert killed and "4242" in killed[0] and "/T" in killed[0]
+    assert json.loads(stage.pid_file.read_text(encoding="utf-8"))["pid"] == 5151
+
+
+def test_a_recorded_pid_now_owned_by_another_program_is_left_alone(monkeypatch, tmp_path):
+    stage = _server_stage(tmp_path)
+    stage.pid_file.write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+    monkeypatch.setattr(voice_stack, "process_is_running", lambda pid: True)
+    monkeypatch.setattr(voice_stack, "process_command_line", lambda pid: "notepad.exe")
+    monkeypatch.setattr(
+        voice_stack.subprocess, "run", lambda *a, **k: pytest.fail("killed an unrelated pid")
+    )
+    monkeypatch.setattr(voice_stack.subprocess, "Popen", lambda *a, **k: _LaunchedProcess())
+
+    voice_stack._spawn(stage, {})
+
+
+def test_the_server_and_brain_stages_record_their_pids(tmp_path):
+    brain, server, _client = voice_stack.build_stages(tmp_path)
+
+    assert brain.pid_file == (cfg.DATA_DIR / "rap_brain.pid").resolve()
+    assert server.pid_file == (cfg.DATA_DIR / "s2s_server.pid").resolve()
+
+
+def _frontend_with_torch(tmp_path, *, launcher_device, cuda_line):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "run-rap-brain.cmd").write_text(
+        f"speech-to-speech.exe --parakeet_tdt_device {launcher_device} ^\n", encoding="utf-8"
+    )
+    torch_dir = tmp_path / ".venv/Lib/site-packages/torch"
+    torch_dir.mkdir(parents=True)
+    (torch_dir / "version.py").write_text(
+        f"__version__ = '2.11.0'\n{cuda_line}\n", encoding="utf-8"
+    )
+    return tmp_path
+
+
+def test_a_cpu_only_torch_under_a_cuda_launcher_is_caught(tmp_path):
+    """logs/speech-to-speech-server.log 2026-09-27: "CUDA requested but not available.
+    Falling back to CPU" -- a uv sync had swapped in PyPI's CPU-only wheel, and
+    every reply's transcription took ~3 s instead of a fraction of one."""
+    home = _frontend_with_torch(
+        tmp_path, launcher_device="cuda", cuda_line="cuda: Optional[str] = None"
+    )
+
+    assert voice_stack.cpu_only_torch_for_cuda_launcher(home) is True
+
+
+def test_a_cuda_torch_or_a_cpu_launcher_is_fine(tmp_path):
+    cuda_build = _frontend_with_torch(
+        tmp_path / "a", launcher_device="cuda", cuda_line="cuda: Optional[str] = '12.8'"
+    )
+    cpu_launcher = _frontend_with_torch(
+        tmp_path / "b", launcher_device="cpu", cuda_line="cuda: Optional[str] = None"
+    )
+
+    assert voice_stack.cpu_only_torch_for_cuda_launcher(cuda_build) is False
+    assert voice_stack.cpu_only_torch_for_cuda_launcher(cpu_launcher) is False
+    assert voice_stack.cpu_only_torch_for_cuda_launcher(tmp_path / "missing") is False
 
 
 def test_a_dead_pid_in_the_handshake_file_is_left_alone(monkeypatch, tmp_path):

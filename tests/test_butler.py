@@ -404,6 +404,35 @@ async def test_a_failure_after_a_tool_ran_ends_with_what_the_tools_said():
 
 
 @pytest.mark.asyncio
+async def test_an_empty_reply_is_asked_again_with_more_room():
+    """jess_runtime.log 2026-09-27 01:30: "Hermes is a girl..." got "Sorry, I lost my
+    train of thought." -- a reasoning model can spend its whole token cap thinking and
+    stream nothing, which is not an answer worth speaking."""
+    bridge = FakeBridge()
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), FakeDispatcher(bridge))
+    answers = iter([Say(""), Say("Noted, she's Hermes to me.")])
+    model = FakeModel(lambda messages, tools_offered: next(answers))
+
+    reply = await _run_loop(model, box)
+
+    assert reply == "Noted, she's Hermes to me."
+    assert len(model.requests) == 2
+    assert model.requests[1]["max_tokens"] > model.requests[0]["max_tokens"]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_stays_empty_still_ends_the_turn_honestly():
+    bridge = FakeBridge()
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), FakeDispatcher(bridge))
+    model = FakeModel(lambda messages, tools_offered: Say(""))
+
+    reply = await _run_loop(model, box)
+
+    assert reply == "Sorry, I lost my train of thought."
+    assert len(model.requests) == 2, "one retry, not a loop"
+
+
+@pytest.mark.asyncio
 async def test_the_last_round_offers_no_tools_so_the_model_must_answer():
     bridge = FakeBridge()
     box, _ = _toolbox(bridge, await _plane_with_recent_answers(), FakeDispatcher(bridge))
@@ -448,6 +477,20 @@ async def _turn(session, model: FakeModel, text: str) -> str:
         pieces = [str(p) async for p in session.complete_stream(text)]
         session._http = None
         return "".join(pieces)
+
+
+@pytest.mark.asyncio
+async def test_the_butler_is_told_how_to_refer_to_hermes(butler_session):
+    """2026-09-27 01:29: "Uh Hermes is a girl. Can you refer to her as her?" -- the
+    note existed, but only the router path's prompt carried it."""
+    session, _ = butler_session
+    model = FakeModel(lambda messages, tools_offered: Say("Sure."))
+
+    await _turn(session, model, "hello")
+
+    system = model.requests[0]["messages"][0]["content"]
+    assert "hermes" in session._bridge.backend_names()
+    assert "she/her" in system
 
 
 @pytest.mark.asyncio

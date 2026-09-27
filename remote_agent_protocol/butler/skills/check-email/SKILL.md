@@ -14,6 +14,8 @@ description: When the user asks to check, summarize, or triage their email or in
    the sender, the subject, and one line on what it wants. Skip newsletters,
    promotions, and automated notifications. Do not reply to, delete, archive, or
    mark anything."
-3. Tell the user it has started and that the result will be announced.
-4. Anything that sends, deletes, or changes email needs the user's explicit
-   request and goes through confirmation.
+3. Reading and summarizing needs no permission: once start_task says it has
+   started, tell the user it is under way and that the result will be
+   announced. Never ask them to okay a check that is already running.
+4. Sending, deleting, or changing email is different: do it only when the user
+   explicitly asks, and it goes through confirmation.

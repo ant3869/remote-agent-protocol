@@ -653,8 +653,11 @@ class AgentConversationHub:
                     self._save()
                 return
 
+            # The bridge's status is the verdict. A failure_kind on a "done"
+            # job is a provider error the agent printed and then recovered
+            # from; its answer is still the answer.
             failure_kind = str(event.get("failure_kind") or "")
-            if status == "failed" or failure_kind:
+            if status == "failed":
                 result_kind, new_status = ResultKind.FAILURE, "failed"
             elif status == "done":
                 try:

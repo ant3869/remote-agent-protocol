@@ -334,6 +334,33 @@ async def test_failed_background_job_triggers_butler_intervention_event(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_a_job_that_recovered_from_a_provider_error_is_still_a_success(tmp_path):
+    """jess_agent_history.json 2026-09-27 01:04 (job-10): Code Puppy printed a passing
+    "status_code: 404" and then answered in full, but the leftover failure_kind made
+    the hub narrate its answer as "ran into a problem I can't fix on my own"."""
+    events = []
+    hub, _registry, _adapters = make_hub(tmp_path, on_event=events.append)
+    disposition = await hub.handle_turn(turn_request("OpenClaw, check my email"))
+    task = hub.task(disposition.task_id)
+
+    await hub.handle_job_event(
+        {
+            "type": "agent_job",
+            "agent": "openclaw",
+            "job_id": task.attempt_id,
+            "status": "done",
+            "failure_kind": "model_not_found",
+            "failure_detail": "status_code: 404, model_name:",
+            "result": "Inbox is clear.",
+        }
+    )
+
+    assert hub.task(disposition.task_id).status == "done"
+    assert hub.turns("agent:openclaw")[-1].result_kind == ResultKind.SUCCESS
+    assert "conversation_butler_intervention_started" not in [item["event"] for item in events]
+
+
+@pytest.mark.asyncio
 async def test_machine_output_requires_the_same_bound_agent_to_author_a_final_result(tmp_path):
     """Fallback CLI text is an artifact, never an agent's canonical answer."""
     events = []

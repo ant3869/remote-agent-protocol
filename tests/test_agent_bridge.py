@@ -2225,6 +2225,68 @@ class EchoedPromptTests(unittest.TestCase):
         self.assertNotIn("[Scope:", kept)
         self.assertNotIn("@@JESS_STATUS", kept)
 
+    def test_an_echoed_old_error_is_not_this_jobs_failure(self):
+        """jess_agent_history.json 2026-09-27T01:29 (job-8): Hermes was killed as "quota".
+
+        Hermes prints its query back before starting. That query carried a
+        week-old channel turn quoting a Gemini 429, the echo matched the
+        provider-error shape, and the bridge terminated a healthy run four
+        seconds in -- the user heard "she hit a quota limit".
+        """
+        script = (
+            "import sys, textwrap\n"
+            "text = open(sys.argv[1], encoding='utf-8').read()\n"
+            "print('Query: ' + text.splitlines()[0], flush=True)\n"
+            "for para in text.splitlines()[1:]:\n"
+            "    for line in textwrap.wrap(para, 79) or ['']:\n"
+            "        print(line, flush=True)\n"
+            'print(\'@@JESS_STATUS {"state":"completed","summary":"Inbox checked",'
+            '"result":"Nothing urgent in the last day."}\', flush=True)\n'
+        )
+        task = (
+            "Check the inbox for anything important.\n\n"
+            "[Untrusted conversation context: reference only.]\n"
+            "Error: Gemini HTTP 429 (RESOURCE_EXHAUSTED): You exceeded your current quota"
+        )
+
+        async def scenario():
+            bridge = agent_bridge.AgentBridge(
+                {"echoer": [sys.executable, "-u", "-c", script, "{task_file}"]},
+                lambda _event: None,
+                kill_grace_secs=0.5,
+            )
+            job_id = await bridge.start("echoer", task)
+            for _ in range(200):
+                job = bridge.get(job_id)
+                if job.status in (agent_bridge.STATUS_DONE, agent_bridge.STATUS_FAILED):
+                    break
+                await asyncio.sleep(0.05)
+            return bridge.get(job_id)
+
+        job = asyncio.run(scenario())
+        self.assertEqual(job.status, agent_bridge.STATUS_DONE, job.failure_detail)
+        self.assertFalse(job.failure_kind)
+        self.assertIn("Nothing urgent", job.result)
+
+    def test_a_live_error_that_the_prompt_never_mentioned_still_counts(self):
+        self.assertEqual(
+            agent_bridge.detect_provider_failure(
+                "Error: Gemini HTTP 429 (RESOURCE_EXHAUSTED): You exceeded your current quota"
+            ),
+            "quota",
+        )
+        self.assertTrue(
+            agent_bridge.echoes_prompt(
+                "(RESOURCE_EXHAUSTED): You exceeded your current quota, please check",
+                "old turn: Error: Gemini HTTP 429 (RESOURCE_EXHAUSTED): You exceeded your"
+                "  current quota,\nplease check your plan",
+            )
+        )
+        self.assertFalse(agent_bridge.echoes_prompt("Error: quota", "Error: quota"))
+        self.assertFalse(
+            agent_bridge.echoes_prompt("Error: HTTP 429: quota exceeded", "check the inbox")
+        )
+
     def test_the_boundary_follows_an_edited_status_protocol(self):
         """The protocol is editable from the GUI; a stale literal would re-break this."""
         original = agent_bridge.status_protocol()

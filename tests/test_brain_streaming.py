@@ -50,6 +50,9 @@ def test_split_sentences_keeps_closing_quotes_with_their_sentence():
 
 def _brain(monkeypatch, deltas):
     monkeypatch.setattr(cfg, "MEMORY_ENABLED", False)
+    # These cover the router path; a developer .env with the Butler switched on
+    # would otherwise hand every turn to it instead.
+    monkeypatch.setattr(cfg, "BUTLER_TOOLS_ENABLED", False)
     brain = BrainSession(PERSONAS[0])
     # Start from an empty history so a developer's saved memory file cannot
     # shift the message indices these tests assert on.

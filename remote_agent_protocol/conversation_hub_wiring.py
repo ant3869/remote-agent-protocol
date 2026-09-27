@@ -45,7 +45,12 @@ def build_app_conversation_hub(
         backends=cfg.AGENT_BACKENDS if backends is None else backends,
         aliases=cfg.AGENT_SPOKEN_ALIASES,
         default_agent_id=None,
-        context_budget=ContextBudget(total_chars=cfg.CONVERSATION_CONTEXT_CHAR_BUDGET),
+        context_budget=ContextBudget(
+            total_chars=cfg.CONVERSATION_CONTEXT_CHAR_BUDGET,
+            recent_turns_max_age_secs=max(
+                0, round(cfg.CONVERSATION_RECENT_TURN_MAX_AGE_HOURS * 3600)
+            ),
+        ),
         segment_chars=cfg.CONVERSATION_SPEECH_SEGMENT_CHARS,
         on_event=on_event,
     )

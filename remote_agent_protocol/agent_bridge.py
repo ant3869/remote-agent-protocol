@@ -372,6 +372,9 @@ class AgentJob:
     _models_tried: list[str] = field(default_factory=list, repr=False)
     _failover_to: str | None = field(default=None, repr=False)
     _quota_stopped: bool = field(default=False, repr=False)
+    # The full prompt this attempt was launched with, so output that merely
+    # repeats it is never mistaken for the agent's own failure.
+    _prompt: str = field(default="", repr=False)
 
 
 def clean_session_template(template: list[str]) -> list[str]:
@@ -543,6 +546,21 @@ def detect_provider_failure(line: str) -> str | None:
     if _AUTH_RE.search(line):
         return "auth"
     return None
+
+
+_MIN_ECHO_CHARS = 24
+
+
+def echoes_prompt(line: str, prompt: str) -> bool:
+    """Whether ``line`` is the agent printing back part of the prompt it was sent.
+
+    Hermes prints its whole query before it starts, wrapped to the terminal, so
+    each echoed line is a stretch of the prompt once whitespace is collapsed.
+    Very short lines are never treated as echoes: a bare "Error: quota" can
+    appear in both by coincidence.
+    """
+    text = " ".join(clean_line(line).split())
+    return len(text) >= _MIN_ECHO_CHARS and text in " ".join(prompt.split())
 
 
 # Key/token-shaped substrings to strip before any raw process output is kept
@@ -1585,6 +1603,7 @@ class AgentBridge:
             return
         client, agent = resolved
         job.cwd = cwd or ""
+        job._prompt = task
         job._host_before = await self._host_snapshot()
         request = remote_protocol.JobRequest(
             agent=agent,
@@ -1692,6 +1711,7 @@ class AgentBridge:
                     command_task += "\n\n" + consult_protocol(
                         peers, str(folder), budget=cfg.AGENT_CONSULT_BUDGET
                     )
+        job._prompt = command_task
         template = list(job._command_template) if job._command_template else self._backends[agent]
         try:
             prompt_file = _write_agent_prompt(command_task) if "{task_file}" in template else None
@@ -2102,6 +2122,8 @@ class AgentBridge:
                 continue
 
             failure_kind = detect_provider_failure(line)
+            if failure_kind and echoes_prompt(line, job._prompt):
+                failure_kind = None
             if failure_kind:
                 job.failure_kind = failure_kind
                 job.failure_detail = line[:300]

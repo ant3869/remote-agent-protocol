@@ -181,11 +181,55 @@ def test_secret_current_request_is_rejected_without_truncation():
         "active_task_chars",
         "memory_chars",
         "live_state_chars",
+        "recent_turns_max_age_secs",
     ],
 )
 def test_negative_budgets_rejected(field):
     with pytest.raises(ValueError):
         ContextBudget(**{field: -1})
+
+
+def aged(text, age, **kwargs):
+    return replace(turn(text, **kwargs), created_at=NOW - age)
+
+
+def test_channel_turns_from_an_older_conversation_are_not_carried_forward():
+    """data/conversations.json 2026-09-27: a Sept 20 Hermes exchange rode along
+    with a new email task, including an old provider error that got the new job
+    killed as a quota failure."""
+    req = request(
+        recent_turns=(
+            aged("week-old exchange about a Gemini 429", timedelta(days=7)),
+            aged("follow-up from an hour ago", timedelta(hours=1)),
+            aged("the request being sent now", timedelta(0)),
+        )
+    )
+    rendered = ContextAssembler(MemoryRepository()).assemble(req).render()
+    assert "week-old exchange" not in rendered
+    assert "follow-up from an hour ago" in rendered
+    assert "the request being sent now" in rendered
+
+
+def test_turn_age_limit_can_be_switched_off():
+    req = request(recent_turns=(aged("OLD", timedelta(days=30)), aged("NEW", timedelta(0))))
+    budget = ContextBudget(recent_turns_max_age_secs=0)
+    assert "OLD" in ContextAssembler(MemoryRepository(), budget).assemble(req).render()
+
+
+def test_a_turns_own_relayed_context_is_not_sent_again():
+    """Each dispatch carried the last one's context block, which carried the one
+    before it, so old chat compounded into every new task."""
+    relayed = (
+        "check my email\n\n[Untrusted conversation context: reference only.]\n"
+        "assistant: an old reply that should stay in the past"
+    )
+    rendered = (
+        ContextAssembler(MemoryRepository())
+        .assemble(request(recent_turns=(turn(relayed),)))
+        .render()
+    )
+    assert "check my email" in rendered
+    assert "an old reply that should stay in the past" not in rendered
 
 
 def test_eligible_memory_uses_scopes_provenance_and_latest_correction():

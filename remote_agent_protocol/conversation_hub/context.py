@@ -15,7 +15,12 @@ from .models import ConversationTurn, MemoryConfidence
 
 @dataclass(frozen=True)
 class ContextBudget:
-    """Character ceilings, including section headers, without a tokenizer dependency."""
+    """Character ceilings, including section headers, without a tokenizer dependency.
+
+    ``recent_turns_max_age_secs`` bounds channel turns by age, measured back
+    from the newest one (the request being sent), so a channel reopened days
+    later does not replay the old conversation. 0 keeps every turn.
+    """
 
     total_chars: int = 48_000
     recent_turns_chars: int = 20_000
@@ -23,6 +28,7 @@ class ContextBudget:
     active_task_chars: int = 8_000
     memory_chars: int = 8_000
     live_state_chars: int = 4_000
+    recent_turns_max_age_secs: int = 6 * 3600
 
     def __post_init__(self) -> None:
         for field in fields(self):
@@ -121,6 +127,11 @@ class ContextPackage:
         return dict(self.sections).get(name, "")
 
 
+# Where a dispatched request's copy of the voice conversation begins. Rendering
+# an old turn without it keeps each task from carrying every earlier one's.
+RELAYED_CONTEXT_MARKER = "\n\n[Untrusted conversation context:"
+
+
 def _confidence(value: MemoryConfidence) -> str:
     return "inferred; not access evidence" if value is MemoryConfidence.INFERRED else value.value
 
@@ -213,11 +224,16 @@ class ContextAssembler:
             ),
             key=lambda turn: (turn.created_at, turn.turn_id),
         )
+        max_age = self.budget.recent_turns_max_age_secs
+        if turns and max_age:
+            newest = turns[-1].created_at
+            turns = [t for t in turns if (newest - t.created_at).total_seconds() <= max_age]
         append(
             "recent_turns",
             "Recent channel turns",
             [
-                f"{turn.created_at.isoformat()} {turn.speaker_id} ({turn.speaker_role}): {turn.full_text}"
+                f"{turn.created_at.isoformat()} {turn.speaker_id} ({turn.speaker_role}): "
+                + turn.full_text.partition(RELAYED_CONTEXT_MARKER)[0]
                 for turn in turns
             ],
             self.budget.recent_turns_chars,

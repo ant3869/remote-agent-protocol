@@ -53,6 +53,10 @@ class Stage:
     ready_timeout: float = 180.0
     stop: Callable[[], bool] | None = None
     ready_file: Path | None = None
+    # Where the launched pid is recorded, so the next run can stop a stage this
+    # run's supervisor died without stopping. The ports are new every run, so a
+    # leftover otherwise runs on unnoticed, holding its own copies of the models.
+    pid_file: Path | None = None
 
 
 def realtime_ready(websocket_url: str, pool_url: str) -> Callable[[], bool]:
@@ -209,6 +213,27 @@ def occupied_ports(
         ("speech-to-speech server", cfg.S2S_WS_PORT if ws_port is None else ws_port),
     )
     return [(name, port) for name, port in wanted if port_open("127.0.0.1", port)()]
+
+
+def cpu_only_torch_for_cuda_launcher(s2s_home: Path) -> bool:
+    """Whether the launcher asks for CUDA but the frontend's venv has a CPU-only torch.
+
+    PyPI serves Windows only CPU wheels, so a plain ``uv sync`` swaps a CUDA
+    build out without a word; the frontend then logs one warning and runs
+    speech recognition and TTS on the CPU for every turn. Read from torch's
+    own version file, because importing torch takes too long for a preflight.
+    """
+    try:
+        launcher = (s2s_home / "run-rap-brain.cmd").read_text(encoding="utf-8")
+        version = (s2s_home / ".venv/Lib/site-packages/torch/version.py").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return False
+    if not re.search(r"--\w+_device\s+cuda\b", launcher):
+        return False
+    match = re.search(r"^cuda\s*(?::[^=]*)?=\s*(.+)$", version, re.MULTILINE)
+    return match is not None and match[1].strip() == "None"
 
 
 def missing_kokoro_requirements(s2s_home: Path) -> list[str]:
@@ -479,6 +504,7 @@ def build_stages(
                 f"http://127.0.0.1:{bridge_port}/api/stack-shutdown",
                 bridge_api_key,
             ),
+            pid_file=(cfg.DATA_DIR / "rap_brain.pid").resolve(),
         ),
         Stage(
             name="speech-to-speech server",
@@ -531,6 +557,7 @@ def build_stages(
                 f"http://127.0.0.1:{ws_port}/v1/pool",
             ),
             ready_timeout=600.0,
+            pid_file=(cfg.DATA_DIR / "s2s_server.pid").resolve(),
         ),
         Stage(
             # The launcher knows the real paths and port, so pass them rather
@@ -615,6 +642,57 @@ def stage_log_path(stage_name: str) -> Path:
     return REPO_ROOT / "logs" / f"{slug}.log"
 
 
+def _recorded_pid(path: Path) -> int:
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8")).get("pid", 0))
+    except (OSError, TypeError, ValueError, AttributeError, json.JSONDecodeError):
+        return 0
+
+
+def process_command_line(pid: int) -> str | None:
+    """The command line ``pid`` was started with, or None if it can't be read."""
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            return result.stdout.strip() or None
+        return Path(f"/proc/{int(pid)}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return None
+
+
+def _stage_marker(stage: Stage) -> str:
+    """Text only this stage's own command line contains: its script or module."""
+    scripts = [Path(arg).name for arg in stage.args if arg.lower().endswith((".cmd", ".bat"))]
+    return scripts[0] if scripts else stage.args[-1]
+
+
+def reap_recorded_stage(stage: Stage) -> int | None:
+    """Stop the process an earlier run recorded for ``stage``, if it is still that stage.
+
+    A pid outlives its process: Windows hands it out again, so a recorded pid
+    is stopped only while its command line still names this stage.
+    """
+    if stage.pid_file is None:
+        return None
+    pid = _recorded_pid(stage.pid_file)
+    if pid <= 0 or not process_is_running(pid):
+        return None
+    if _stage_marker(stage).lower() not in (process_command_line(pid) or "").lower():
+        return None
+    return _stop_leftover(pid)
+
+
 def reap_previous_stage(ready_file: Path) -> int | None:
     """Stop the process a previous run left behind, returning its pid if any.
 
@@ -625,13 +703,13 @@ def reap_previous_stage(ready_file: Path) -> int | None:
     transcribing. Orphans accumulate one per start until the machine runs out
     of memory, because nothing else ever looks for them.
     """
-    try:
-        payload = json.loads(ready_file.read_text(encoding="utf-8"))
-        pid = int(payload.get("pid", 0))
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return None
+    pid = _recorded_pid(ready_file)
     if pid <= 0 or not process_is_running(pid):
         return None
+    return _stop_leftover(pid)
+
+
+def _stop_leftover(pid: int) -> int | None:
     logger.warning(f"Stopping the stage an earlier run left running (pid {pid})")
     try:
         if sys.platform == "win32":
@@ -655,6 +733,7 @@ def _spawn(stage: Stage, env: dict[str, str]) -> subprocess.Popen:
         reap_previous_stage(stage.ready_file)
         stage.ready_file.unlink(missing_ok=True)
         stage.ready_file.with_suffix(stage.ready_file.suffix + ".tmp").unlink(missing_ok=True)
+    reap_recorded_stage(stage)
     log_path = stage_log_path(stage.name)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Truncate per run: "the last run's log" is the useful artifact, and the
@@ -669,6 +748,12 @@ def _spawn(stage: Stage, env: dict[str, str]) -> subprocess.Popen:
             stdout=log_handle,
             stderr=subprocess.STDOUT,
         )
+    if stage.pid_file is not None:
+        try:
+            stage.pid_file.parent.mkdir(parents=True, exist_ok=True)
+            stage.pid_file.write_text(json.dumps({"pid": process.pid}), encoding="utf-8")
+        except OSError as exc:
+            logger.warning(f"Could not record the {stage.name} pid: {exc}")
     return process
 
 
@@ -797,6 +882,16 @@ def run_stack() -> int:
             "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
         )
         return 2
+    if cpu_only_torch_for_cuda_launcher(s2s_home):
+        # Still starts -- slow speech beats none -- but says why it is slow.
+        logger.warning(
+            "The frontend is set to run speech recognition and TTS on the GPU, but its "
+            "venv has a CPU-only PyTorch, so every reply will be transcribed on the CPU "
+            "(seconds instead of a fraction of one). Reinstall the CUDA build:\n"
+            "  uv pip install --python .venv\\Scripts\\python.exe torch torchaudio "
+            "--index-url https://download.pytorch.org/whl/cu128 "
+            "--reinstall-package torch --reinstall-package torchaudio"
+        )
     if (backend_problem := ensure_llm_backend()) is not None:
         logger.error(backend_problem)
         return 2

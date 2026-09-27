@@ -58,6 +58,9 @@ class _Timeline:
     def close(self) -> None:
         self.finish()
         self._report(done=True)
+        if self._steps:
+            path = " -> ".join(f"{s['label']} {s['secs']}s" for s in self._steps)
+            logger.info(f"Butler turn {round(time.monotonic() - self._t0, 2)}s: {path}")
 
     def _report(self, *, done: bool) -> None:
         if self._listener is None:
@@ -81,6 +84,8 @@ class _Timeline:
 class _Round:
     text: str = ""
     tool_calls: dict[int, dict] = field(default_factory=dict)
+    finish_reason: str = ""
+    usage: dict = field(default_factory=dict)
     _slots: dict[int, int] = field(default_factory=dict)  # provider index -> our slot
     _last_slot: int | None = None
 
@@ -184,14 +189,18 @@ class ButlerLoop:
         last_char = ""
         endpoint_index = 0
         round_number = 0
+        retried_empty = False
         while round_number < self._max_rounds:
             endpoint = endpoints[endpoint_index]
             final_round = round_number == self._max_rounds - 1
             current = _Round()
+            # A reasoning model can spend the whole cap thinking and stream
+            # nothing; the one retry of an empty round gets twice the room.
+            max_tokens = self._max_tokens * (2 if retried_empty else 1)
             timeline.start("model", endpoint.label)
             try:
                 async for delta in self._stream_round(
-                    endpoint, conversation, current, final_round, schemas
+                    endpoint, conversation, current, final_round, schemas, max_tokens
                 ):
                     # Text from an earlier round ("I'll check now, sir.") and
                     # this round's answer arrive as separate streams; keep a
@@ -223,6 +232,14 @@ class ButlerLoop:
             llm_endpoint.record_answer(llm_endpoint.BRAIN, endpoint)
             if not current.tool_calls:
                 if not current.text.strip():
+                    logger.warning(
+                        f"Butler model {endpoint.label} answered with nothing"
+                        f" (finish_reason={current.finish_reason or 'none'},"
+                        f" max_tokens={max_tokens}, usage={current.usage or 'unreported'})"
+                    )
+                    if not retried_empty:
+                        retried_empty = True
+                        continue
                     yield (
                         _fallback_sentence(results)
                         if results
@@ -273,6 +290,11 @@ class ButlerLoop:
                     timeline.start("tool", call["name"])
                     result = await self._toolbox.call(call["name"], call["arguments"] or "{}")
                     timeline.finish()
+                logger.info(
+                    f"Butler tool {call['name']}({call['history_arguments'][:200]}) -> "
+                    f"{result.get('status', 'error' if 'error' in result else 'ok')}: "
+                    f"{str(result.get('summary', ''))[:240]}"
+                )
                 results.append(result)
                 if self._on_tool is not None:
                     try:
@@ -305,6 +327,7 @@ class ButlerLoop:
         current: _Round,
         final_round: bool,
         schemas: list[dict],
+        max_tokens: int,
     ) -> AsyncIterator[str]:
         http = self._http()
         if http is None:
@@ -314,7 +337,7 @@ class ButlerLoop:
             "messages": conversation,
             "stream": True,
             "temperature": 0.3,
-            "max_tokens": self._max_tokens,
+            "max_tokens": max_tokens,
         }
         if not final_round and schemas:
             payload["tools"] = schemas
@@ -368,7 +391,10 @@ class ButlerLoop:
                 continue
             if isinstance(chunk, dict) and chunk.get("error"):
                 raise RuntimeError(f"provider error: {chunk['error']}")
+            if isinstance(chunk.get("usage"), dict):
+                current.usage = chunk["usage"]
             choice = (chunk.get("choices") or [{}])[0]
+            current.finish_reason = choice.get("finish_reason") or current.finish_reason
             delta = choice.get("delta") or {}
             for tool_delta in delta.get("tool_calls") or ():
                 current.add_tool_delta(tool_delta)

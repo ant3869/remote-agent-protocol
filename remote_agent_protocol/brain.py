@@ -287,7 +287,7 @@ class BrainSession:
             endpoints=lambda: llm_endpoint.chain(llm_endpoint.BRAIN),
             http=lambda: self._http,
             max_rounds=cfg.BUTLER_MAX_TOOL_ROUNDS,
-            max_tokens=cfg.CLOUD_LLM_MAX_TOKENS,
+            max_tokens=cfg.BUTLER_MAX_TOKENS,
             timeout_secs=cfg.CLOUD_LLM_TIMEOUT_SECS,
             on_tool=self._emit_butler_tool,
             on_timing=lambda timeline: self._emit({"type": "butler_timing", **timeline}),
@@ -1353,7 +1353,14 @@ class BrainSession:
             "task": "agent self-checks",
             "subject": "the agents that were still answering their check",
             "status": "done",
-            "summary": f"Self-check results: {summary}",
+            # 2026-09-27 01:28: the late codex/openclaw results came back as
+            # "Yes handsome, Hermes is up" a second time -- the model answered
+            # the user's last question again instead of this update.
+            "summary": (
+                f"Late self-check results, for these agents only: {summary}. Say just"
+                " these in one sentence; never repeat what was already said about any"
+                " other agent."
+            ),
         }
         while len(self._agent_events) > 120:
             self._agent_events.pop(next(iter(self._agent_events)))
@@ -1415,11 +1422,14 @@ class BrainSession:
         return f"Sending it to {agent} now."
 
     def _butler_system_instruction(self) -> str:
-        agents = ", ".join(self._bridge.backend_names()) or "none"
+        names = self._bridge.backend_names()
+        agents = ", ".join(names) or "none"
         now = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
         return (
             f"{self._persona.system_prompt}{cfg.BUTLER_RULES}"
-            f" Configured agents: {agents}. Current local time: {now}."
+            f" Configured agents: {agents}."
+            f"{cfg.HERMES_GENDER_NOTE if 'hermes' in names else ''}"
+            f" Current local time: {now}."
             f"{self._butler_toolbox.system_notes()}"
         )
 

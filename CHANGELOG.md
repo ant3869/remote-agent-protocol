@@ -134,6 +134,35 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
+- Jobs are no longer killed for errors that belong to someone else. An agent
+  that prints its prompt back (Hermes does) could be stopped as "out of quota"
+  because the prompt quoted an old provider error; output that only repeats
+  the prompt no longer counts as a failure.
+- A task sent to an agent no longer carries that agent's conversation from
+  days ago. Channel history older than six hours stays out
+  (`CONVERSATION_RECENT_TURN_MAX_AGE_HOURS`), and each earlier request's own
+  copy of the voice conversation isn't sent again, so old chat no longer piles
+  up inside every new task.
+- A job that hit a provider error, recovered, and answered is reported as the
+  success it was, not as "ran into a problem I can't fix on my own".
+- "Sorry, I lost my train of thought" no longer ends a turn just because a
+  reasoning model spent its whole budget thinking. An empty reply is asked
+  again with twice the room, the Butler has its own larger cap
+  (`BUTLER_MAX_TOKENS`, default 1024), and the log now records why a reply
+  came back empty.
+- The Butler knows Hermes is she/her, and keeps corrections like that as
+  memories.
+- The Butler no longer asks permission for work it has already started, and a
+  late self-check update reports only the agents it covers instead of
+  repeating the answer the user just heard.
+- The voice starts speaking "I'll check on that" as soon as it is said, not
+  after the tools finish: the speech frontend now speaks each sentence RAP
+  streams without waiting for the next one to begin (requires the matching
+  speech-to-speech change).
+- The voice stack stops a speech server or brain that an earlier run left
+  running, and warns at startup when the speech frontend has a CPU-only
+  PyTorch, which moves speech recognition and TTS onto the CPU.
+- Each Butler turn now logs its tool calls and where its time went.
 - The assistant no longer repeats itself within a turn: a sentence nearly the
   same as one already spoken that turn is dropped, history keeps what was
   actually said, and asking an agent for the same thing again within two

@@ -96,7 +96,7 @@ class ButlerMemory:
             used += len(entry)
         known = f" Things the user asked you to remember: {'; '.join(facts)}." if facts else ""
         return (
-            f"{known} When the user asks you to remember something, call remember; when they"
-            " ask what you know about something not listed here, call recall; forget only what"
-            " they ask you to forget."
+            f"{known} When the user asks you to remember something, or corrects a lasting fact"
+            " such as how to refer to someone, call remember; when they ask what you know about"
+            " something not listed here, call recall; forget only what they ask you to forget."
         )
