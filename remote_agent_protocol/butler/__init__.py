@@ -14,6 +14,7 @@ from remote_agent_protocol.butler.tools import (
     ButlerToolbox,
     DispatchOutcome,
 )
+from remote_agent_protocol.butler.web import WebLookup
 
 __all__ = [
     "BUILTIN_SKILLS_DIR",
@@ -29,4 +30,5 @@ __all__ = [
     "Skill",
     "SkillLibrary",
     "TaskLedger",
+    "WebLookup",
 ]

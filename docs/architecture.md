@@ -438,7 +438,12 @@ instructions, which can direct only the tools the Butler already has. `remember`
 and `forget` (`butler.ButlerMemory`) keep user-stated facts as shared memories
 in the conversation hub (`AgentConversationHub.remember`), so the memory
 policy's secret filter applies and agents receive them with their context; the
-newest are listed in the Butler's system prompt. Only the local time query and
+newest are listed in the Butler's system prompt. `web_search` (Tavily, Brave, or
+SearXNG) and `read_page` (`butler.WebLookup`) answer quick facts without an
+agent; `read_page` refuses non-public addresses, rechecking every redirect.
+Web text is untrusted, so once a web tool has run in a turn the loop narrows
+the remaining rounds to read-only tools: nothing a page says can start a task,
+switch a model, or write a memory until the user speaks again. Only the local time query and
 a yes/no to a held task bypass the model. Tool traffic is never persisted: history keeps the
 user's words and the final reply. If no endpoint can start the turn, it runs
 on the router path instead; if the model fails after a tool ran, the turn ends

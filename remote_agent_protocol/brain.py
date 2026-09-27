@@ -48,6 +48,7 @@ from remote_agent_protocol.butler import (
     DispatchOutcome,
     SkillLibrary,
     TaskLedger,
+    WebLookup,
 )
 from remote_agent_protocol.control_plane import AgentControlPlane, AgentRegistry
 from remote_agent_protocol.control_plane.adapters.base import AgentTask
@@ -254,6 +255,20 @@ class BrainSession:
             memory=(
                 ButlerMemory(self._conversation_hub, lambda: self._butler_turn_id)
                 if cfg.BUTLER_MEMORY_ENABLED
+                else None
+            ),
+            web=(
+                WebLookup(
+                    lambda: self._http,
+                    provider=cfg.WEB_SEARCH_PROVIDER,
+                    api_key=(
+                        cfg.TAVILY_API_KEY
+                        if cfg.WEB_SEARCH_PROVIDER == "tavily"
+                        else cfg.BRAVE_SEARCH_API_KEY
+                    ),
+                    searxng_url=cfg.SEARXNG_URL,
+                )
+                if cfg.BUTLER_WEB_ENABLED
                 else None
             ),
         )

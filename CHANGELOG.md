@@ -12,6 +12,12 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Butler web lookup: "what's the weather in Leeds?", "read me this link".
+  `read_page` works out of the box; `web_search` needs a Tavily or Brave
+  Search key, or a SearXNG URL. Pages on your own machine or network are never
+  read, even through a redirect, and once the web has been read in a turn,
+  that turn can only use read-only tools -- a web page can't start a task or
+  plant a memory.
 - Butler memory: "remember I prefer Codex for UI work", "what do you know
   about the landing page?", "forget my coffee order". Facts are kept in the
   conversation hub's memory store, which refuses recognizable secrets, and are

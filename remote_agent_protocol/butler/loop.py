@@ -19,7 +19,7 @@ import aiohttp
 from loguru import logger
 
 from remote_agent_protocol import llm_endpoint
-from remote_agent_protocol.butler.tools import ButlerToolbox
+from remote_agent_protocol.butler.tools import READ_ONLY_TOOLS, WEB_TOOLS, ButlerToolbox
 
 ToolListener = Callable[[str, dict, dict], None]
 TimingListener = Callable[[dict], None]
@@ -178,6 +178,7 @@ class ButlerLoop:
         timeline: _Timeline,
     ) -> AsyncIterator[str]:
         conversation = list(messages)
+        web_read = False
         results: list[dict] = []
         spoke = False
         last_char = ""
@@ -255,10 +256,13 @@ class ButlerLoop:
             )
             for call in calls:
                 if allowed_tools is not None and call["name"] not in allowed_tools:
-                    result = {
-                        "error": f"{call['name']} is not available right now.",
-                        "summary": f"{call['name']} is not available right now.",
-                    }
+                    reason = (
+                        f"{call['name']} can't run in a turn that has read the web. Tell the user"
+                        " what you found; they can ask for it in their own words."
+                        if web_read
+                        else f"{call['name']} is not available right now."
+                    )
+                    result = {"error": reason, "summary": reason}
                 else:
                     timeline.start("tool", call["name"])
                     result = await self._toolbox.call(call["name"], call["arguments"] or "{}")
@@ -276,6 +280,15 @@ class ButlerLoop:
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )
+            # Web text is untrusted: once the model has seen it, nothing it asks
+            # for may act -- no tasks, model switches, or memories -- until the
+            # user speaks again. Calls made alongside the web call in the same
+            # round were chosen before its text was read.
+            if not web_read and any(call["name"] in WEB_TOOLS for call in calls):
+                web_read = True
+                offered = {schema["function"]["name"] for schema in schemas}
+                allowed_tools = frozenset((allowed_tools or offered) & READ_ONLY_TOOLS)
+                schemas = [s for s in schemas if s["function"]["name"] in allowed_tools]
             round_number += 1
         yield _fallback_sentence(results)
 

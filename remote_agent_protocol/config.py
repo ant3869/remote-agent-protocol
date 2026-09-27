@@ -857,6 +857,20 @@ BUTLER_SKILLS_DIR = _env("BUTLER_SKILLS_DIR", str(DATA_DIR / "skills"))
 # shared memories in the conversation hub (which refuses recognizable secrets)
 # and so also handed to agents with their work.
 BUTLER_MEMORY_ENABLED = _env_bool("BUTLER_MEMORY_ENABLED", True)
+# Quick web lookups by the Butler himself: read_page (any public page) and,
+# with a provider configured, web_search. Once web text enters a turn, only
+# read-only tools remain for that turn, so a page can't start work.
+BUTLER_WEB_ENABLED = _env_bool("BUTLER_WEB_ENABLED", True)
+TAVILY_API_KEY = _env("TAVILY_API_KEY", "")
+BRAVE_SEARCH_API_KEY = _env("BRAVE_SEARCH_API_KEY", "")
+SEARXNG_URL = _env("SEARXNG_URL", "")
+# tavily | brave | searxng; empty picks whichever of the above is set.
+WEB_SEARCH_PROVIDER = (
+    _env("WEB_SEARCH_PROVIDER", "").strip().lower()
+    or ("tavily" if TAVILY_API_KEY else "")
+    or ("brave" if BRAVE_SEARCH_API_KEY else "")
+    or ("searxng" if SEARXNG_URL else "")
+)
 BUTLER_RULES = (
     " You are the front door to the user's agents, and you act only through your tools."
     " Say only what your tools returned: never claim an agent was contacted, is working,"
