@@ -35,7 +35,10 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   `description` in frontmatter, then instructions -- the Claude Code layout)
   into `data/skills` (`BUTLER_SKILLS_DIR`) and the Butler loads it with
   `use_skill` when a request matches. Skills only direct the tools he already
-  has. A `briefing` skill ships as an example ("what did I miss?").
+  has. A `briefing` skill ships as an example ("what did I miss?"). Switch
+  one off with `enabled: false` in its frontmatter or
+  `BUTLER_SKILLS_DISABLED=name`, or all of them with
+  `BUTLER_SKILLS_ENABLED=false`.
 - Butler's mouth follows the words he is saying. The voice frontend only
   reports loudness, so the reply text (which arrives a sentence ahead of its
   audio) now picks each syllable's shape -- round for "oo"/"oh", wide for

@@ -372,3 +372,17 @@ async def test_agents_still_checking_are_announced_once_they_answer():
         await asyncio.sleep(0.01)
 
     assert len(announced) == 1 and announced[0][0].startswith("Hermes: Up")
+
+
+def test_skills_can_be_switched_off_by_frontmatter_by_name_or_by_overriding_a_packaged_one(
+    tmp_path,
+):
+    _write_skill(tmp_path, "packing", "---\ndescription: Packing\nenabled: false\n---\nList it.\n")
+    _write_skill(tmp_path, "email-style", "---\ndescription: Emails\n---\nBe brief.\n")
+    _write_skill(tmp_path, "briefing", "---\ndescription: Off\nenabled: false\n---\nx\n")
+
+    library = SkillLibrary(BUILTIN_SKILLS_DIR, tmp_path, disabled=["Email Style"])
+
+    assert library.catalog() == []
+    assert library.get("briefing") is None
+    assert [s.name for s in SkillLibrary(BUILTIN_SKILLS_DIR).catalog()] == ["briefing"]

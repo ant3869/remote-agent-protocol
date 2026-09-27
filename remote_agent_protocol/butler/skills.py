@@ -9,13 +9,15 @@ none.
 
 Skills come from the packaged defaults and then the user's folder
 (``BUTLER_SKILLS_DIR``); a user skill with the same name replaces a default.
-The folders are rescanned when they change, so a new or edited skill is
-picked up without a restart.
+A skill is switched off by ``enabled: false`` in its frontmatter or by naming
+it in ``disabled``. The folders are rescanned when they change, so a new,
+edited, or switched-off skill takes effect without a restart.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +37,7 @@ class Skill:
     description: str
     instructions: str
     path: Path
+    enabled: bool = True
 
 
 def _normalize(name: str) -> str:
@@ -78,19 +81,22 @@ def parse_skill(path: Path) -> Skill | None:
         description=description[:_MAX_DESCRIPTION_CHARS],
         instructions=body[:_MAX_BODY_CHARS],
         path=path,
+        enabled=fields.get("enabled", "true").strip().lower() not in {"false", "no", "off", "0"},
     )
 
 
 class SkillLibrary:
     """The skills in a list of folders, later folders overriding earlier ones."""
 
-    def __init__(self, *folders: str | Path | None):
+    def __init__(self, *folders: str | Path | None, disabled: Iterable[str] = ()):
         """Remember the folders to scan; missing ones are simply empty.
 
         Args:
             *folders: Folders containing ``<skill>/SKILL.md``, lowest priority first.
+            disabled: Names of skills to leave out, wherever they come from.
         """
         self._folders = [Path(folder) for folder in folders if folder]
+        self._disabled = {_normalize(name) for name in disabled if name.strip()}
         self._stamp: tuple = ()
         self._skills: dict[str, Skill] = {}
 
@@ -112,7 +118,14 @@ class SkillLibrary:
         for path_text, _mtime in signature:
             skill = parse_skill(Path(path_text))
             if skill is not None:
+                # A later folder's copy decides, so a user's switched-off copy
+                # of a packaged skill switches that skill off.
                 skills[skill.name] = skill
+        skills = {
+            name: skill
+            for name, skill in skills.items()
+            if skill.enabled and name not in self._disabled
+        }
         self._skills = skills
         self._stamp = signature
 

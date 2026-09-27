@@ -251,7 +251,15 @@ class BrainSession:
             fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
             check_wait_secs=cfg.AGENT_CHECK_WAIT_SECS,
             recent_secs=cfg.BUTLER_RECENT_TASK_SECS,
-            skills=SkillLibrary(BUILTIN_SKILLS_DIR, cfg.BUTLER_SKILLS_DIR or None),
+            skills=(
+                SkillLibrary(
+                    BUILTIN_SKILLS_DIR,
+                    cfg.BUTLER_SKILLS_DIR or None,
+                    disabled=cfg.BUTLER_SKILLS_DISABLED,
+                )
+                if cfg.BUTLER_SKILLS_ENABLED
+                else None
+            ),
             memory=(
                 ButlerMemory(self._conversation_hub, lambda: self._butler_turn_id)
                 if cfg.BUTLER_MEMORY_ENABLED
