@@ -39,7 +39,12 @@ class AppState:
     coqui_device: str | None = None
     agent_prompts: dict[str, str] = field(default_factory=dict)
     avatar_enabled: bool = True
-    avatar_id: str = "butler"
+    # "persona" draws the frame set matching the persona (Jess for Jess,
+    # Butler otherwise); "butler" and "jess" pin one.
+    avatar_id: str = "persona"
+    # 2 once avatar_id can mean "persona"; older files saved "butler" only
+    # because it was the one choice, so they migrate to the new default.
+    avatar_choice_version: int = 2
     avatar_quality: str = "high"
     avatar_lip_sync: bool = True
     avatar_gaze: bool = True
@@ -215,7 +220,10 @@ def load_state(path: str | Path) -> AppState:
         },
         ui_layout=ui_layout_or(raw.get("ui_layout")),
     )
-    return normalize_avatar_settings(raw, state)
+    state = normalize_avatar_settings(raw, state)
+    if raw.get("avatar_choice_version") != 2 and state.avatar_id == "butler":
+        state = replace(state, avatar_id="persona")
+    return state
 
 
 def save_state(path: str | Path, state: AppState) -> None:

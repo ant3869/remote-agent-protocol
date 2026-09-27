@@ -806,7 +806,7 @@ function syncAvatarRuntime() {
 function populateAvatarSettings(avatar = {}) {
   if (!$('avatarSettingEnabled')) return;
   $('avatarSettingEnabled').value = String(avatar.enabled ?? true);
-  $('avatarSettingAvatar').value = avatar.avatarId || 'butler';
+  $('avatarSettingAvatar').value = avatar.avatarId || 'persona';
   $('avatarSettingQuality').value = avatar.quality || 'high';
   $('avatarSettingLipSync').value = String(avatar.lipSync ?? true);
   $('avatarSettingGaze').value = String(avatar.gaze ?? true);

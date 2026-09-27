@@ -50,10 +50,13 @@ Brain mode:
 - `avatar_audio.py` defines the bounded latest-value envelope hub and SSE
   serialization. `WebVoiceApp` owns and closes one hub, while `VoiceSession`
   receives only its `publish` callback. Raw PCM never crosses the web boundary.
-- `web_app/avatar/` is a zero-build ES-module runtime. The bundled butler uses
-  `frame-avatar-scene.js`, a Canvas 2D renderer over individual
-  `runtime_512_v1/*.webp` expression, mouth, gaze, materialization, and glitch
-  frames. Other avatar IDs can use the vendored Three.js/GLTF path. A generation
+- `web_app/avatar/` is a zero-build ES-module runtime. The bundled Butler and
+  Jess use `frame-avatar-scene.js`, a Canvas 2D renderer over individual
+  `assets/avatars/<set>/runtime_512_v1/*.webp` expression, mouth, gaze,
+  materialization, and glitch frames; the `persona` avatar setting (default)
+  draws Jess's set for the Jess persona and Butler's otherwise. Jess is drawn in
+  SVG by `scripts/avatar/jess-portrait.mjs` and rendered to WebP with
+  `scripts/avatar/render-frames.mjs`. Other avatar IDs can use the vendored Three.js/GLTF path. A generation
   guard prevents stale asynchronous loads from replacing the current scene;
   both paths own reduced-motion, fallback, visibility, and disposal behavior.
 - `intent_router.py` routes explicit commands and high-confidence keyword

@@ -258,8 +258,9 @@ boundary, configuration, known limits, and product roadmap.
 
 ## Animated companion
 
-The web Control Center includes an optional local frame-based butler companion.
-The bundled butler uses a Canvas 2D renderer and individual
+The web Control Center includes an optional local frame-based companion: Holo
+Butler, and Holo Jess for the Jess persona (**Match persona** picks the one for
+the current persona). Both use a Canvas 2D renderer and individual
 `runtime_512_v1/*.webp` frames for emotional state, gaze, blink, mouth shape,
 materialization, and glitch effects. It reacts to wake detection, user speech,
 transcription, thinking, agent jobs, errors, and assistant speech. Mouth movement

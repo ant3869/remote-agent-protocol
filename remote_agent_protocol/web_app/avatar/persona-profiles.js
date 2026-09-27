@@ -47,3 +47,12 @@ export function profileForPersona(name, selectedAvatarId = "butler") {
   const source = normalizeName(name) === "jess" ? BUTLER : NEUTRAL;
   return { ...source, avatarId: selectedAvatarId || source.avatarId };
 }
+
+// Which frame set to draw: an explicit choice, or the one matching the persona
+// ("persona", the default) -- Jess for Jess, Butler for everyone else.
+export const FRAME_AVATARS = Object.freeze(["persona", "butler", "jess"]);
+
+export function frameSetFor(avatarId, personaName) {
+  if (avatarId === "butler" || avatarId === "jess") return avatarId;
+  return normalizeName(personaName) === "jess" ? "jess" : "butler";
+}

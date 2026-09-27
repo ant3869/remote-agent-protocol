@@ -1,7 +1,7 @@
 import { normalizeAvatarSettings } from "./avatar-settings.js";
 import { AvatarStateController } from "./avatar-controller.js";
 import { createAvatarPanel } from "./avatar-panel.js";
-import { profileForPersona } from "./persona-profiles.js";
+import { FRAME_AVATARS, frameSetFor, profileForPersona } from "./persona-profiles.js";
 import { SceneLoadGuard } from "./scene-load-guard.js";
 
 // A companion that never appears at all is silent -- nobody sees a console
@@ -44,7 +44,11 @@ let settings = normalizeAvatarSettings({}, motionQuery?.matches || false);
 let runtime = {};
 let scene = null;
 let loading = null;
-const sceneKey = (value) => `${value.avatarId}:${value.quality}`;
+const usesFrames = (value) => FRAME_AVATARS.includes(value.avatarId);
+// The frame set follows the persona, so a persona switch rebuilds the scene.
+const sceneKey = (value, persona = runtime.persona) => usesFrames(value)
+  ? `frames:${frameSetFor(value.avatarId, persona)}:${value.quality}`
+  : `${value.avatarId}:${value.quality}`;
 const sceneGuard = new SceneLoadGuard(sceneKey(settings));
 let panelVisible = true;
 let controller = new AvatarStateController(profileForPersona("", settings.avatarId));
@@ -52,11 +56,14 @@ let controller = new AvatarStateController(profileForPersona("", settings.avatar
 async function ensureScene() {
   if (!panel.host || !settings.enabled || settings.panelCollapsed || !panelVisible || scene || loading) return;
   const request = sceneGuard.token();
-  const sceneModule = settings.avatarId === "butler"
-    ? "./frame-avatar-scene.js"
-    : "./avatar-scene.js";
+  const frames = usesFrames(settings);
+  const frameSet = frameSetFor(settings.avatarId, runtime.persona);
+  const sceneModule = frames ? "./frame-avatar-scene.js" : "./avatar-scene.js";
   loading = import(sceneModule)
-    .then(({ createAvatarScene }) => createAvatarScene(panel.host, settings))
+    .then(({ createAvatarScene, fallbackImage }) => {
+      if (frames) panel.host.style?.setProperty?.("--avatar-fallback-image", fallbackImage(frameSet));
+      return createAvatarScene(panel.host, settings, { frameSet });
+    })
     .then((created) => {
       if (!sceneGuard.accepts(request) || !settings.enabled || settings.panelCollapsed) {
         created.dispose();
@@ -79,6 +86,10 @@ async function ensureScene() {
 }
 
 async function sync() {
+  if (sceneGuard.updateKey(sceneKey(settings))) {
+    scene?.dispose();
+    scene = null;
+  }
   panel.setEnabled(settings.enabled);
   panel.setCollapsed(settings.panelCollapsed);
   panel.setLabelsVisible(settings.showState);

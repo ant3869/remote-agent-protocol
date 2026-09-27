@@ -11,7 +11,7 @@ def test_avatar_defaults_are_present_for_old_state_files(tmp_path):
     state = app_state.load_state(path)
 
     assert state.avatar_enabled is True
-    assert state.avatar_id == "butler"
+    assert state.avatar_id == "persona"
     assert state.avatar_quality == "high"
     assert state.avatar_lip_sync is True
     assert state.avatar_gaze is True
@@ -20,6 +20,19 @@ def test_avatar_defaults_are_present_for_old_state_files(tmp_path):
     assert state.avatar_reduced_motion is None
     assert state.avatar_show_state is True
     assert state.avatar_panel_collapsed is False
+
+
+def test_a_butler_choice_saved_before_there_was_a_choice_now_matches_the_persona(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"persona": "Jess", "avatar_id": "butler"}', encoding="utf-8")
+
+    migrated = app_state.load_state(path)
+    app_state.save_state(
+        path, app_state.normalize_avatar_settings({"avatarId": "butler"}, migrated)
+    )
+
+    assert migrated.avatar_id == "persona"
+    assert app_state.load_state(path).avatar_id == "butler", "a choice made now is kept"
 
 
 def test_avatar_settings_roundtrip(tmp_path):
@@ -70,7 +83,7 @@ def test_invalid_avatar_values_normalize_to_safe_defaults():
 
     assert app_state.avatar_settings_payload(state) == {
         "enabled": True,
-        "avatarId": "butler",
+        "avatarId": "persona",
         "quality": "high",
         "lipSync": True,
         "gaze": True,
@@ -88,7 +101,7 @@ def test_status_payload_exposes_avatar_settings():
     avatar = app._status_payload()["avatar"]
 
     assert avatar["enabled"] is True
-    assert avatar["avatarId"] == "butler"
+    assert avatar["avatarId"] == "persona"
     assert avatar["quality"] == "high"
     assert avatar["reducedMotion"] is None
 

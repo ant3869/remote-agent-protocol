@@ -1,11 +1,15 @@
 import { AvatarEnvelopeStream } from "./lip-sync.js";
 import { VisemeTrack, visemeScript } from "./viseme-script.js";
 
-const ASSET_BASE = "/assets/avatars/butler/runtime_512_v1/";
-// Asset responses are immutable for a year.  Advance this whenever a delivery
-// fix changes their availability so a running browser cannot reuse a failed
-// (for example, previously wrong-MIME) response from an earlier server.
-const ASSET_REVISION = "20260920";
+// Asset responses are immutable for a year.  Advance a set's revision whenever
+// its frames change, or a delivery fix changes their availability, so a
+// running browser cannot reuse an earlier response.
+export const FRAME_SETS = Object.freeze({
+  butler: Object.freeze({ base: "/assets/avatars/butler/runtime_512_v1/", revision: "20260920" }),
+  jess: Object.freeze({ base: "/assets/avatars/jess/runtime_512_v1/", revision: "20260927" }),
+});
+const ASSET_BASE = FRAME_SETS.butler.base;
+const ASSET_REVISION = FRAME_SETS.butler.revision;
 const FRAME_LOAD_TIMEOUT_MS = 6000;
 // Portrait frames share one registration, so a short dissolve only softens
 // the cut. Materialize/glitch frames are a flipbook whose head moves between
@@ -46,10 +50,16 @@ export function criticalFrameNames() {
   return [...CRITICAL_FRAMES];
 }
 
-export function frameUrls(base = ASSET_BASE) {
+export function frameUrls(base = ASSET_BASE, revision = ASSET_REVISION) {
   return Object.fromEntries(
-    FRAME_NAMES.map((name) => [name, `${base}${name}.webp?v=${ASSET_REVISION}`]),
+    FRAME_NAMES.map((name) => [name, `${base}${name}.webp?v=${revision}`]),
   );
+}
+
+// The still portrait shown under the canvas until it draws, per frame set.
+export function fallbackImage(frameSet) {
+  const set = FRAME_SETS[frameSet] || FRAME_SETS.butler;
+  return `url("${set.base}base.webp?v=${set.revision}")`;
 }
 
 export function stateForResolved(state) {
@@ -116,7 +126,7 @@ export async function preloadFrames(
   return Object.fromEntries(entries);
 }
 
-export async function createAvatarScene(host, settings) {
+export async function createAvatarScene(host, settings, { frameSet = "butler" } = {}) {
   if (!host) throw new Error("Avatar canvas host is missing");
   const canvas = document.createElement("canvas");
   canvas.width = 512;
@@ -124,7 +134,8 @@ export async function createAvatarScene(host, settings) {
   canvas.setAttribute("aria-hidden", "true");
   const context = canvas.getContext("2d", { alpha: true });
   if (!context) throw new Error("2D canvas is unavailable");
-  const urls = frameUrls();
+  const set = FRAME_SETS[frameSet] || FRAME_SETS.butler;
+  const urls = frameUrls(set.base, set.revision);
   // A companion that has already loaded its base portrait is useful even if a
   // secondary expression was evicted from cache or arrives late.  Keeping the
   // base frame mandatory preserves the static fallback for a genuinely broken
@@ -140,6 +151,7 @@ export async function createAvatarScene(host, settings) {
     if (result.status === "fulfilled") images[result.value[0]] = result.value[1];
   }
   host.classList.add("avatar-frame-butler");
+  host.style?.setProperty?.("--avatar-fallback-image", fallbackImage(frameSet));
   host.replaceChildren(canvas);
   let currentSettings = settings;
   let runtime = {};
@@ -475,7 +487,7 @@ export async function createAvatarScene(host, settings) {
       setGlitchesEnabled() {},
       reset() { debugState = null; debugLevel = null; enterState(resolvedState, true); },
       getDiagnostics() {
-        return { kind: "frame-butler", state: visualState, frame: currentFrame, usingEnvelope: performance.now() - audioAt < 350 };
+        return { kind: "frame-butler", frameSet, state: visualState, frame: currentFrame, usingEnvelope: performance.now() - audioAt < 350 };
       },
     },
     dispose() {

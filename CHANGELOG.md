@@ -12,6 +12,14 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Holo Jess: an animated avatar for the Jess persona in the same neon-hologram
+  style as Butler, with violet/magenta glow and the same 40 frames
+  (expressions, mouth shapes, blinks, materialize and glitch effects), so
+  lip-sync and every reaction work for her unchanged. The avatar setting's new
+  default, **Match persona**, shows Jess for Jess and Butler otherwise (a
+  saved "Holo Butler" from before there was a choice moves to it). Her frames
+  are drawn in SVG (`scripts/avatar/jess-portrait.mjs`) and re-rendered with
+  `node scripts/avatar/render-frames.mjs`.
 - Butler web lookup: "what's the weather in Leeds?", "read me this link".
   `read_page` works out of the box; `web_search` needs a Tavily or Brave
   Search key, or a SearXNG URL. Pages on your own machine or network are never

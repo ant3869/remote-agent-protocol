@@ -245,3 +245,20 @@ test("speaking without an envelope mouths the words of the reply", async (t) => 
   assert.ok(names.includes("oo"), names.join(","));
   assert.ok(!names.includes("open"), "no syllable in the reply opens wide");
 });
+
+
+test("Jess's frames come from her own set; the persona picks the set unless one is pinned", async () => {
+  const { FRAME_SETS, fallbackImage } = await import("../../remote_agent_protocol/web_app/avatar/frame-avatar-scene.js");
+  const { frameSetFor } = await import("../../remote_agent_protocol/web_app/avatar/persona-profiles.js");
+
+  const jess = frameUrls(FRAME_SETS.jess.base, FRAME_SETS.jess.revision);
+  assert.ok(Object.values(jess).every((url) => url.startsWith("/assets/avatars/jess/runtime_512_v1/")));
+  assert.match(fallbackImage("jess"), /avatars\/jess\/runtime_512_v1\/base\.webp/);
+  assert.match(fallbackImage("unknown"), /avatars\/butler\//);
+
+  assert.equal(frameSetFor("persona", "Jess"), "jess");
+  assert.equal(frameSetFor("persona", "Butler"), "butler");
+  assert.equal(frameSetFor("persona", "Ada"), "butler");
+  assert.equal(frameSetFor("butler", "Jess"), "butler");
+  assert.equal(frameSetFor("jess", "Butler"), "jess");
+});

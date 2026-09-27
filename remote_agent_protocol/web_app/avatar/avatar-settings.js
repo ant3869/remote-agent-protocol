@@ -37,7 +37,7 @@ export function normalizeAvatarSettings(raw = {}, systemReducedMotion = false) {
     : 0.62;
   return {
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : true,
-    avatarId: /^[a-z0-9][a-z0-9_-]{0,63}$/.test(raw.avatarId || "") ? raw.avatarId : "butler",
+    avatarId: /^[a-z0-9][a-z0-9_-]{0,63}$/.test(raw.avatarId || "") ? raw.avatarId : "persona",
     quality,
     lipSync: typeof raw.lipSync === "boolean" ? raw.lipSync : true,
     gaze: typeof raw.gaze === "boolean" ? raw.gaze : true,
