@@ -205,6 +205,34 @@ SKILL_SCHEMAS: list[dict] = [
         ["name"],
     ),
 ]
+SKILL_EDIT_SCHEMAS: list[dict] = [
+    _fn(
+        "create_skill",
+        "Save a new skill the user asked for. It is offered from the next turn on.",
+        {
+            "name": {"type": "string", "description": "lowercase-words-with-hyphens"},
+            "description": {
+                "type": "string",
+                "description": "One line saying when the skill applies.",
+            },
+            "instructions": {
+                "type": "string",
+                "description": "Short numbered steps using your existing tools.",
+            },
+            "replace": {
+                "type": "boolean",
+                "description": "Overwrite an existing skill; only when the user said so.",
+            },
+        },
+        ["name", "description", "instructions"],
+    ),
+    _fn(
+        "set_skill_enabled",
+        "Switch a skill on or off when the user asks.",
+        {"name": {"type": "string"}, "enabled": {"type": "boolean"}},
+        ["name", "enabled"],
+    ),
+]
 
 
 class ButlerToolbox:
@@ -282,6 +310,7 @@ class ButlerToolbox:
         return [
             *TOOL_SCHEMAS,
             *(SKILL_SCHEMAS if self._skills is not None else []),
+            *(SKILL_EDIT_SCHEMAS if self._skills is not None and self._skills.writable else []),
             *(MEMORY_SCHEMAS if self._memory is not None else []),
             *([SEARCH_SCHEMA] if self._web is not None and self._web.can_search else []),
             *([READ_PAGE_SCHEMA] if self._web is not None else []),
@@ -335,6 +364,37 @@ class ButlerToolbox:
             "skill": skill.name,
             "instructions": skill.instructions,
             "summary": f"Loaded the {skill.name} skill; follow its instructions now.",
+        }
+
+    async def _tool_create_skill(
+        self, name: str, description: str, instructions: str, replace: bool = False
+    ) -> dict:
+        try:
+            skill = self._skills.write(name, description, instructions, replace=bool(replace))
+        except FileExistsError:
+            return _error(
+                f"A skill named {name} already exists. Ask the user whether to replace it."
+            )
+        except (ValueError, OSError) as exc:
+            return _error(f"The skill wasn't saved: {exc}.")
+        return {
+            "status": "saved",
+            "skill": skill.name,
+            "summary": f"Saved the {skill.name} skill; it applies when {skill.description}",
+        }
+
+    async def _tool_set_skill_enabled(self, name: str, enabled: bool) -> dict:
+        try:
+            skill = self._skills.set_enabled(name, bool(enabled))
+        except KeyError:
+            return _error(f"There is no skill named {name}.")
+        except (ValueError, OSError) as exc:
+            return _error(f"That didn't change: {exc}.")
+        state = "on" if skill.enabled else "off"
+        return {
+            "status": state,
+            "skill": skill.name,
+            "summary": f"The {skill.name} skill is {state}.",
         }
 
     # -- memory ----------------------------------------------------------------

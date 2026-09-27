@@ -12,6 +12,16 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Eight more packaged skills written for this setup: `pick-agent` (which
+  agent for which work), `keep-trying` (fail over until one works),
+  `agent-trouble` (what's wrong with an agent and how to fix it),
+  `check-email`, `rap-dev` (work on RAP itself, with the repo's test and
+  vendoring rules), `quick-answer` (web lookup instead of an agent),
+  `remember-this`, and `make-skill`.
+- The assistant can create skills ("learn how I like my weekly review") and
+  switch them on or off by voice. New skills are saved to `data/skills`; an
+  existing one is only replaced when you say so, text that looks like a key
+  is refused, and a turn that has read the web can't write one.
 - Holo Jess: an animated avatar for the Jess persona in the same neon-hologram
   style as Butler, with violet/magenta glow and the same 40 frames
   (expressions, mouth shapes, blinks, materialize and glitch effects), so

@@ -45,7 +45,7 @@ def test_a_user_skill_is_listed_and_replaces_a_packaged_one_of_the_same_name(tmp
 
     names = [skill.name for skill in library.catalog()]
 
-    assert names == ["briefing", "email-style"]
+    assert {"briefing", "email-style", "pick-agent", "rap-dev"} <= set(names)
     assert library.get("Briefing").instructions == "Say only what failed."
     assert library.get("email style").description == "How I like emails"
     assert "email-style (How I like emails)" in library.prompt_section()
@@ -383,6 +383,89 @@ def test_skills_can_be_switched_off_by_frontmatter_by_name_or_by_overriding_a_pa
 
     library = SkillLibrary(BUILTIN_SKILLS_DIR, tmp_path, disabled=["Email Style"])
 
-    assert library.catalog() == []
+    names = {s.name for s in library.catalog()}
+    assert not names & {"packing", "email-style", "briefing"}
     assert library.get("briefing") is None
-    assert [s.name for s in SkillLibrary(BUILTIN_SKILLS_DIR).catalog()] == ["briefing"]
+    assert "briefing" in {s.name for s in SkillLibrary(BUILTIN_SKILLS_DIR).catalog()}
+
+
+def test_every_packaged_skill_parses_and_names_only_real_tools():
+    import re
+
+    from remote_agent_protocol.butler.tools import (
+        MEMORY_SCHEMAS,
+        READ_PAGE_SCHEMA,
+        SEARCH_SCHEMA,
+        SKILL_EDIT_SCHEMAS,
+        SKILL_SCHEMAS,
+        TOOL_SCHEMAS,
+    )
+
+    tools = {
+        s["function"]["name"]
+        for s in [
+            *TOOL_SCHEMAS,
+            *MEMORY_SCHEMAS,
+            *SKILL_SCHEMAS,
+            *SKILL_EDIT_SCHEMAS,
+            SEARCH_SCHEMA,
+            READ_PAGE_SCHEMA,
+        ]
+    }
+    packaged = sorted(BUILTIN_SKILLS_DIR.glob("*/SKILL.md"))
+    library = SkillLibrary(BUILTIN_SKILLS_DIR)
+
+    assert len(library.catalog()) == len(packaged) >= 9
+    for skill in library.catalog():
+        named = set(re.findall(r"`([a-z_]+)`", skill.instructions))
+        assert named <= tools | {"recent", "active"}, (skill.name, named - tools)
+    assert len(library.prompt_section()) < 2600
+
+
+@pytest.mark.asyncio
+async def test_the_assistant_can_create_a_skill_but_not_overwrite_or_hide_secrets(tmp_path):
+    box = _box(skills=SkillLibrary(BUILTIN_SKILLS_DIR, tmp_path))
+    made = await box.call(
+        "create_skill",
+        {
+            "name": "Weekly Review",
+            "description": "When the user asks for a weekly review",
+            "instructions": "1. Call list_tasks with scope recent.\n2. Summarize by agent.",
+        },
+    )
+    again = await box.call(
+        "create_skill",
+        {"name": "weekly-review", "description": "x", "instructions": "y"},
+    )
+    secret = await box.call(
+        "create_skill",
+        {
+            "name": "keys",
+            "description": "My keys",
+            "instructions": "Use api key: sk-abcdefghijklmnop1234 for everything.",
+        },
+    )
+
+    assert made["status"] == "saved" and made["skill"] == "weekly-review"
+    assert (tmp_path / "weekly-review" / "SKILL.md").exists()
+    assert box._skills.get("weekly-review").instructions.startswith("1. Call list_tasks")
+    assert "already exists" in again["error"]
+    assert "password or key" in secret["error"]
+    assert not (tmp_path / "keys").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_packaged_skill_is_switched_off_with_a_user_copy_and_back_on(tmp_path):
+    library = SkillLibrary(BUILTIN_SKILLS_DIR, tmp_path)
+    box = _box(skills=library)
+
+    off = await box.call("set_skill_enabled", {"name": "briefing", "enabled": False})
+    assert off["status"] == "off" and library.get("briefing") is None
+    assert "enabled: false" in (tmp_path / "briefing" / "SKILL.md").read_text(encoding="utf-8")
+
+    on = await box.call("set_skill_enabled", {"name": "briefing", "enabled": True})
+    assert on["status"] == "on" and library.get("briefing") is not None
+    assert "create_skill" not in READ_ONLY_TOOLS and "set_skill_enabled" not in READ_ONLY_TOOLS
+    assert "create_skill" not in {
+        s["function"]["name"] for s in _box(skills=SkillLibrary(BUILTIN_SKILLS_DIR)).schemas()
+    }, "no user folder, nothing to write into"

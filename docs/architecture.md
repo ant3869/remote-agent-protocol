@@ -437,7 +437,10 @@ what finished within `BUTLER_RECENT_TASK_SECS` (default two hours) into counts
 plus one line per task. Skills (`butler.SkillLibrary`) are `<name>/SKILL.md`
 instruction packs from `butler/skills/` and `BUTLER_SKILLS_DIR`; the system
 prompt lists each one's name and description and `use_skill` returns its
-instructions, which can direct only the tools the Butler already has. `remember`, `recall`
+instructions, which can direct only the tools the Butler already has.
+`create_skill` and `set_skill_enabled` write to the user folder (a packaged
+skill is switched off by a user copy saying `enabled: false`); they are not
+read-only, so a turn that has read the web cannot write a skill. `remember`, `recall`
 and `forget` (`butler.ButlerMemory`) keep user-stated facts as shared memories
 in the conversation hub (`AgentConversationHub.remember`), so the memory
 policy's secret filter applies and agents receive them with their context; the

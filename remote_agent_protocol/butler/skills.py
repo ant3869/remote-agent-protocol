@@ -99,6 +99,7 @@ class SkillLibrary:
         self._disabled = {_normalize(name) for name in disabled if name.strip()}
         self._stamp: tuple = ()
         self._skills: dict[str, Skill] = {}
+        self._all: dict[str, Skill] = {}
 
     def _signature(self) -> tuple:
         stamp = []
@@ -121,12 +122,12 @@ class SkillLibrary:
                 # A later folder's copy decides, so a user's switched-off copy
                 # of a packaged skill switches that skill off.
                 skills[skill.name] = skill
-        skills = {
+        self._all = skills
+        self._skills = {
             name: skill
             for name, skill in skills.items()
             if skill.enabled and name not in self._disabled
         }
-        self._skills = skills
         self._stamp = signature
 
     def catalog(self) -> list[Skill]:
@@ -155,3 +156,75 @@ class SkillLibrary:
             " Skills you can load with use_skill when a request matches one, then follow"
             f" its instructions: {'; '.join(entries)}."
         )
+
+    @property
+    def writable(self) -> bool:
+        """Whether there is a user folder to write skills into."""
+        return len(self._folders) > 1
+
+    def _user_path(self, name: str) -> Path:
+        return self._folders[-1] / name / "SKILL.md"
+
+    def write(self, name: str, description: str, instructions: str, *, replace: bool) -> Skill:
+        """Save a skill in the user folder; raises ``ValueError`` when it can't be.
+
+        Refuses to overwrite an existing user skill unless ``replace``, and any
+        text that looks like a credential: skills are read back into the
+        model's context on every use.
+        """
+        from remote_agent_protocol.conversation_hub.memory import safe_context_text
+
+        if not self.writable:
+            raise ValueError("there is no skills folder to save into")
+        name = _normalize(name)
+        description = " ".join(description.split())
+        instructions = instructions.strip()
+        if not _NAME_RE.match(name):
+            raise ValueError("the name must be lowercase words joined by hyphens")
+        if not description or not instructions:
+            raise ValueError("a skill needs a description and instructions")
+        if len(description) > _MAX_DESCRIPTION_CHARS or len(instructions) > _MAX_BODY_CHARS:
+            raise ValueError("the skill is too long")
+        if not (safe_context_text(description) and safe_context_text(instructions)):
+            raise ValueError("it looks like it contains a password or key")
+        path = self._user_path(name)
+        if path.exists() and not replace:
+            raise FileExistsError(name)
+        _save(path, name, description, instructions, enabled=True)
+        self._stamp = ()
+        skill = parse_skill(path)
+        if skill is None:
+            raise ValueError("the saved skill could not be read back")
+        return skill
+
+    def set_enabled(self, name: str, enabled: bool) -> Skill:
+        """Switch a skill on or off; a packaged one gets a switched user copy."""
+        self._refresh()
+        name = _normalize(name)
+        current = self._all.get(name)
+        if current is None:
+            raise KeyError(name)
+        if name in self._disabled and enabled:
+            raise ValueError(f"{name} is switched off in BUTLER_SKILLS_DISABLED")
+        if not self.writable:
+            raise ValueError("there is no skills folder to save into")
+        _save(
+            self._user_path(name),
+            name,
+            current.description,
+            current.instructions,
+            enabled=enabled,
+        )
+        self._stamp = ()
+        self._refresh()
+        return self._all[name]
+
+
+def _save(path: Path, name: str, description: str, instructions: str, *, enabled: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = f"---\nname: {name}\ndescription: {description}\n"
+    if not enabled:
+        header += "enabled: false\n"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(f"{header}---\n\n{instructions}\n", encoding="utf-8")
+    tmp.replace(path)
