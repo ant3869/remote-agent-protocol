@@ -853,6 +853,10 @@ BUTLER_RECENT_TASK_SECS = float(_env("BUTLER_RECENT_TASK_SECS", "7200"))
 # loads when a request matches one. The packaged ones come first; a skill here
 # with the same name replaces it. Empty offers only the packaged skills.
 BUTLER_SKILLS_DIR = _env("BUTLER_SKILLS_DIR", str(DATA_DIR / "skills"))
+# remember/recall/forget: facts the user asks the Butler to keep, stored as
+# shared memories in the conversation hub (which refuses recognizable secrets)
+# and so also handed to agents with their work.
+BUTLER_MEMORY_ENABLED = _env_bool("BUTLER_MEMORY_ENABLED", True)
 BUTLER_RULES = (
     " You are the front door to the user's agents, and you act only through your tools."
     " Say only what your tools returned: never claim an agent was contacted, is working,"

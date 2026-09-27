@@ -6,6 +6,7 @@ remembers what the user asked for across attempts on different agents.
 
 from remote_agent_protocol.butler.ledger import Attempt, ButlerTask, TaskLedger
 from remote_agent_protocol.butler.loop import ButlerLoop, ButlerUnavailable
+from remote_agent_protocol.butler.memory import ButlerMemory
 from remote_agent_protocol.butler.skills import BUILTIN_SKILLS_DIR, Skill, SkillLibrary
 from remote_agent_protocol.butler.tools import (
     READ_ONLY_TOOLS,
@@ -20,6 +21,7 @@ __all__ = [
     "TOOL_SCHEMAS",
     "Attempt",
     "ButlerLoop",
+    "ButlerMemory",
     "ButlerTask",
     "ButlerToolbox",
     "ButlerUnavailable",

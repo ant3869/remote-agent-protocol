@@ -82,3 +82,57 @@ async def test_use_skill_returns_the_instructions_and_is_offered_only_with_skill
     assert "use_skill" in READ_ONLY_TOOLS
     assert "use_skill" not in {s["function"]["name"] for s in _box().schemas()}
     assert (await _box().call("use_skill", {"name": "packing"}))["error"]
+
+
+# -- memory --------------------------------------------------------------------------
+
+
+def _hub(tmp_path):
+    from remote_agent_protocol.control_plane.registry import AgentRegistry
+    from remote_agent_protocol.conversation_hub.factory import build_conversation_hub
+
+    return build_conversation_hub(
+        store_path=tmp_path / "conversations.json",
+        adapters={},
+        registry=AgentRegistry(),
+        backends={"codex": ["codex"]},
+        aliases={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_remembered_facts_are_recalled_listed_and_survive_a_restart(tmp_path):
+    from remote_agent_protocol.butler import ButlerMemory
+
+    memory = ButlerMemory(_hub(tmp_path), lambda: "turn-1")
+    box = _box(memory=memory)
+
+    kept = await box.call("remember", {"subject": "UI work", "fact": "Prefers Codex for UI work"})
+    await box.call("remember", {"subject": "coffee", "fact": "Takes it black"})
+    found = await box.call("recall", {"query": "who does the UI"})
+
+    assert kept["status"] == "remembered"
+    assert found["facts"] == [{"subject": "UI work", "fact": "Prefers Codex for UI work"}]
+    assert "UI work: Prefers Codex for UI work" in box.system_notes()
+
+    restarted = ButlerMemory(_hub(tmp_path), lambda: "turn-2")
+    assert [m.subject for m in restarted.recall()] == ["coffee", "UI work"]
+
+
+@pytest.mark.asyncio
+async def test_secrets_are_refused_and_forget_removes_the_best_match(tmp_path):
+    from remote_agent_protocol.butler import ButlerMemory
+
+    box = _box(memory=ButlerMemory(_hub(tmp_path), lambda: "turn-1"))
+    refused = await box.call(
+        "remember", {"subject": "openai", "fact": "api key: sk-abcdefghijklmnop1234"}
+    )
+    await box.call("remember", {"subject": "coffee", "fact": "Takes it black"})
+
+    forgotten = await box.call("forget", {"query": "coffee"})
+    after = await box.call("recall", {"query": "coffee"})
+
+    assert "wasn't kept" in refused["error"]
+    assert forgotten["summary"] == "Forgot: coffee: Takes it black"
+    assert after["facts"] == []
+    assert "recall" in READ_ONLY_TOOLS and "remember" not in READ_ONLY_TOOLS

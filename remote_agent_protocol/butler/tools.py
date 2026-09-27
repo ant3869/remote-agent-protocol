@@ -21,10 +21,19 @@ from loguru import logger
 from remote_agent_protocol import agent_bridge
 from remote_agent_protocol import agent_status_reporting as agent_status
 from remote_agent_protocol.butler.ledger import ButlerTask, TaskLedger
+from remote_agent_protocol.butler.memory import ButlerMemory
 from remote_agent_protocol.butler.skills import SkillLibrary
 
 READ_ONLY_TOOLS = frozenset(
-    {"list_agents", "check_agents", "task_status", "list_tasks", "get_result", "use_skill"}
+    {
+        "list_agents",
+        "check_agents",
+        "task_status",
+        "list_tasks",
+        "get_result",
+        "use_skill",
+        "recall",
+    }
 )
 _RESULT_PREVIEW_CHARS = 400
 _RESULT_FULL_CHARS = 4000
@@ -144,6 +153,30 @@ TOOL_SCHEMAS: list[dict] = [
     ),
 ]
 
+MEMORY_SCHEMAS: list[dict] = [
+    _fn(
+        "remember",
+        "Keep a fact the user asked you to remember, e.g. a preference. Never secrets.",
+        {
+            "subject": {"type": "string", "description": "What it is about, a few words."},
+            "fact": {"type": "string", "description": "The fact, in one sentence."},
+        },
+        ["subject", "fact"],
+    ),
+    _fn(
+        "recall",
+        "Search the facts the user asked you to remember.",
+        {"query": {"type": "string"}},
+        [],
+    ),
+    _fn(
+        "forget",
+        "Forget the remembered fact that best matches the query, when the user asks.",
+        {"query": {"type": "string"}},
+        ["query"],
+    ),
+]
+
 SKILL_SCHEMAS: list[dict] = [
     _fn(
         "use_skill",
@@ -173,6 +206,7 @@ class ButlerToolbox:
         check_wait_secs: float | None = None,
         recent_secs: float = 7200.0,
         skills: SkillLibrary | None = None,
+        memory: ButlerMemory | None = None,
     ):
         """Initialize the toolbox.
 
@@ -191,6 +225,7 @@ class ButlerToolbox:
             recent_secs: How far back list_tasks(scope='recent') reaches for
                 finished work.
             skills: Instruction packs offered through use_skill; None offers none.
+            memory: Facts kept through remember/recall/forget; None offers none.
         """
         self._bridge = bridge
         self._control_plane = control_plane
@@ -205,6 +240,7 @@ class ButlerToolbox:
         self._check_wait_secs = check_wait_secs
         self._recent_secs = recent_secs
         self._skills = skills
+        self._memory = memory
 
     @property
     def ledger(self) -> TaskLedger:
@@ -213,11 +249,20 @@ class ButlerToolbox:
 
     def schemas(self) -> list[dict]:
         """The tools this toolbox offers, given which abilities it was built with."""
-        return [*TOOL_SCHEMAS, *(SKILL_SCHEMAS if self._skills is not None else [])]
+        return [
+            *TOOL_SCHEMAS,
+            *(SKILL_SCHEMAS if self._skills is not None else []),
+            *(MEMORY_SCHEMAS if self._memory is not None else []),
+        ]
 
     def system_notes(self) -> str:
         """What the model needs to know up front about its abilities ('' if nothing)."""
-        return self._skills.prompt_section() if self._skills is not None else ""
+        notes = []
+        if self._skills is not None:
+            notes.append(self._skills.prompt_section())
+        if self._memory is not None:
+            notes.append(self._memory.prompt_section())
+        return "".join(notes)
 
     async def call(self, name: str, arguments: str | Mapping[str, Any] | None) -> dict:
         """Run one tool call; never raises -- failures come back as results."""
@@ -251,6 +296,39 @@ class ButlerToolbox:
             "skill": skill.name,
             "instructions": skill.instructions,
             "summary": f"Loaded the {skill.name} skill; follow its instructions now.",
+        }
+
+    # -- memory ----------------------------------------------------------------
+
+    async def _tool_remember(self, subject: str, fact: str) -> dict:
+        try:
+            stored = await self._memory.remember(subject, fact)
+        except ValueError as exc:
+            return _error(f"That wasn't kept: {exc}.")
+        return {
+            "status": "remembered",
+            "subject": stored.subject,
+            "fact": stored.value,
+            "summary": f"Remembered: {stored.subject}: {stored.value}",
+        }
+
+    async def _tool_recall(self, query: str = "") -> dict:
+        found = self._memory.recall(query)
+        facts = [{"subject": m.subject, "fact": m.value} for m in found]
+        if not facts:
+            return {"facts": [], "summary": "Nothing remembered matches that."}
+        return {
+            "facts": facts,
+            "summary": "; ".join(f"{f['subject']}: {f['fact']}" for f in facts),
+        }
+
+    async def _tool_forget(self, query: str) -> dict:
+        forgotten = await self._memory.forget(query)
+        if forgotten is None:
+            return {"status": "not_found", "summary": "Nothing remembered matches that."}
+        return {
+            "status": "forgotten",
+            "summary": f"Forgot: {forgotten.subject}: {forgotten.value}",
         }
 
     # -- agent resolution ------------------------------------------------------

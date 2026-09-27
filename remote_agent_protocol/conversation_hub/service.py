@@ -31,6 +31,7 @@ from .events import (
     CONTEXT_ASSEMBLED,
     FLOOR_CHANGED,
     MEMORY_FORGOTTEN,
+    MEMORY_PROMOTED,
     RESULT_AVAILABLE,
     SESSION_BOUND,
     SESSION_RESET,
@@ -39,11 +40,14 @@ from .events import (
     ConversationEvent,
 )
 from .floor import BUTLER_ID, FloorDecision, FloorManager, TurnRoutingInput
-from .memory import MemoryRepository
+from .memory import MemoryRepository, PromotionReason
 from .models import (
     AgentChannel,
     ConversationTurn,
     FloorState,
+    MemoryConfidence,
+    MemoryScope,
+    MemoryStatus,
     ResultKind,
     ScopedMemory,
     SessionBinding,
@@ -80,6 +84,8 @@ _PRESENTATION_REQUEST = (
     "presentation request or imitate Butler. If the answer is long, offer to continue reading it."
 )
 _INVALID_FINAL_OUTPUT = "invalid_final_output"
+
+BUTLER_CHANNEL_ID = "coordinator:butler"
 
 
 def _channel_id_for(agent_id: str) -> str:
@@ -849,6 +855,38 @@ class AgentConversationHub:
             self._emit(CHANNEL_ARCHIVED, channel_id)
             return updated
 
+    async def remember(self, subject: str, value: str, *, source_turn_id: str) -> ScopedMemory:
+        """Keep a fact the user stated, shared with every channel and agent.
+
+        Raises ``ValueError`` when the memory policy refuses it -- a
+        recognizable secret, or an empty subject or value.
+        """
+        async with self._lock:
+            stored = self._memories.add(
+                ScopedMemory(
+                    memory_id=f"memory_{uuid4().hex}",
+                    scope=MemoryScope.SHARED,
+                    subject=subject.strip(),
+                    value=value.strip(),
+                    source_turn_ids=[source_turn_id],
+                    confidence=MemoryConfidence.USER_STATED,
+                    observed_at=self._now(),
+                ),
+                reason=PromotionReason.STABLE_USER_FACT,
+            )
+            self._save()
+            self._emit(MEMORY_PROMOTED, BUTLER_CHANNEL_ID, data={"memory_id": stored.memory_id})
+            return stored
+
+    def shared_memories(self) -> list[ScopedMemory]:
+        """Active shared memories, newest first."""
+        active = [
+            memory
+            for memory in self._memories.snapshot()
+            if memory.status is MemoryStatus.ACTIVE and memory.scope is MemoryScope.SHARED
+        ]
+        return sorted(active, key=lambda memory: memory.observed_at, reverse=True)
+
     async def forget_memory(self, memory_id: str) -> ScopedMemory:
         """Exclude a memory from future context assembly, leaving a tombstone."""
         async with self._lock:
@@ -856,7 +894,7 @@ class AgentConversationHub:
             self._save()
             self._emit(
                 MEMORY_FORGOTTEN,
-                forgotten.channel_id or "coordinator:butler",
+                forgotten.channel_id or BUTLER_CHANNEL_ID,
                 data={"memory_id": memory_id},
             )
             return forgotten

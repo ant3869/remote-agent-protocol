@@ -12,6 +12,11 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Butler memory: "remember I prefer Codex for UI work", "what do you know
+  about the landing page?", "forget my coffee order". Facts are kept in the
+  conversation hub's memory store, which refuses recognizable secrets, and are
+  handed to agents with their work too. The newest ones sit in the Butler's
+  prompt, so preferences apply without a lookup (`BUTLER_MEMORY_ENABLED`).
 - Butler skills: drop a folder with a `SKILL.md` (a `name` and one-line
   `description` in frontmatter, then instructions -- the Claude Code layout)
   into `data/skills` (`BUTLER_SKILLS_DIR`) and the Butler loads it with

@@ -434,7 +434,11 @@ what finished within `BUTLER_RECENT_TASK_SECS` (default two hours) into counts
 plus one line per task. Skills (`butler.SkillLibrary`) are `<name>/SKILL.md`
 instruction packs from `butler/skills/` and `BUTLER_SKILLS_DIR`; the system
 prompt lists each one's name and description and `use_skill` returns its
-instructions, which can direct only the tools the Butler already has. Only the local time query and
+instructions, which can direct only the tools the Butler already has. `remember`, `recall`
+and `forget` (`butler.ButlerMemory`) keep user-stated facts as shared memories
+in the conversation hub (`AgentConversationHub.remember`), so the memory
+policy's secret filter applies and agents receive them with their context; the
+newest are listed in the Butler's system prompt. Only the local time query and
 a yes/no to a held task bypass the model. Tool traffic is never persisted: history keeps the
 user's words and the final reply. If no endpoint can start the turn, it runs
 on the router path instead; if the model fails after a tool ran, the turn ends

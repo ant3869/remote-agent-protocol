@@ -42,6 +42,7 @@ from remote_agent_protocol.butler import (
     BUILTIN_SKILLS_DIR,
     READ_ONLY_TOOLS,
     ButlerLoop,
+    ButlerMemory,
     ButlerToolbox,
     ButlerUnavailable,
     DispatchOutcome,
@@ -229,6 +230,8 @@ class BrainSession:
         # before reading the hub's turns for a hub-dispatched job, so it
         # never races that task's own append (task-8 review round 1, #5).
         self._hub_job_event_tasks: dict[str, asyncio.Task] = {}
+        # The user turn a remembered fact came from, recorded as its source.
+        self._butler_turn_id = "butler-turn"
         self._butler_ledger = TaskLedger(cfg.BUTLER_TASKS_FILE or None)
         # "<job_id>:<status>" -> the finished job's task_status-shaped event.
         # Keyed like the [[announce]] id brain_adapter publishes, so the
@@ -248,6 +251,11 @@ class BrainSession:
             check_wait_secs=cfg.AGENT_CHECK_WAIT_SECS,
             recent_secs=cfg.BUTLER_RECENT_TASK_SECS,
             skills=SkillLibrary(BUILTIN_SKILLS_DIR, cfg.BUTLER_SKILLS_DIR or None),
+            memory=(
+                ButlerMemory(self._conversation_hub, lambda: self._butler_turn_id)
+                if cfg.BUTLER_MEMORY_ENABLED
+                else None
+            ),
         )
         self._butler = ButlerLoop(
             toolbox=self._butler_toolbox,
@@ -1245,6 +1253,7 @@ class BrainSession:
         user's words and the final reply are kept in history.
         """
         announcement = text.startswith(ANNOUNCE_PREFIX)
+        self._butler_turn_id = f"butler-turn:{utterance['turn_id']}"
         direct = None if announcement else self._butler_pregate(text)
         if announcement:
             stream = self._butler.run(self._butler_event_messages(text), READ_ONLY_TOOLS)
