@@ -12,6 +12,11 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Butler skills: drop a folder with a `SKILL.md` (a `name` and one-line
+  `description` in frontmatter, then instructions -- the Claude Code layout)
+  into `data/skills` (`BUTLER_SKILLS_DIR`) and the Butler loads it with
+  `use_skill` when a request matches. Skills only direct the tools he already
+  has. A `briefing` skill ships as an example ("what did I miss?").
 - Butler's mouth follows the words he is saying. The voice frontend only
   reports loudness, so the reply text (which arrives a sentence ahead of its
   audio) now picks each syllable's shape -- round for "oo"/"oh", wide for

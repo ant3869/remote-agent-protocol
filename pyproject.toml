@@ -185,6 +185,7 @@ include = ["pipecat*", "remote_agent_protocol*"]
 "pipecat" = ["py.typed"]
 "remote_agent_protocol" = [
     "web_app/**/*",
+    "butler/skills/**/*",
 ]
 "pipecat.audio.dtmf" = [
     "src/pipecat/audio/dtmf/dtmf-0.wav",

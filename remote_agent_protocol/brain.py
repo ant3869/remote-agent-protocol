@@ -39,11 +39,13 @@ from remote_agent_protocol import (
 from remote_agent_protocol import config as cfg
 from remote_agent_protocol import personas as persona_catalog
 from remote_agent_protocol.butler import (
+    BUILTIN_SKILLS_DIR,
     READ_ONLY_TOOLS,
     ButlerLoop,
     ButlerToolbox,
     ButlerUnavailable,
     DispatchOutcome,
+    SkillLibrary,
     TaskLedger,
 )
 from remote_agent_protocol.control_plane import AgentControlPlane, AgentRegistry
@@ -232,23 +234,23 @@ class BrainSession:
         # Keyed like the [[announce]] id brain_adapter publishes, so the
         # announcement turn can reach the Butler as a tool result.
         self._agent_events: dict[str, dict] = {}
+        self._butler_toolbox = ButlerToolbox(
+            bridge=self._bridge,
+            control_plane=self._control_plane,
+            ledger=self._butler_ledger,
+            dispatch=self._butler_dispatch,
+            admit=lambda agent, task: self._gate_dispatch(agent, task),
+            needs_confirmation=self._needs_confirmation,
+            hold_confirmation=self._butler_hold_confirmation,
+            drop_confirmation=lambda token: self.resolve_confirmation(token, "deny") is not None,
+            aliases=cfg.AGENT_SPOKEN_ALIASES,
+            fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
+            check_wait_secs=cfg.AGENT_CHECK_WAIT_SECS,
+            recent_secs=cfg.BUTLER_RECENT_TASK_SECS,
+            skills=SkillLibrary(BUILTIN_SKILLS_DIR, cfg.BUTLER_SKILLS_DIR or None),
+        )
         self._butler = ButlerLoop(
-            toolbox=ButlerToolbox(
-                bridge=self._bridge,
-                control_plane=self._control_plane,
-                ledger=self._butler_ledger,
-                dispatch=self._butler_dispatch,
-                admit=lambda agent, task: self._gate_dispatch(agent, task),
-                needs_confirmation=self._needs_confirmation,
-                hold_confirmation=self._butler_hold_confirmation,
-                drop_confirmation=lambda token: (
-                    self.resolve_confirmation(token, "deny") is not None
-                ),
-                aliases=cfg.AGENT_SPOKEN_ALIASES,
-                fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
-                check_wait_secs=cfg.AGENT_CHECK_WAIT_SECS,
-                recent_secs=cfg.BUTLER_RECENT_TASK_SECS,
-            ),
+            toolbox=self._butler_toolbox,
             endpoints=lambda: llm_endpoint.chain(llm_endpoint.BRAIN),
             http=lambda: self._http,
             max_rounds=cfg.BUTLER_MAX_TOOL_ROUNDS,
@@ -1345,6 +1347,7 @@ class BrainSession:
         return (
             f"{self._persona.system_prompt}{cfg.BUTLER_RULES}"
             f" Configured agents: {agents}. Current local time: {now}."
+            f"{self._butler_toolbox.system_notes()}"
         )
 
     def _butler_history(self) -> list[dict]:

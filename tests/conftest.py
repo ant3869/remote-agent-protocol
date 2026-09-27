@@ -104,6 +104,7 @@ def _sandboxed_butler_tasks(tmp_path, monkeypatch):
     from remote_agent_protocol import config as cfg
 
     monkeypatch.setattr(cfg, "BUTLER_TASKS_FILE", str(tmp_path / "butler_tasks.json"))
+    monkeypatch.setattr(cfg, "BUTLER_SKILLS_DIR", str(tmp_path / "skills"))
 
 
 @pytest.fixture(autouse=True)

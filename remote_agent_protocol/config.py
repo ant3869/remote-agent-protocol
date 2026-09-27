@@ -849,6 +849,10 @@ BUTLER_TASKS_FILE = _env("BUTLER_TASKS_FILE", str(DATA_DIR / "butler_tasks.json"
 # "What's been going on" covers work that finished within this window, beside
 # whatever is still running.
 BUTLER_RECENT_TASK_SECS = float(_env("BUTLER_RECENT_TASK_SECS", "7200"))
+# Skills: <name>/SKILL.md instruction packs (the Claude Code layout) the Butler
+# loads when a request matches one. The packaged ones come first; a skill here
+# with the same name replaces it. Empty offers only the packaged skills.
+BUTLER_SKILLS_DIR = _env("BUTLER_SKILLS_DIR", str(DATA_DIR / "skills"))
 BUTLER_RULES = (
     " You are the front door to the user's agents, and you act only through your tools."
     " Say only what your tools returned: never claim an agent was contacted, is working,"

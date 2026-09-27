@@ -431,7 +431,10 @@ id, so "have Codex do it" retries the same task; it is kept in
 `BUTLER_TASKS_FILE`, so subjects still resolve after a restart (confirmation
 holds are not kept). `list_tasks(scope="recent")` rolls up what is running and
 what finished within `BUTLER_RECENT_TASK_SECS` (default two hours) into counts
-plus one line per task. Only the local time query and
+plus one line per task. Skills (`butler.SkillLibrary`) are `<name>/SKILL.md`
+instruction packs from `butler/skills/` and `BUTLER_SKILLS_DIR`; the system
+prompt lists each one's name and description and `use_skill` returns its
+instructions, which can direct only the tools the Butler already has. Only the local time query and
 a yes/no to a held task bypass the model. Tool traffic is never persisted: history keeps the
 user's words and the final reply. If no endpoint can start the turn, it runs
 on the router path instead; if the model fails after a tool ran, the turn ends

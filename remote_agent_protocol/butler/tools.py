@@ -21,9 +21,10 @@ from loguru import logger
 from remote_agent_protocol import agent_bridge
 from remote_agent_protocol import agent_status_reporting as agent_status
 from remote_agent_protocol.butler.ledger import ButlerTask, TaskLedger
+from remote_agent_protocol.butler.skills import SkillLibrary
 
 READ_ONLY_TOOLS = frozenset(
-    {"list_agents", "check_agents", "task_status", "list_tasks", "get_result"}
+    {"list_agents", "check_agents", "task_status", "list_tasks", "get_result", "use_skill"}
 )
 _RESULT_PREVIEW_CHARS = 400
 _RESULT_FULL_CHARS = 4000
@@ -143,6 +144,15 @@ TOOL_SCHEMAS: list[dict] = [
     ),
 ]
 
+SKILL_SCHEMAS: list[dict] = [
+    _fn(
+        "use_skill",
+        "Load a skill's instructions by its name from the skills list, then follow them.",
+        {"name": {"type": "string"}},
+        ["name"],
+    ),
+]
+
 
 class ButlerToolbox:
     """Executes Butler tool calls against RAP's control plane, bridge, and hub."""
@@ -162,6 +172,7 @@ class ButlerToolbox:
         fresh_for_secs: float = 0.0,
         check_wait_secs: float | None = None,
         recent_secs: float = 7200.0,
+        skills: SkillLibrary | None = None,
     ):
         """Initialize the toolbox.
 
@@ -179,6 +190,7 @@ class ButlerToolbox:
             check_wait_secs: The most check_agents waits for self-checks in total.
             recent_secs: How far back list_tasks(scope='recent') reaches for
                 finished work.
+            skills: Instruction packs offered through use_skill; None offers none.
         """
         self._bridge = bridge
         self._control_plane = control_plane
@@ -192,16 +204,25 @@ class ButlerToolbox:
         self._fresh_for_secs = fresh_for_secs
         self._check_wait_secs = check_wait_secs
         self._recent_secs = recent_secs
+        self._skills = skills
 
     @property
     def ledger(self) -> TaskLedger:
         """This session's Butler tasks."""
         return self._ledger
 
+    def schemas(self) -> list[dict]:
+        """The tools this toolbox offers, given which abilities it was built with."""
+        return [*TOOL_SCHEMAS, *(SKILL_SCHEMAS if self._skills is not None else [])]
+
+    def system_notes(self) -> str:
+        """What the model needs to know up front about its abilities ('' if nothing)."""
+        return self._skills.prompt_section() if self._skills is not None else ""
+
     async def call(self, name: str, arguments: str | Mapping[str, Any] | None) -> dict:
         """Run one tool call; never raises -- failures come back as results."""
         handler = getattr(self, f"_tool_{name}", None)
-        if handler is None or name not in {s["function"]["name"] for s in TOOL_SCHEMAS}:
+        if handler is None or name not in {s["function"]["name"] for s in self.schemas()}:
             return _error(f"There is no tool named {name}.")
         try:
             args = json.loads(arguments) if isinstance(arguments, str) else dict(arguments or {})
@@ -216,6 +237,21 @@ class ButlerToolbox:
         except Exception as exc:  # noqa: BLE001 - a tool failure is a result, not a crash
             logger.exception(f"Butler tool {name} failed")
             return _error(f"{name} failed: {exc}")
+
+    # -- skills ----------------------------------------------------------------
+
+    async def _tool_use_skill(self, name: str) -> dict:
+        skill = self._skills.get(name) if self._skills is not None else None
+        if skill is None:
+            known = ", ".join(s.name for s in self._skills.catalog()) if self._skills else ""
+            return _error(
+                f"There is no skill named {name}." + (f" Skills: {known}." if known else "")
+            )
+        return {
+            "skill": skill.name,
+            "instructions": skill.instructions,
+            "summary": f"Loaded the {skill.name} skill; follow its instructions now.",
+        }
 
     # -- agent resolution ------------------------------------------------------
 

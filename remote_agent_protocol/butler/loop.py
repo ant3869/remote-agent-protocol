@@ -19,7 +19,7 @@ import aiohttp
 from loguru import logger
 
 from remote_agent_protocol import llm_endpoint
-from remote_agent_protocol.butler.tools import TOOL_SCHEMAS, ButlerToolbox
+from remote_agent_protocol.butler.tools import ButlerToolbox
 
 ToolListener = Callable[[str, dict, dict], None]
 TimingListener = Callable[[dict], None]
@@ -156,7 +156,7 @@ class ButlerLoop:
         """
         schemas = [
             schema
-            for schema in TOOL_SCHEMAS
+            for schema in self._toolbox.schemas()
             if allowed_tools is None or schema["function"]["name"] in allowed_tools
         ]
         endpoints = self._endpoints()
