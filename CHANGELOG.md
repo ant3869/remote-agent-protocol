@@ -12,6 +12,13 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Butler's mouth follows the words he is saying. The voice frontend only
+  reports loudness, so the reply text (which arrives a sentence ahead of its
+  audio) now picks each syllable's shape -- round for "oo"/"oh", wide for
+  "ee", lips closed for m/b/p, teeth on lip for f/v, teeth for s/sh -- while
+  loudness decides when each syllable starts and how wide it opens. Without a
+  loudness feed the words are walked at a speaking pace. Stressed syllables
+  add a small nod in place of the constant speaking jitter.
 - Many tasks, one room (roadmap phase D): the Butler's tasks -- subject,
   instructions, and every agent that tried them -- are kept in
   `BUTLER_TASKS_FILE`, so "how's the email thing?" still resolves after a
@@ -94,6 +101,8 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 - A cloud-only setup (`CLOUD_LLM_LOCAL_FALLBACK=false`) neither needs nor
   starts Ollama, and the header shows "Ollama off (cloud only)" instead of a
   failure when it isn't running.
+- The Stage caption and the avatar's reply text were blanked whenever the
+  voice frontend reported that a message started playing.
 - The latency readouts no longer keep the previous turn's think/voice times
   when the frontend couldn't measure them for this turn.
 - Butler avatar motion: a listening tilt that settles instead of snapping,

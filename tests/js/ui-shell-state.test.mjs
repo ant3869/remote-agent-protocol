@@ -93,3 +93,20 @@ test("layout helpers default to Stage and let the server's choice win", () => {
   assert.equal(slotFor("stage"), "avatarSlotStage");
   assert.equal(slotFor("console"), "avatarSlotRail");
 });
+
+test("the avatar mouths the message that is playing, not a blank playback update", () => {
+  const { spokenMessage } = globalThis.RapUiShell;
+  const texts = new Map();
+  let speech = { id: null, text: "" };
+  speech = spokenMessage(speech, texts, { type: "transcript", role: "assistant", message_id: "a", text: "Right away." });
+  speech = spokenMessage(speech, texts, { type: "transcript", role: "assistant", message_id: "a", text: "Right away. Done." });
+  assert.deepEqual(speech, { id: "a", text: "Right away. Done." });
+
+  speech = spokenMessage(speech, texts, { type: "transcript", role: "assistant", message_id: "b", text: "Next." });
+  speech = spokenMessage(speech, texts, { type: "transcript", message_id: "a", playback_update: true, delivery: "playing" });
+  assert.deepEqual(speech, { id: "a", text: "Right away. Done." }, "playback of an earlier message switches back to it");
+
+  const unchanged = spokenMessage(speech, texts, { type: "transcript", role: "user", message_id: "u", text: "hi" });
+  assert.equal(unchanged, speech);
+  assert.equal(spokenMessage(speech, texts, { type: "transcript", message_id: "a", playback_update: true, delivery: "played" }), speech);
+});

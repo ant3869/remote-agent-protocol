@@ -115,6 +115,27 @@
     return normalizeLayout(serverValue, normalizeLayout(localValue));
   }
 
+  // Which assistant message the avatar should be mouthing. Reply text grows a
+  // sentence at a time ahead of its audio, and the voice frontend reports when
+  // a message starts playing -- with its id only, so the text is kept here.
+  // Returns the new {id, text}; ``texts`` (id -> text) is updated in place.
+  function spokenMessage(current, texts, event) {
+    if (event?.type !== "transcript" || !event.message_id || event.role === "user") return current;
+    const id = event.message_id;
+    if (typeof event.text === "string" && event.text && !event.playback_update) {
+      texts.set(id, event.text);
+      while (texts.size > 40) texts.delete(texts.keys().next().value);
+      return { id, text: event.text };
+    }
+    if (event.playback_update && event.delivery === "playing") {
+      const text = typeof event.spoken_text === "string" && event.spoken_text
+        ? event.spoken_text
+        : texts.get(id) || "";
+      return text ? { id, text } : current;
+    }
+    return current;
+  }
+
   function slotFor(mode) {
     return normalizeLayout(mode) === "stage" ? "avatarSlotStage" : "avatarSlotRail";
   }
@@ -124,6 +145,7 @@
     nextLayout,
     normalizeLayout,
     slotFor,
+    spokenMessage,
     applyResponsiveDisclosures,
     createMomentaryControl,
     healthSummary,

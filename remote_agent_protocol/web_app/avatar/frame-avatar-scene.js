@@ -1,4 +1,5 @@
 import { AvatarEnvelopeStream } from "./lip-sync.js";
+import { VisemeTrack, visemeScript } from "./viseme-script.js";
 
 const ASSET_BASE = "/assets/avatars/butler/runtime_512_v1/";
 // Asset responses are immutable for a year.  Advance this whenever a delivery
@@ -158,6 +159,12 @@ export async function createAvatarScene(host, settings) {
   let live = false;
   let pose = { y: 0, scale: 1, angle: 0 };
   let audioAt = -Infinity;
+  // The reply being spoken, walked syllable by syllable (viseme-script.js).
+  const track = new VisemeTrack();
+  let trackId = null;
+  let trackText = "";
+  let nodAt = -Infinity;
+  let nodStrength = 0;
   let fallbackFrame = "base";
   let nextFallbackAt = 0;
   let visible = true;
@@ -216,7 +223,24 @@ export async function createAvatarScene(host, settings) {
     const peak = Math.max(rms, Math.min(1, Number(sample?.peak) || 0));
     audioLevel = Math.max(0, Math.min(1, rms * 1.45 + (peak - rms) * 0.22));
     audioAt = performance.now();
+    if (track.level(audioLevel, audioAt) && audioLevel > 0.3) {
+      // Stressed syllables carry a small nod, as a speaker's head does.
+      nodAt = audioAt;
+      nodStrength = Math.min(1, audioLevel);
+    }
   });
+
+  const followSpeech = (id, text) => {
+    if (!id || !text) return;
+    if (id !== trackId) {
+      trackId = id;
+      trackText = text;
+      track.reset(visemeScript(text));
+    } else if (text !== trackText) {
+      trackText = text;
+      track.extend(visemeScript(text));
+    }
+  };
   if (settings.lipSync) stream.start();
 
   const activeSequenceFrame = (value, now) => {
@@ -287,8 +311,11 @@ export async function createAvatarScene(host, settings) {
     const blinking = blinkFrame(now);
     if (blinking) return blinking;
     if (visualState !== "speaking") return glanceFrame(now) || frameForState(visualState);
-    const level = debugLevel ?? audioLevel;
-    return now - audioAt < 350 || debugLevel !== null ? frameForLevel(level) : fallbackViseme(now);
+    if (debugLevel !== null) return frameForLevel(debugLevel);
+    if (now - audioAt < 350) return track.frame(now, audioLevel) ?? frameForLevel(audioLevel);
+    // No envelope from the voice frontend: walk the words at a speaking pace.
+    track.clock(now);
+    return track.frame(now, 0.5) ?? fallbackViseme(now);
   };
 
   const setFrame = (name, now) => {
@@ -301,14 +328,17 @@ export async function createAvatarScene(host, settings) {
   const targetPose = (now) => {
     if (reducedMotion() || effect) return { y: 0, scale: 1, angle: 0 };
     const seconds = now / 1000;
-    const speakingEnergy = visualState === "speaking" ? Math.max(0.1, audioLevel) : 0;
+    const since = now - nodAt;
+    const nod = visualState === "speaking" && since < 260
+      ? nodStrength * Math.sin(Math.PI * since / 260)
+      : 0;
     const lean = visualState === "listening" ? -1.1
       : visualState === "thinking" ? 0.6 + Math.sin(seconds * 0.9) * 0.35
         : Math.sin(seconds * 0.55) * 0.18;
     return {
-      y: Math.sin(seconds * Math.PI * 0.56) * 1.15 + speakingEnergy * Math.sin(seconds * 17) * 0.75,
+      y: Math.sin(seconds * Math.PI * 0.56) * 1.15 + nod * 1.8,
       scale: 1 + Math.sin(seconds * Math.PI * 0.48) * 0.0035,
-      angle: lean,
+      angle: lean + nod * 0.25,
     };
   };
 
@@ -415,6 +445,7 @@ export async function createAvatarScene(host, settings) {
   return {
     update(value) {
       runtime = value.runtime || {};
+      followSpeech(runtime.speechId, runtime.speechText);
       currentSettings = value.settings;
       const next = debugState || value.resolved?.state || "idle";
       enterState(next);

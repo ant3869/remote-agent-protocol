@@ -210,3 +210,38 @@ test("working state pulses the eye glow over the base portrait", async (t) => {
   assert.ok(last[0].includes("base.webp"), last.join(", "));
   assert.ok(last[1].includes("glow_eyes.webp"), last.join(", "));
 });
+
+
+test("speaking without an envelope mouths the words of the reply", async (t) => {
+  const canvas = fakeBrowser(t);
+  const drawn = [];
+  const context = canvas.getContext();
+  context.drawImage = (image) => drawn.push(image.value);
+  context.createLinearGradient = () => ({ addColorStop() {} });
+  context.fillRect = () => {};
+  let frameCallback = null;
+  globalThis.requestAnimationFrame = (callback) => { frameCallback = callback; return 1; };
+  globalThis.performance ??= { now: () => Date.now() };
+  const host = fakeHost();
+  const settings = { lipSync: false, effectiveReducedMotion: false };
+  const scene = await createAvatarScene(host, settings);
+  scene.update({
+    runtime: { speaking: true, speechId: "m1", speechText: "Oh, you two." },
+    resolved: { state: "speaking" },
+    settings,
+  });
+
+  let now = performance.now();
+  for (let step = 0; step < 60; step += 1) {
+    now += 20;
+    const callback = frameCallback;
+    frameCallback = null;
+    callback?.(now);
+  }
+  scene.dispose();
+
+  const names = drawn.map((url) => url.match(/\/(\w+)\.webp/)?.[1]);
+  assert.ok(names.includes("oh"), names.join(","));
+  assert.ok(names.includes("oo"), names.join(","));
+  assert.ok(!names.includes("open"), "no syllable in the reply opens wide");
+});

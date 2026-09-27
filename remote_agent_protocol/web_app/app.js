@@ -9,7 +9,7 @@ const state = {
   selectedPersona: null,
   personaOriginal: null,
   connectionLost: false,
-  avatar: { speaking: false, userSpeaking: false, completedAt: 0, failedAt: 0, latestAssistantText: "", lastActivityAt: Date.now() },
+  avatar: { speaking: false, userSpeaking: false, completedAt: 0, failedAt: 0, latestAssistantText: "", speech: { id: null, text: "" }, speechTexts: new Map(), lastActivityAt: Date.now() },
   wake: null,
   agentJobs: {},
   agentHistory: [],
@@ -689,7 +689,11 @@ function handleEvent(event) {
   if (["transcript", "draft_voice", "turn", "speaking", "wake", "agent_job", "agent_confirm", "agent_control"].includes(event.type)) {
     state.avatar.lastActivityAt = Date.now();
   }
-  if (event.type === "transcript" && event.role !== "user") state.avatar.latestAssistantText = event.text || "";
+  state.avatar.speech = uiShell.spokenMessage(state.avatar.speech, state.avatar.speechTexts, event);
+  // Playback updates carry no text; they must not blank the caption.
+  if (event.type === "transcript" && event.role !== "user" && typeof event.text === "string" && !event.playback_update) {
+    state.avatar.latestAssistantText = event.text;
+  }
   if (event.type === "speaking") state.avatar.speaking = Boolean(event.value);
   if (event.type === "turn" && event.event === "user_started") state.avatar.userSpeaking = true;
   if (event.type === "turn" && event.event === "user_stopped") state.avatar.userSpeaking = false;
@@ -787,6 +791,8 @@ function avatarRuntimeSnapshot() {
     error: s.session === "failed" || Boolean(state.avatar.failedAt && Date.now() - state.avatar.failedAt < 5000),
     connectionLost: Boolean(state.connectionLost),
     latestAssistantText: state.avatar.latestAssistantText,
+    speechId: state.avatar.speech.id,
+    speechText: state.avatar.speech.text,
   };
 }
 
