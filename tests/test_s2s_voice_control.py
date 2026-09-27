@@ -802,3 +802,23 @@ def test_a_stream_announces_itself_before_the_model_speaks(envelope_server, monk
     assert chunks[0]["choices"][0]["delta"] == {"role": "assistant"}
     assert chunks[1]["choices"][0]["delta"] == {"content": "First sentence."}
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_late_self_check_results_are_announced_and_reach_the_butler_as_an_event(
+    monkeypatch, tmp_path
+):
+    from remote_agent_protocol import brain as brain_module
+
+    announce = tmp_path / "s2s_announce.json"
+    monkeypatch.setattr(cfg, "S2S_ANNOUNCE_FILE", str(announce))
+    monkeypatch.setattr(cfg, "S2S_VOICE_FILE", str(tmp_path / "voice.txt"))
+    monkeypatch.setattr(cfg, "BUTLER_TOOLS_ENABLED", True)
+    adapter = BrainSessionAdapter(PERSONAS[0], on_event=lambda event: None)
+
+    adapter._brain._announce_check_results(["Hermes: Up (responded in 12s; current)"])
+
+    [data] = _queued_announcements(announce)
+    assert data["text"].startswith(f"[[announce]] [id={data['id']}]")
+    assert "Hermes: Up" in data["text"]
+    assert brain_module._announce_id(data["text"]) == data["id"]
+    assert adapter._brain._butler_active(data["text"]), "the Butler narrates it from the event"

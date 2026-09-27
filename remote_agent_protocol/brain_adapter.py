@@ -466,6 +466,14 @@ class BrainSessionAdapter:
         """Watch brain events on their way to the GUI for frontend side effects."""
         if event.get("type") == "agent_job_summary":
             self._publish_announcement(event)
+        elif event.get("type") == "agent_check_update":
+            ident = str(event.get("id", ""))
+            self._queue_announcement(
+                ident,
+                f"{ANNOUNCE_PREFIX} [id={ident}] [Agent self-check results: {event.get('summary', '')}."
+                " Tell the user in one short sentence.]",
+                {"relation": "summary"},
+            )
         self._emit(event)
 
     def _publish_announcement(self, event: dict) -> None:
@@ -508,13 +516,17 @@ class BrainSessionAdapter:
         while len(self._brain._announcement_sources) > 120:
             self._brain._announcement_sources.pop(next(iter(self._brain._announcement_sources)))
         text = text.replace(ANNOUNCE_PREFIX, f"{ANNOUNCE_PREFIX} [id={ident}]", 1)
-        payload = {
-            "id": ident,
-            "text": text,
-            "source_agent": agent,
-            "job_id": event.get("job_id"),
-            "relation": "summary",
-        }
+        self._queue_announcement(
+            ident,
+            text,
+            {"source_agent": agent, "job_id": event.get("job_id"), "relation": "summary"},
+        )
+
+    def _queue_announcement(self, ident: str, text: str, fields: dict) -> None:
+        """Queue one announcement for the realtime frontend to voice as a turn."""
+        if not cfg.S2S_ANNOUNCE_FILE:
+            return
+        payload = {"id": ident, "text": text, **fields}
         path = Path(cfg.S2S_ANNOUNCE_FILE)
         queue_dir = path.with_suffix(f"{path.suffix}.queue")
         safe_id = "".join(char if char.isalnum() or char in "-_" else "_" for char in ident)

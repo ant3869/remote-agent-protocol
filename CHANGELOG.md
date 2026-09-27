@@ -118,6 +118,23 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
+- Butler's first sentence ("I'll check now, sir.") is spoken as soon as he
+  says it, not after his tools finish. It waited for the next sentence, which
+  only came after the agent checks -- about 16 s of silence per status
+  question, and a frontend timeout when a turn ran past 20 s.
+- Agents still answering their self-check when Butler replies are now
+  followed up: once they have all answered, Butler tells you how they turned
+  out, so "I'll let you know" is true. Named agents are checked in parallel.
+- Every agent is self-checked once at startup (`AGENT_CHECK_ON_START`) and a
+  confirmed answer counts for 10 minutes (`AGENT_HEALTH_FRESH_SECS`, was 2), so
+  "what's the agent status?" is answered straight away instead of "still
+  checking" for everyone.
+- Butler no longer refuses work because every agent is still checking; an
+  agent that is checking is not down.
+- On Windows, saving `agent_registry.json` while another process had it open
+  ("Access is denied") crashed the task recording an agent's check result.
+  The save now retries briefly, and a failed save is logged instead of losing
+  the result.
 - A roll call no longer waits on its slowest agent: self-checks are awaited
   for `AGENT_CHECK_WAIT_SECS` (default 8) in total, and an agent still
   answering is reported as checking. A 32-second Hermes check had pushed a

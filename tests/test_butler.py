@@ -815,3 +815,57 @@ async def test_text_before_and_after_a_tool_call_keeps_a_space():
     reply = await _run_loop(Chatty(lambda m, t: Say("unused")), box)
 
     assert reply == "I'll check now, sir. Nothing is running."
+
+
+@pytest.mark.asyncio
+async def test_what_the_model_says_before_its_tools_run_is_released_before_they_run():
+    """'I'll check now, sir.' was held until check_agents finished (09-27 00:21, 16 s)."""
+    from aiohttp import web
+
+    bridge = FakeBridge()
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), FakeDispatcher(bridge))
+    released_before_tool: list[str] = []
+    seen: list[str] = []
+    original = box.call
+
+    async def watching_call(name, arguments):
+        released_before_tool.append("".join(seen))
+        return await original(name, arguments)
+
+    box.call = watching_call
+
+    class Chatty(FakeModel):
+        async def handle(self, request):
+            body = await request.json()
+            self.requests.append(body)
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            if len(self.requests) == 1:
+                call = {
+                    "index": 0,
+                    "id": "c1",
+                    "function": {"name": "list_tasks", "arguments": "{}"},
+                }
+                chunks = [
+                    {"choices": [{"delta": {"content": "I'll check now, sir."}}]},
+                    {"choices": [{"delta": {"tool_calls": [call]}}]},
+                ]
+            else:
+                chunks = [{"choices": [{"delta": {"content": "Nothing is running."}}]}]
+            for chunk in chunks:
+                await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            await response.write_eof()
+            return response
+
+    async with (
+        ServedModel(Chatty(lambda m, t: Say("unused"))) as endpoint,
+        aiohttp.ClientSession() as http,
+    ):
+        loop = ButlerLoop(toolbox=box, endpoints=lambda: (endpoint,), http=lambda: http)
+        messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "go"}]
+        async for piece in loop.run(messages):
+            seen.append(piece)
+
+    assert released_before_tool == ["I'll check now, sir. "]
+    assert "".join(seen) == "I'll check now, sir. Nothing is running."

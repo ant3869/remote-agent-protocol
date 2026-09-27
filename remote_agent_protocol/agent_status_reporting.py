@@ -163,6 +163,7 @@ async def _append_response_check_rows(
     *,
     fresh_for_secs: float = 0.0,
     wait_secs: float | None = None,
+    follow_ups: list[asyncio.Task] | None = None,
 ) -> dict[str, AgentSnapshot | ControlError]:
     """Run bounded fixed-response checks and return their evidence snapshots.
 
@@ -171,6 +172,8 @@ async def _append_response_check_rows(
     run together and are awaited for at most ``wait_secs`` in total: a slow
     agent is reported as still checking rather than holding every other answer
     (and a voice turn) hostage, and its result is recorded when it arrives.
+    Given a ``follow_ups`` list, the slow checks keep running and a task is
+    added to it that resolves to their outcomes once every one has settled.
     """
     checker = request_response_check or control_plane.request_response_check
     now = datetime.now(UTC)
@@ -187,8 +190,12 @@ async def _append_response_check_rows(
     }
     if waits:
         _, still_waiting = await asyncio.wait(waits.values(), timeout=wait_secs)
-        for task in still_waiting:
-            task.cancel()
+        if still_waiting and follow_ups is not None:
+            late = [backend for backend, wait in waits.items() if wait in still_waiting]
+            follow_ups.append(asyncio.ensure_future(_settle(control_plane, late, still_waiting)))
+        else:
+            for task in still_waiting:
+                task.cancel()
     resolved = dict(selected)
     for backend, check in zip(to_check, checks, strict=True):
         if isinstance(check, JobHandle):
@@ -223,6 +230,17 @@ async def _append_response_check_rows(
     return resolved
 
 
+async def _settle(
+    control_plane, backends: list[str], waits: set[asyncio.Future]
+) -> dict[str, AgentSnapshot | ControlError]:
+    """Wait out slow self-checks (each bounded by its own timeout); their outcomes."""
+    await asyncio.wait(waits)
+    return {
+        backend: await control_plane.get_agent_status(backend, refresh=False)
+        for backend in backends
+    }
+
+
 async def collect_rollcall_rows(
     control_plane,
     agent: str | None,
@@ -231,6 +249,7 @@ async def collect_rollcall_rows(
     request_response_check: Callable[[str], Awaitable[object]] | None = None,
     fresh_for_secs: float = 0.0,
     wait_secs: float | None = None,
+    follow_ups: list[asyncio.Task] | None = None,
 ) -> tuple[list[str], str | None]:
     """Return ``(rows, missing_message)``; ``rows`` is empty exactly when nothing matched.
 
@@ -264,6 +283,7 @@ async def collect_rollcall_rows(
         request_response_check,
         fresh_for_secs=fresh_for_secs,
         wait_secs=wait_secs,
+        follow_ups=follow_ups,
     )
     rows = [control_summary(backend, snapshot) for backend, snapshot in selected.items()]
     rows.extend(check_rows)

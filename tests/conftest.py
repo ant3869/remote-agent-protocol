@@ -105,6 +105,8 @@ def _sandboxed_butler_tasks(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cfg, "BUTLER_TASKS_FILE", str(tmp_path / "butler_tasks.json"))
     monkeypatch.setattr(cfg, "BUTLER_SKILLS_DIR", str(tmp_path / "skills"))
+    # A started brain would otherwise launch every configured harness's CLI.
+    monkeypatch.setattr(cfg, "AGENT_CHECK_ON_START", False)
 
 
 @pytest.fixture(autouse=True)

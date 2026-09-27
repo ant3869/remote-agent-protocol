@@ -229,6 +229,12 @@ class ButlerLoop:
                         else "Sorry, I lost my train of thought."
                     )
                 return
+            if current.text and not current.text[-1:].isspace():
+                # "I'll check now, sir." must be spoken now, not after the
+                # tools run: a sentence only counts as finished downstream
+                # once whitespace follows it.
+                last_char = " "
+                yield " "
             calls = [current.tool_calls[i] for i in sorted(current.tool_calls)]
             for index, call in enumerate(calls):
                 call["id"] = call["id"] or f"call_{round_number}_{index}"

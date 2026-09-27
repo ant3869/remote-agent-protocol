@@ -314,3 +314,61 @@ async def test_a_turn_that_read_the_web_cannot_start_work(tmp_path):
     assert "start_task" not in offered_after and "web_search" in offered_after
     assert "read the web" in tool_results(model.requests[2]["messages"])[-1]["error"]
     assert reply.startswith("I found a page")
+
+
+# -- late self-check announcements ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agents_still_checking_are_announced_once_they_answer():
+    import asyncio
+
+    from remote_agent_protocol.control_plane import AgentControlPlane
+    from remote_agent_protocol.control_plane.adapters.fake import FakeAgentAdapter
+    from remote_agent_protocol.control_plane.models import JobHandle
+    from remote_agent_protocol.control_plane.service import SELF_CHECK_SENTINEL
+    from tests.test_agent_control_plane import make_observation
+
+    plane = AgentControlPlane(
+        {
+            "hermes": FakeAgentAdapter(
+                "hermes", probe=make_observation("hermes"), dispatch=JobHandle("chk-h", "hermes")
+            )
+        }
+    )
+    announced: list[list[str]] = []
+    box = ButlerToolbox(
+        bridge=FakeBridge(("hermes",)),
+        control_plane=plane,
+        ledger=None,
+        dispatch=None,
+        admit=lambda agent, task: None,
+        needs_confirmation=lambda agent, task: False,
+        hold_confirmation=lambda agent, task: "token",
+        drop_confirmation=lambda token: True,
+        aliases={},
+        check_wait_secs=0.05,
+        announce_checks=announced.append,
+    )
+
+    result = await box.call("check_agents", {})
+    assert "Checking for a response now" in result["summary"]
+    assert "RAP will tell the user" in result["summary"]
+    assert announced == []
+
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "chk-h",
+            "agent": "hermes",
+            "status": "done",
+            "result": SELF_CHECK_SENTINEL,
+        }
+    )
+    for _ in range(50):
+        if announced:
+            break
+        await asyncio.sleep(0.01)
+
+    assert len(announced) == 1 and announced[0][0].startswith("Hermes: Up")

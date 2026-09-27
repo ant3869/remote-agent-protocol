@@ -463,11 +463,14 @@ fixed self-check reply or finished a real RAP job, with the latency and model
 when known; **Down** when a self-check or a real job failed on quota, auth,
 capacity, rate limits, or an unknown model; and reported as working when a
 RAP job is running on it. Busy agents and responses confirmed within
-`AGENT_HEALTH_FRESH_SECS` (default 120) are not pinged again, so the answer
+`AGENT_HEALTH_FRESH_SECS` (default 600) are not pinged again, so the answer
 comes back in seconds; failures are always re-checked. The checks run together
 and are awaited for `AGENT_CHECK_WAIT_SECS` (default 8) in total: an agent
 still answering by then is reported as checking, and its result is recorded
-when it arrives.
+when it arrives. The Butler's `check_agents` keeps following those up and, once
+all have settled, announces them through the frontend's announcement queue as
+an event turn. Every agent is self-checked once in the background at startup
+(`AGENT_CHECK_ON_START`) so the first roll call is answered from fresh results.
 
 ### Remote agent hosts
 

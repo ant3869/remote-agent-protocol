@@ -623,3 +623,68 @@ def test_response_timing_survives_a_registry_round_trip() -> None:
     legacy = observation.to_dict()
     del legacy["response_secs"], legacy["response_model"]
     assert AgentObservation.from_dict(legacy).response_secs is None
+
+
+@pytest.mark.asyncio
+async def test_a_locked_registry_file_is_retried_and_never_loses_the_observation(
+    tmp_path, monkeypatch
+):
+    """Windows: 'Access is denied' replacing agent_registry.json killed a check (09-27)."""
+    import os
+
+    from remote_agent_protocol.control_plane import store as store_module
+    from remote_agent_protocol.control_plane.registry import AgentRegistry
+
+    real_replace = os.replace
+    refusals = {"left": 2}
+
+    def flaky_replace(src, dst):
+        if refusals["left"]:
+            refusals["left"] -= 1
+            raise PermissionError(13, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(store_module.os, "replace", flaky_replace)
+    monkeypatch.setattr(store_module.time, "sleep", lambda _s: None)
+    registry = AgentRegistry(tmp_path / "agent_registry.json")
+
+    await registry.observe(make_observation("codex"))
+    assert (tmp_path / "agent_registry.json").exists(), "saved after the brief lock cleared"
+
+    def always_locked(src, dst):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(store_module.os, "replace", always_locked)
+    snapshot = await registry.observe(make_observation("hermes"))
+
+    assert snapshot.observation.agent_id == "hermes"
+    assert (await registry.get("hermes")) is snapshot
+
+
+@pytest.mark.asyncio
+async def test_slow_self_checks_are_followed_up_after_the_roll_call_returns() -> None:
+    adapter = FakeAgentAdapter(
+        "codex", probe=make_observation("codex"), dispatch=JobHandle("self-check-late", "codex")
+    )
+    plane = AgentControlPlane({"codex": adapter})
+    follow_ups: list[asyncio.Task] = []
+
+    rows, _ = await agent_status_reporting.collect_rollcall_rows(
+        plane, "codex", wait_secs=0.05, follow_ups=follow_ups
+    )
+    assert rows == ["Codex: Checking for a response now"]
+    assert len(follow_ups) == 1 and not follow_ups[0].done()
+
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "self-check-late",
+            "agent": "codex",
+            "status": "done",
+            "result": SELF_CHECK_SENTINEL,
+        }
+    )
+    late = await asyncio.wait_for(follow_ups[0], 2)
+
+    assert agent_status_reporting.control_summary("codex", late["codex"]).startswith("Codex: Up")

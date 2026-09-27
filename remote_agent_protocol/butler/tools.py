@@ -9,6 +9,7 @@ asks for.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -227,6 +228,7 @@ class ButlerToolbox:
         skills: SkillLibrary | None = None,
         memory: ButlerMemory | None = None,
         web: WebLookup | None = None,
+        announce_checks: Callable[[list[str]], None] | None = None,
     ):
         """Initialize the toolbox.
 
@@ -247,6 +249,9 @@ class ButlerToolbox:
             skills: Instruction packs offered through use_skill; None offers none.
             memory: Facts kept through remember/recall/forget; None offers none.
             web: web_search (when a provider is configured) and read_page.
+            announce_checks: Tells the user, unprompted, how agents that were
+                still answering their self-check turned out; None leaves them
+                to the next status question.
         """
         self._bridge = bridge
         self._control_plane = control_plane
@@ -263,6 +268,9 @@ class ButlerToolbox:
         self._skills = skills
         self._memory = memory
         self._web = web
+        self._announce_checks = announce_checks
+        # Follow-ups still running after their turn; held so they aren't collected.
+        self._background: set[asyncio.Task] = set()
 
     @property
     def ledger(self) -> TaskLedger:
@@ -428,16 +436,42 @@ class ButlerToolbox:
             targets = list(dict.fromkeys(resolved))
         else:
             targets = [None]
-        rows: list[str] = []
-        for target in targets:
-            found, missing_note = await agent_status.collect_rollcall_rows(
-                self._control_plane,
-                target,
-                fresh_for_secs=self._fresh_for_secs,
-                wait_secs=self._check_wait_secs,
+        follow_ups: list[asyncio.Task] | None = [] if self._announce_checks is not None else None
+        found = await asyncio.gather(
+            *(
+                agent_status.collect_rollcall_rows(
+                    self._control_plane,
+                    target,
+                    fresh_for_secs=self._fresh_for_secs,
+                    wait_secs=self._check_wait_secs,
+                    follow_ups=follow_ups,
+                )
+                for target in targets
             )
-            rows.extend(found or [missing_note or "nothing to check"])
-        return {"agents": rows, "summary": "; ".join(rows)}
+        )
+        rows: list[str] = []
+        for target_rows, missing_note in found:
+            rows.extend(target_rows or [missing_note or "nothing to check"])
+        summary = "; ".join(rows)
+        if follow_ups:
+            task = asyncio.ensure_future(self._announce_when_settled(follow_ups))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+            summary += ". RAP will tell the user how the rest turn out when they answer."
+        return {"agents": rows, "summary": summary}
+
+    async def _announce_when_settled(self, follow_ups: list[asyncio.Task]) -> None:
+        """One unprompted update once every slow self-check has an outcome."""
+        late: dict = {}
+        for outcome in await asyncio.gather(*follow_ups, return_exceptions=True):
+            if isinstance(outcome, dict):
+                late.update(outcome)
+            else:
+                logger.warning(f"A late self-check follow-up failed: {outcome}")
+        if late and self._announce_checks is not None:
+            self._announce_checks(
+                [agent_status.control_summary(name, result) for name, result in late.items()]
+            )
 
     async def _tool_start_task(self, agent: str, instructions: str, subject: str = "") -> dict:
         name = self._agent_name(agent)

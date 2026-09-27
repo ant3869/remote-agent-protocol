@@ -271,6 +271,7 @@ class BrainSession:
                 if cfg.BUTLER_WEB_ENABLED
                 else None
             ),
+            announce_checks=self._announce_check_results,
         )
         self._butler = ButlerLoop(
             toolbox=self._butler_toolbox,
@@ -297,6 +298,22 @@ class BrainSession:
         # Probe providers once so the orchestration panel shows real status on
         # first view instead of "not checked yet" until someone clicks Check now.
         self._spawn(self._orchestrator.refresh_provider_status(), "brain-provider-probe")
+        if cfg.AGENT_CHECK_ON_START:
+            self._spawn(self._startup_agent_check(), "brain-startup-agent-check")
+
+    async def _startup_agent_check(self) -> None:
+        """Self-check every agent once, quietly, so the first roll call is instant.
+
+        A self-check starts the harness and waits for a model reply, which takes
+        longer than a spoken answer can wait; done now, the results are fresh
+        (AGENT_HEALTH_FRESH_SECS) when the user first asks.
+        """
+        try:
+            await agent_status.collect_rollcall_rows(
+                self._control_plane, None, fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS
+            )
+        except Exception as exc:  # noqa: BLE001 - a warm-up never blocks startup
+            logger.warning(f"Startup agent self-check failed: {exc}")
 
     async def _warm_chat_model(self) -> None:
         """Make the reply model resident before the first turn asks for it.
@@ -1309,6 +1326,24 @@ class BrainSession:
         if not announcement:
             self._messages.append({"role": "user", "content": text})
         self._finish_turn(full.strip(), utterance)
+
+    def _announce_check_results(self, rows: list[str]) -> None:
+        """Voice how the agents still answering a roll call's self-check turned out.
+
+        Reaches the Butler the way a finished job does: an announcement whose
+        structured event arrives as a tool result, never as the user's words.
+        """
+        ident = f"check-{time.time_ns()}:done"
+        summary = "; ".join(rows)
+        self._agent_events[ident] = {
+            "task": "agent self-checks",
+            "subject": "the agents that were still answering their check",
+            "status": "done",
+            "summary": f"Self-check results: {summary}",
+        }
+        while len(self._agent_events) > 120:
+            self._agent_events.pop(next(iter(self._agent_events)))
+        self._emit({"type": "agent_check_update", "id": ident, "summary": summary})
 
     def _butler_event_messages(self, text: str) -> list[dict]:
         """An agent event as the result of a task_status call the Butler never made.

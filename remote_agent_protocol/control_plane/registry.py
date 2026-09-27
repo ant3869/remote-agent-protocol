@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from loguru import logger
+
 from .models import AgentObservation, AgentSnapshot
 from .store import AgentRegistryStore
 
@@ -49,5 +51,10 @@ class AgentRegistry:
             self._persist()
 
     def _persist(self) -> None:
+        # The file is a cache of what is already true in memory: failing to
+        # write it must never lose the observation or abort whoever recorded it.
         if self._store is not None:
-            self._store.save(self._snapshots)
+            try:
+                self._store.save(self._snapshots)
+            except OSError as exc:
+                logger.warning(f"Could not save the agent registry cache: {exc}")

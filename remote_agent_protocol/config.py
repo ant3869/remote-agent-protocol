@@ -828,7 +828,11 @@ AGENT_HISTORY_FILE = _env("AGENT_HISTORY_FILE", str(DATA_DIR / "jess_agent_histo
 # A roll call ("check all the agents") reuses a confirmed response -- from a
 # self-check or a finished job -- this recent instead of pinging again, so the
 # answer comes back in seconds. Failures are always re-checked. 0 disables.
-AGENT_HEALTH_FRESH_SECS = float(_env("AGENT_HEALTH_FRESH_SECS", "120"))
+AGENT_HEALTH_FRESH_SECS = float(_env("AGENT_HEALTH_FRESH_SECS", "600"))
+# Self-check every agent once in the background at startup, so the first
+# "what's the status?" is answered from fresh results instead of waiting on
+# harnesses that take 10-30 s to answer a check.
+AGENT_CHECK_ON_START = _env_bool("AGENT_CHECK_ON_START", True)
 # How long a roll call waits for self-checks in total. Agents that haven't
 # answered by then are reported as still checking, and their result is
 # recorded when it arrives -- a slow harness (Hermes can take 30s+) must not
@@ -886,7 +890,9 @@ BUTLER_RULES = (
     " recent failed task on the next agent that is up right away -- don't ask which task."
     " In 'have Codex check on Code Puppy', Codex does the work and Code Puppy is only the"
     " subject: start the task on Codex. If a tool says a task needs confirmation, ask the"
-    " user to confirm."
+    " user to confirm. An agent that is still checking is not down: start work on it"
+    " rather than refusing. Never promise to follow up unless a tool result says RAP"
+    " will."
     " Plain conversation needs no tools. Keep spoken replies to one or two sentences."
 )
 # The control plane's last-known health/activity snapshot per agent.
