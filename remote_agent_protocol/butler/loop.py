@@ -31,14 +31,31 @@ class ButlerUnavailable(RuntimeError):
 class _Round:
     text: str = ""
     tool_calls: dict[int, dict] = field(default_factory=dict)
+    _slots: dict[int, int] = field(default_factory=dict)  # provider index -> our slot
+    _last_slot: int | None = None
 
     def add_tool_delta(self, delta: dict) -> None:
-        index = int(delta.get("index", len(self.tool_calls)))
-        call = self.tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
-        call["id"] = delta.get("id") or call["id"]
+        """Fold one streamed tool-call fragment into the call it belongs to.
+
+        Providers differ: some number parallel calls 0, 1, 2; some send every
+        call as index 0 with a fresh id; some omit the index on continuation
+        fragments. A new id always starts a new call, and a fragment without
+        an index or id continues the latest one.
+        """
+        call_id = delta.get("id") or ""
+        raw_index = delta.get("index")
+        slot = self._slots.get(int(raw_index)) if raw_index is not None else self._last_slot
+        current = self.tool_calls.get(slot) if slot is not None else None
+        if current is None or (call_id and current["id"] and call_id != current["id"]):
+            slot = len(self.tool_calls)
+            current = self.tool_calls[slot] = {"id": "", "name": "", "arguments": ""}
+            if raw_index is not None:
+                self._slots[int(raw_index)] = slot
+        self._last_slot = slot
+        current["id"] = call_id or current["id"]
         function = delta.get("function") or {}
-        call["name"] += function.get("name") or ""
-        call["arguments"] += function.get("arguments") or ""
+        current["name"] += function.get("name") or ""
+        current["arguments"] += function.get("arguments") or ""
 
 
 class ButlerLoop:
@@ -209,6 +226,13 @@ class ButlerLoop:
                     resp.status, body, payload
                 )
                 if retry is None:
+                    if "arguments" in body:
+                        sent = [
+                            call["function"]["arguments"]
+                            for message in conversation
+                            for call in message.get("tool_calls") or ()
+                        ]
+                        logger.warning(f"Butler provider rejected tool arguments; sent: {sent}")
                     raise RuntimeError(f"HTTP {resp.status}: {body[:300]}")
             else:
                 retry = None
@@ -250,12 +274,16 @@ class ButlerLoop:
 
 
 def _normalized_arguments(raw: str) -> str:
-    """``raw`` if it is a JSON object, else ``"{}"`` -- always valid to send back."""
+    """Strict JSON for a call's arguments: the parsed object re-encoded, or ``"{}"``.
+
+    Re-encoding (rather than echoing ``raw``) drops anything Python's parser
+    tolerates but a strict one rejects, such as NaN or stray whitespace.
+    """
     try:
         value = json.loads(raw or "{}")
+        return json.dumps(value, allow_nan=False) if isinstance(value, dict) else "{}"
     except ValueError:
         return "{}"
-    return raw if isinstance(value, dict) else "{}"
 
 
 def _safe_json(raw: str) -> dict:

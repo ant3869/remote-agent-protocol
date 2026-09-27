@@ -631,3 +631,52 @@ async def test_malformed_tool_arguments_never_reach_the_provider_again():
     assert reply == "The arguments for list_tasks were not valid JSON."
     echoed = model.requests[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"]
     assert echoed == "{}"
+
+
+def _collect(*deltas):
+    from remote_agent_protocol.butler.loop import _Round
+
+    current = _Round()
+    for delta in deltas:
+        current.add_tool_delta(delta)
+    return [(c["name"], c["arguments"]) for c in current.tool_calls.values()]
+
+
+def _fn_delta(index=None, call_id=None, name=None, arguments=None):
+    delta = {"function": {k: v for k, v in (("name", name), ("arguments", arguments)) if v}}
+    if index is not None:
+        delta["index"] = index
+    if call_id:
+        delta["id"] = call_id
+    return delta
+
+
+def test_parallel_calls_numbered_by_index_stay_separate():
+    assert _collect(
+        _fn_delta(0, "a", "check_agents", "{}"),
+        _fn_delta(1, "b", "list_tasks", '{"scope"'),
+        _fn_delta(1, None, None, ': "active"}'),
+    ) == [("check_agents", "{}"), ("list_tasks", '{"scope": "active"}')]
+
+
+def test_parallel_calls_all_sent_as_index_zero_are_split_by_id():
+    assert _collect(
+        _fn_delta(0, "a", "check_agents", "{}"),
+        _fn_delta(0, "b", "list_tasks", "{}"),
+    ) == [("check_agents", "{}"), ("list_tasks", "{}")]
+
+
+def test_continuations_without_an_index_extend_the_latest_call():
+    assert _collect(
+        _fn_delta(None, "a", "start_task", '{"agent": '),
+        _fn_delta(None, None, None, '"codex"}'),
+    ) == [("start_task", '{"agent": "codex"}')]
+
+
+def test_history_arguments_are_strict_json():
+    from remote_agent_protocol.butler.loop import _normalized_arguments
+
+    assert _normalized_arguments('{"a": NaN}') == "{}"
+    assert _normalized_arguments(' {"agent" :  "codex"} ') == '{"agent": "codex"}'
+    assert _normalized_arguments("[1, 2]") == "{}"
+    assert _normalized_arguments("") == "{}"
