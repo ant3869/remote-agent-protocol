@@ -688,3 +688,42 @@ async def test_slow_self_checks_are_followed_up_after_the_roll_call_returns() ->
     late = await asyncio.wait_for(follow_ups[0], 2)
 
     assert agent_status_reporting.control_summary("codex", late["codex"]).startswith("Codex: Up")
+
+
+@pytest.mark.asyncio
+async def test_a_second_roll_call_reuses_the_answer_the_first_one_got() -> None:
+    """09-27 00:21-00:23: each question re-pinged every agent that had just answered.
+
+    The installation probe that starts every roll call was recorded as a fresh
+    observation with no response evidence, wiping the answer out.
+    """
+
+    async def fresh_probe():
+        # Like the CLI adapter: every probe is a new observation stamped now.
+        return make_observation("codex")
+
+    adapter = FakeAgentAdapter(
+        "codex", probe=fresh_probe, dispatch=JobHandle("self-check-a", "codex")
+    )
+    plane = AgentControlPlane({"codex": adapter})
+    first = asyncio.create_task(
+        agent_status_reporting.collect_rollcall_rows(plane, "codex", fresh_for_secs=600)
+    )
+    while not adapter.tasks:
+        await asyncio.sleep(0)
+    await plane.ingest_bridge_event(
+        {
+            "type": "agent_job",
+            "event": "finished",
+            "job_id": "self-check-a",
+            "agent": "codex",
+            "status": "done",
+            "result": SELF_CHECK_SENTINEL,
+        }
+    )
+    await first
+
+    rows, _ = await agent_status_reporting.collect_rollcall_rows(plane, "codex", fresh_for_secs=600)
+
+    assert len(adapter.tasks) == 1, "no second self-check"
+    assert rows == ["Codex: Up (responded; current)"]

@@ -118,6 +118,12 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Fixed
 
+- Every status question re-checked every agent, even ones that had answered
+  seconds earlier: the installation probe that starts a roll call replaced the
+  agent's record and erased its check answer, so the freshness window never
+  applied. The probe now keeps the last check outcome.
+- A failed or timed-out agent job now logs why (exit code, failure kind, and
+  a redacted reason) instead of only "-> failed".
 - Butler's first sentence ("I'll check now, sir.") is spoken as soon as he
   says it, not after his tools finish. It waited for the next sentence, which
   only came after the agent checks -- about 16 s of silence per status

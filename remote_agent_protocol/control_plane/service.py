@@ -154,6 +154,7 @@ class AgentControlPlane:
         except Exception as exc:
             return await self._record_error(agent_id, "probe_failed", str(exc))
         before = await self.registry.get(agent_id)
+        observation = _keep_response_evidence(observation, before)
         snapshot = await self.registry.observe(observation)
         self._emit(PROBE_SUCCEEDED, agent_id, detail="Adapter returned current evidence.")
         if before is None or before.observation != snapshot.observation or before.stale:
@@ -694,3 +695,29 @@ def _event_time(raw: Any) -> datetime | None:
 
 def _as_int(raw: Any) -> int | None:
     return raw if isinstance(raw, int) and raw >= 0 else None
+
+
+def _keep_response_evidence(
+    observation: AgentObservation, before: AgentSnapshot | None
+) -> AgentObservation:
+    """Carry the last self-check outcome across an installation probe.
+
+    A probe only says whether the harness is installed and what RAP is running
+    on it; it knows nothing about whether the harness answers. Recording it as
+    a fresh observation must not erase that answer, or every status question
+    re-pings every agent and none is ever reported from recent evidence.
+    """
+    if before is None or observation.response_state is not ResponseState.UNKNOWN:
+        return observation
+    previous = before.observation
+    if previous.response_state is ResponseState.UNKNOWN:
+        return observation
+    return replace(
+        observation,
+        health=previous.health if observation.health is Health.UNKNOWN else observation.health,
+        issues=observation.issues or previous.issues,
+        response_state=previous.response_state,
+        response_observed_at=previous.response_observed_at,
+        response_secs=previous.response_secs,
+        response_model=previous.response_model,
+    )

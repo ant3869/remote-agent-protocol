@@ -223,10 +223,15 @@ test("speaking without an envelope mouths the words of the reply", async (t) => 
   globalThis.requestAnimationFrame = (callback) => { frameCallback = callback; return 1; };
   globalThis.performance ??= { now: () => Date.now() };
   const host = fakeHost();
-  const settings = { lipSync: false, effectiveReducedMotion: false };
+  // Reduced motion skips the materialize intro, which plays once the deferred
+  // frames load and would otherwise cover the speech for a timing-dependent
+  // stretch; mouth shapes are drawn either way.
+  const settings = { lipSync: false, effectiveReducedMotion: true };
   const scene = await createAvatarScene(host, settings);
   scene.update({
-    runtime: { speaking: true, speechId: "m1", speechText: "Oh, you two." },
+    // Longer than the 1.2 s simulated below: past the end of the text the
+    // scene falls back to random shapes, which may include a wide one.
+    runtime: { speaking: true, speechId: "m1", speechText: "Oh, you two. ".repeat(4) },
     resolved: { state: "speaking" },
     settings,
   });

@@ -2252,7 +2252,17 @@ class AgentBridge:
         job.finished_at = _now_iso()
         await self._check_host_repo(job)
         self._emit_job(job, "finished", summary=summary, secs=job.secs)
-        logger.info(f"Agent job {job.job_id} [{job.agent}] -> {job.status}")
+        if job.status in (STATUS_FAILED, "timeout"):
+            # Say why: "-> failed" alone left an agent failing in half a second
+            # on every job undiagnosable from the log.
+            detail = job.failure_detail or _failure_tail(job.lines) or job.summary
+            reason = redact_secrets(detail).strip().replace("\n", " ")
+            logger.warning(
+                f"Agent job {job.job_id} [{job.agent}] -> {job.status}"
+                f" (exit {job.returncode}, {job.failure_kind or 'unclassified'}): {reason[:300]}"
+            )
+        else:
+            logger.info(f"Agent job {job.job_id} [{job.agent}] -> {job.status}")
 
         await self._notify_finished(job)
         self._emit_all_finished_if_idle()
