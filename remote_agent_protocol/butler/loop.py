@@ -110,6 +110,7 @@ class ButlerLoop:
         conversation = list(messages)
         results: list[dict] = []
         spoke = False
+        last_char = ""
         endpoint_index = 0
         round_number = 0
         while round_number < self._max_rounds:
@@ -120,7 +121,19 @@ class ButlerLoop:
                 async for delta in self._stream_round(
                     endpoint, conversation, current, final_round, schemas
                 ):
+                    # Text from an earlier round ("I'll check now, sir.") and
+                    # this round's answer arrive as separate streams; keep a
+                    # space between them so they don't run together.
+                    first_of_round = current.text == delta
+                    if (
+                        first_of_round
+                        and last_char
+                        and not last_char.isspace()
+                        and not delta[:1].isspace()
+                    ):
+                        yield " "
                     spoke = True
+                    last_char = delta[-1:] or last_char
                     yield delta
             except Exception as exc:  # noqa: BLE001 - provider failures vary widely
                 if not spoke and not results and endpoint_index + 1 < len(endpoints):

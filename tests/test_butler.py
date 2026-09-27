@@ -680,3 +680,40 @@ def test_history_arguments_are_strict_json():
     assert _normalized_arguments(' {"agent" :  "codex"} ') == '{"agent": "codex"}'
     assert _normalized_arguments("[1, 2]") == "{}"
     assert _normalized_arguments("") == "{}"
+
+
+@pytest.mark.asyncio
+async def test_text_before_and_after_a_tool_call_keeps_a_space():
+    """'I'll check now, sir.' then the answer must not run together as 'sir.Claude'."""
+    from aiohttp import web
+
+    bridge = FakeBridge()
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), FakeDispatcher(bridge))
+
+    class Chatty(FakeModel):
+        async def handle(self, request):
+            body = await request.json()
+            self.requests.append(body)
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            if len(self.requests) == 1:
+                call = {
+                    "index": 0,
+                    "id": "c1",
+                    "function": {"name": "list_tasks", "arguments": "{}"},
+                }
+                chunks = [
+                    {"choices": [{"delta": {"content": "I'll check now, sir."}}]},
+                    {"choices": [{"delta": {"tool_calls": [call]}}]},
+                ]
+            else:
+                chunks = [{"choices": [{"delta": {"content": "Nothing is running."}}]}]
+            for chunk in chunks:
+                await response.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            await response.write_eof()
+            return response
+
+    reply = await _run_loop(Chatty(lambda m, t: Say("unused")), box)
+
+    assert reply == "I'll check now, sir. Nothing is running."
