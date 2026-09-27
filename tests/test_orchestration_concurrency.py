@@ -64,6 +64,20 @@ class ConcurrencyGuardTests(unittest.TestCase):
         allowed, _ = guard.admit("hermes", "Look up tomorrow's forecast")
         self.assertTrue(allowed)
 
+    def test_a_per_harness_cap_overrides_the_default_for_that_harness_only(self):
+        bridge = _FakeBridge(jobs=[_FakeJob("codex", "a"), _FakeJob("hermes", "b")])
+        guard = ConcurrencyGuard(
+            bridge=bridge, global_cap=5, harness_cap=1, harness_caps={"codex": 2}
+        )
+        self.assertTrue(guard.admit("codex", "c")[0])
+        allowed, reason = guard.admit("hermes", "d")
+        self.assertFalse(allowed)
+        self.assertIn("'hermes'", reason)
+
+    def test_rejects_a_nonpositive_per_harness_cap(self):
+        with self.assertRaises(ValueError):
+            ConcurrencyGuard(bridge=_FakeBridge(), harness_caps={"codex": 0})
+
     def test_rejects_nonpositive_caps(self):
         with self.assertRaises(ValueError):
             ConcurrencyGuard(bridge=_FakeBridge(), global_cap=0, harness_cap=1)

@@ -95,6 +95,18 @@ def _sandboxed_instance_endpoint(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _sandboxed_butler_tasks(tmp_path, monkeypatch):
+    """Give each test its own Butler task ledger file.
+
+    A brain session persists its tasks; a file shared across the run would let
+    one test's tasks show up in the next test's list_tasks.
+    """
+    from remote_agent_protocol import config as cfg
+
+    monkeypatch.setattr(cfg, "BUTLER_TASKS_FILE", str(tmp_path / "butler_tasks.json"))
+
+
+@pytest.fixture(autouse=True)
 def _sandboxed_secret_store():
     """Keep provider keys off the real Windows Credential Manager.
 

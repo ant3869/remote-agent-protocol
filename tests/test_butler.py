@@ -217,6 +217,80 @@ async def test_aliases_list_tasks_cancel_and_model_switch():
 
 
 @pytest.mark.asyncio
+async def test_recent_tasks_roll_up_running_and_recently_finished_work():
+    bridge = FakeBridge()
+    box, _ = _toolbox(bridge, await _plane_with_recent_answers(), FakeDispatcher(bridge))
+    await box.call(
+        "start_task", {"agent": "hermes", "instructions": "draft the email", "subject": "email"}
+    )
+    now = datetime.now().astimezone()
+    bridge.add_job(
+        "job-old",
+        "codex",
+        "rename the files",
+        status=agent_bridge.STATUS_DONE,
+        finished_at=(now - timedelta(hours=5)).isoformat(),
+    )
+    bridge.add_job(
+        "job-new",
+        "codex",
+        "fix the landing page",
+        status=agent_bridge.STATUS_DONE,
+        finished_at=(now - timedelta(minutes=12)).isoformat(),
+    )
+    bridge.add_job(
+        "job-bad",
+        "code-puppy",
+        "update the docs",
+        status=agent_bridge.STATUS_FAILED,
+        finished_at=(now - timedelta(minutes=3)).isoformat(),
+    )
+
+    recent = await box.call("list_tasks", {"scope": "recent"})
+    active = await box.call("list_tasks", {"scope": "active"})
+
+    assert {row["task"] for row in recent["tasks"]} == {"t1", "job-new", "job-bad"}
+    assert recent["summary"].startswith("1 running, 1 finished, 1 failed in the last 2 hours.")
+    assert "(12 min ago)" in recent["summary"]
+    assert [row["task"] for row in active["tasks"]] == ["t1"]
+    assert active["summary"].startswith("1 running. t1 'email' on hermes: running")
+
+
+def test_tasks_and_their_subjects_survive_a_restart(tmp_path):
+    path = tmp_path / "butler_tasks.json"
+    ledger = TaskLedger(path)
+    task = ledger.create("email", "draft the email to Sam")
+    ledger.attach(task.task_id, "job-1", "hermes")
+    ledger.attach(task.task_id, "job-2", "codex")
+    held = ledger.create("cleanup", "delete old logs")
+    ledger.hold(held.task_id, "confirm-1", "codex")
+    ledger.amend(task.task_id, "draft the email to Sam\n\nCorrection from the user: cc Alex")
+
+    restored = TaskLedger(path)
+
+    again = restored.resolve("how is the email thing")
+    assert again is not None and again.task_id == "t1"
+    assert [(a.job_id, a.agent) for a in again.attempts] == [
+        ("job-1", "hermes"),
+        ("job-2", "codex"),
+    ]
+    assert again.instructions.endswith("cc Alex")
+    # A confirmation belongs to the session that raised it.
+    assert restored.get("t2").held_token is None
+    assert restored.create("next", "something else").task_id == "t3"
+
+
+def test_an_unreadable_ledger_file_starts_empty(tmp_path):
+    path = tmp_path / "butler_tasks.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    ledger = TaskLedger(path)
+
+    assert ledger.newest_first() == []
+    assert ledger.create("x", "y").task_id == "t1"
+
+
+@pytest.mark.asyncio
 async def test_get_result_returns_the_full_result():
     bridge = FakeBridge()
     dispatcher = FakeDispatcher(bridge)

@@ -227,7 +227,7 @@ class BrainSession:
         # before reading the hub's turns for a hub-dispatched job, so it
         # never races that task's own append (task-8 review round 1, #5).
         self._hub_job_event_tasks: dict[str, asyncio.Task] = {}
-        self._butler_ledger = TaskLedger()
+        self._butler_ledger = TaskLedger(cfg.BUTLER_TASKS_FILE or None)
         # "<job_id>:<status>" -> the finished job's task_status-shaped event.
         # Keyed like the [[announce]] id brain_adapter publishes, so the
         # announcement turn can reach the Butler as a tool result.
@@ -247,6 +247,7 @@ class BrainSession:
                 aliases=cfg.AGENT_SPOKEN_ALIASES,
                 fresh_for_secs=cfg.AGENT_HEALTH_FRESH_SECS,
                 check_wait_secs=cfg.AGENT_CHECK_WAIT_SECS,
+                recent_secs=cfg.BUTLER_RECENT_TASK_SECS,
             ),
             endpoints=lambda: llm_endpoint.chain(llm_endpoint.BRAIN),
             http=lambda: self._http,

@@ -10,7 +10,7 @@ independent of anything a harness or an acknowledgment turn claims.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from remote_agent_protocol import config as cfg
@@ -33,10 +33,17 @@ class ConcurrencyGuard:
     bridge: agent_bridge.AgentBridge
     global_cap: int = 2
     harness_cap: int = 1
+    # Per-harness overrides of ``harness_cap``.
+    harness_caps: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.global_cap <= 0 or self.harness_cap <= 0:
+        caps = [self.global_cap, self.harness_cap, *self.harness_caps.values()]
+        if any(cap <= 0 for cap in caps):
             raise ValueError("concurrency caps must be positive")
+
+    def cap_for(self, agent: str) -> int:
+        """How many jobs ``agent`` may run at once."""
+        return self.harness_caps.get(agent, self.harness_cap)
 
     def admit(self, agent: str, task: str) -> tuple[bool, str]:
         """Return ``(allowed, reason)``; ``reason`` is set only when denied."""
@@ -44,7 +51,7 @@ class ConcurrencyGuard:
         if len(active) >= self.global_cap:
             return False, f"already {len(active)} job(s) running (limit {self.global_cap})"
         same_harness = [job for job in active if job.agent == agent]
-        if len(same_harness) >= self.harness_cap:
+        if len(same_harness) >= self.cap_for(agent):
             return False, f"'{agent}' already has {len(same_harness)} job(s) running"
         normalized = normalize_task(task)
         for job in active:
@@ -59,4 +66,5 @@ def default_guard(bridge: agent_bridge.AgentBridge) -> ConcurrencyGuard:
         bridge=bridge,
         global_cap=cfg.ORCHESTRATION_GLOBAL_JOB_CAP,
         harness_cap=cfg.ORCHESTRATION_HARNESS_JOB_CAP,
+        harness_caps=dict(cfg.ORCHESTRATION_HARNESS_JOB_CAPS),
     )

@@ -13,6 +13,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from loguru import logger
@@ -122,8 +123,8 @@ TOOL_SCHEMAS: list[dict] = [
     ),
     _fn(
         "list_tasks",
-        "Tasks by subject. scope 'active' for what is running now, 'recent' for everything "
-        "recent including finished ones.",
+        "Tasks by subject. scope 'active' for what is running now, 'recent' for what is "
+        "running plus what finished recently, with a count of each.",
         {"scope": {"type": "string", "enum": ["active", "recent"]}},
         [],
     ),
@@ -160,6 +161,7 @@ class ButlerToolbox:
         aliases: Mapping[str, str],
         fresh_for_secs: float = 0.0,
         check_wait_secs: float | None = None,
+        recent_secs: float = 7200.0,
     ):
         """Initialize the toolbox.
 
@@ -175,6 +177,8 @@ class ButlerToolbox:
             aliases: Spoken agent names -> backend names.
             fresh_for_secs: How recent a confirmed response may be reused by check_agents.
             check_wait_secs: The most check_agents waits for self-checks in total.
+            recent_secs: How far back list_tasks(scope='recent') reaches for
+                finished work.
         """
         self._bridge = bridge
         self._control_plane = control_plane
@@ -187,6 +191,7 @@ class ButlerToolbox:
         self._aliases = {k.lower(): v for k, v in aliases.items()}
         self._fresh_for_secs = fresh_for_secs
         self._check_wait_secs = check_wait_secs
+        self._recent_secs = recent_secs
 
     @property
     def ledger(self) -> TaskLedger:
@@ -308,8 +313,9 @@ class ButlerToolbox:
             target = target or latest.agent
         if target is None:
             return _error("That task never had an agent; use start_task with the correction.")
-        found.instructions = (
-            f"{found.instructions}\n\nCorrection from the user: {instruction.strip()}"
+        self._ledger.amend(
+            found.task_id,
+            f"{found.instructions}\n\nCorrection from the user: {instruction.strip()}",
         )
         return await self._launch(found, target)
 
@@ -402,28 +408,51 @@ class ButlerToolbox:
         return state
 
     async def _tool_list_tasks(self, scope: str = "active") -> dict:
+        active_only = scope != "recent"
+        now = datetime.now(UTC)
         rows: list[dict] = []
         seen_jobs: set[str] = set()
+
+        def keep(status: str, ended_at: datetime | None) -> bool:
+            if status in _OPEN_STATES:
+                return True
+            if active_only:
+                return False
+            # A finish time RAP can't read is kept: better listed than lost.
+            return ended_at is None or (now - ended_at).total_seconds() <= self._recent_secs
+
         for task in self._ledger.newest_first():
             state = self._task_state(task)
             seen_jobs.update(a.job_id for a in task.attempts)
-            if scope == "active" and state["status"] not in _OPEN_STATES:
-                continue
-            rows.append(_row(state))
+            job = self._bridge.get(task.latest.job_id) if task.latest else None
+            ended = _ended_at(job) if job else datetime.fromtimestamp(task.created_at, UTC)
+            if keep(state["status"], ended):
+                rows.append(_row(state, ended, now))
         for job in self._bridge.recent_jobs():
             if job.job_id in seen_jobs:
                 continue
-            if scope == "active" and job.status not in _OPEN_STATES:
-                continue
-            rows.append(_row(_job_status(job, job.job_id, _subject_from_job(job))))
+            if keep(job.status, _ended_at(job)):
+                state = _job_status(job, job.job_id, _subject_from_job(job))
+                rows.append(_row(state, _ended_at(job), now))
+        return {"tasks": rows, "summary": self._roll_up(rows, active_only)}
+
+    def _roll_up(self, rows: list[dict], active_only: bool) -> str:
         if not rows:
-            summary = "Nothing is running." if scope == "active" else "There are no recent tasks."
-        else:
-            summary = "; ".join(
-                f"{r['task']} '{r['subject']}' on {r.get('agent') or 'no agent'}: {r['status']}"
-                for r in rows
+            return (
+                "Nothing is running." if active_only else "Nothing is running or finished recently."
             )
-        return {"tasks": rows, "summary": summary}
+        counts: dict[str, int] = {}
+        for row in rows:
+            bucket = _bucket(row["status"])
+            counts[bucket] = counts.get(bucket, 0) + 1
+        tally = ", ".join(f"{counts[b]} {b}" for b in _BUCKETS if b in counts)
+        window = "" if active_only else f" in the last {_duration(self._recent_secs)}"
+        details = "; ".join(
+            f"{r['task']} '{r['subject']}' on {r.get('agent') or 'no agent'}: {r['status']}"
+            + (f" ({r['ended_mins_ago']} min ago)" if "ended_mins_ago" in r else "")
+            for r in rows
+        )
+        return f"{tally}{window}. {details}"
 
     async def _tool_cancel_task(self, task: str | None = None) -> dict:
         found = self._ledger.resolve(task)
@@ -539,8 +568,42 @@ def _job_status(job: agent_bridge.AgentJob, task_id: str, subject: str) -> dict:
     return state
 
 
-def _row(state: dict) -> dict:
-    return {k: state[k] for k in ("task", "subject", "agent", "status") if k in state}
+def _row(state: dict, ended_at: datetime | None = None, now: datetime | None = None) -> dict:
+    row = {k: state[k] for k in ("task", "subject", "agent", "status") if k in state}
+    if ended_at is not None and now is not None and state["status"] not in _OPEN_STATES:
+        row["ended_mins_ago"] = max(0, round((now - ended_at).total_seconds() / 60))
+    return row
+
+
+def _ended_at(job: agent_bridge.AgentJob) -> datetime | None:
+    """When ``job`` finished, None while it runs or if RAP can't read the time."""
+    if job.status in _OPEN_STATES or not job.finished_at:
+        return None
+    try:
+        ended = datetime.fromisoformat(job.finished_at)
+    except ValueError:
+        return None
+    return ended if ended.tzinfo else ended.astimezone()
+
+
+_BUCKETS = ("running", "awaiting confirmation", "finished", "cancelled", "failed", "not started")
+
+
+def _bucket(status: str) -> str:
+    if status in ("awaiting_confirmation", "not_started"):
+        return status.replace("_", " ")
+    if status in _OPEN_STATES:
+        return "running"
+    if status == agent_bridge.STATUS_DONE:
+        return "finished"
+    return "cancelled" if status == agent_bridge.STATUS_CANCELLED else "failed"
+
+
+def _duration(secs: float) -> str:
+    hours = secs / 3600
+    if hours >= 1:
+        return f"{hours:g} hour{'s' if hours != 1 else ''}"
+    return f"{secs / 60:g} minutes"
 
 
 def _subject_from_job(job: agent_bridge.AgentJob) -> str:

@@ -182,7 +182,7 @@ not what the harness then goes and does.
 | --- | --- |
 | `models.py` | `RiskFactors`, `StructuredDecision`, `Route` -- data only |
 | `risk.py` | Per-turn signal extraction and weighted scoring; pure functions |
-| `concurrency.py` | Global (2) and per-harness (1) job caps, plus duplicate admission |
+| `concurrency.py` | Global (4) and per-harness (1, or `ORCHESTRATION_HARNESS_JOB_CAPS_JSON`) job caps, plus duplicate admission |
 | `quota.py` | Economy / Balanced / Performance / Cloud-preferred strategies |
 | `telemetry.py` | JSONL records, kept separate from persona memory |
 | `orchestrator.py` | `PersonaOrchestrator`: evaluate, admit, record outcome |
@@ -427,7 +427,11 @@ sentence. Every tool result carries a `summary` the model is told to speak
 from. Dispatch always passes orchestrator admission and the destructive-task
 confirmation hold, then goes through the conversation hub like any other
 delegation. `butler.TaskLedger` groups attempts across agents under one task
-id, so "have Codex do it" retries the same task. Only the local time query and
+id, so "have Codex do it" retries the same task; it is kept in
+`BUTLER_TASKS_FILE`, so subjects still resolve after a restart (confirmation
+holds are not kept). `list_tasks(scope="recent")` rolls up what is running and
+what finished within `BUTLER_RECENT_TASK_SECS` (default two hours) into counts
+plus one line per task. Only the local time query and
 a yes/no to a held task bypass the model. Tool traffic is never persisted: history keeps the
 user's words and the final reply. If no endpoint can start the turn, it runs
 on the router path instead; if the model fails after a tool ran, the turn ends

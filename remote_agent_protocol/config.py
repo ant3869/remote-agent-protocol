@@ -843,6 +843,12 @@ AGENT_CHECK_WAIT_SECS = float(_env("AGENT_CHECK_WAIT_SECS", "8"))
 # turn, that turn uses the router path instead.
 BUTLER_TOOLS_ENABLED = _env_bool("BUTLER_TOOLS_ENABLED", False)
 BUTLER_MAX_TOOL_ROUNDS = int(_env("BUTLER_MAX_TOOL_ROUNDS", "5"))
+# The Butler's tasks (subject, instructions, which agents tried them) survive a
+# restart here, so "how's the email thing?" still resolves. Empty disables.
+BUTLER_TASKS_FILE = _env("BUTLER_TASKS_FILE", str(DATA_DIR / "butler_tasks.json"))
+# "What's been going on" covers work that finished within this window, beside
+# whatever is still running.
+BUTLER_RECENT_TASK_SECS = float(_env("BUTLER_RECENT_TASK_SECS", "7200"))
 BUTLER_RULES = (
     " You are the front door to the user's agents, and you act only through your tools."
     " Say only what your tools returned: never claim an agent was contacted, is working,"
@@ -1295,8 +1301,16 @@ ORCHESTRATION_HARNESS_CONFIDENCE_FLOOR = float(
 )
 # Concurrency / loop protection -- independent of any one harness's own
 # limits, and independent of what a harness's own output claims.
-ORCHESTRATION_GLOBAL_JOB_CAP = int(_env("ORCHESTRATION_GLOBAL_JOB_CAP", "2"))
+ORCHESTRATION_GLOBAL_JOB_CAP = int(_env("ORCHESTRATION_GLOBAL_JOB_CAP", "4"))
 ORCHESTRATION_HARNESS_JOB_CAP = int(_env("ORCHESTRATION_HARNESS_JOB_CAP", "1"))
+# Per-harness overrides of the cap above, e.g. {"codex": 2}. Hermes keeps its
+# own one-session lock whatever this says.
+ORCHESTRATION_HARNESS_JOB_CAPS = {
+    agent: int(cap)
+    for agent, cap in _parse_float_map(
+        _env("ORCHESTRATION_HARNESS_JOB_CAPS_JSON", ""), "ORCHESTRATION_HARNESS_JOB_CAPS_JSON"
+    ).items()
+}
 # economy | balanced | performance | cloud_preferred -- see orchestration/quota.py.
 # RECOMMENDED DEFAULT (already the default below): "balanced" -- pairs with
 # ORCHESTRATION_MODE=hybrid above for the recommended Hybrid + Balanced setup.

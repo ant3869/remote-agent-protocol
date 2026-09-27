@@ -2,13 +2,21 @@
 
 A Butler task outlives its attempts: "have Codex try" after Hermes failed is a
 second attempt at the same task, so "how's the email thing?" still finds it.
+Given a file, the ledger also outlives a restart. Confirmation holds do not:
+the confirmation they wait on belongs to the session that raised it.
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
+import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from loguru import logger
 
 _MAX_TASKS = 50
 
@@ -41,12 +49,55 @@ class ButlerTask:
 
 
 class TaskLedger:
-    """Butler tasks for one session, newest last, bounded."""
+    """Butler tasks, newest last, bounded, optionally kept in a JSON file."""
 
-    def __init__(self) -> None:
-        """Start empty."""
+    def __init__(self, path: str | Path | None = None) -> None:
+        """Load the tasks saved at ``path``, or start empty.
+
+        Args:
+            path: JSON file to keep the ledger in. None keeps it in memory only.
+        """
+        self._path = Path(path) if path else None
         self._tasks: dict[str, ButlerTask] = {}
         self._counter = 0
+        self._load()
+
+    def _load(self) -> None:
+        if self._path is None or not self._path.exists():
+            return
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            tasks = [_task_from_dict(row) for row in raw.get("tasks", [])]
+            counter = int(raw.get("counter", 0))
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            logger.warning(f"Ignoring unreadable Butler task ledger {self._path}: {exc}")
+            return
+        self._tasks = {task.task_id: task for task in tasks[-_MAX_TASKS:]}
+        numbered = [int(t.task_id[1:]) for t in tasks if re.fullmatch(r"t\d+", t.task_id)]
+        self._counter = max([counter, *numbered])
+
+    def _save(self) -> None:
+        if self._path is None:
+            return
+        rows = []
+        for task in self._tasks.values():
+            row = asdict(task)
+            row["held_token"], row["held_agent"] = None, ""
+            rows.append(row)
+        tmp = self._path.with_name(self._path.name + ".tmp")
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps({"version": 1, "counter": self._counter, "tasks": rows}, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self._path)
+        except OSError as exc:
+            # Losing the ledger file costs subject lookups after a restart,
+            # never the running session.
+            logger.warning(f"Could not save the Butler task ledger: {exc}")
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
     def create(self, subject: str, instructions: str) -> ButlerTask:
         """Record a new task and return it."""
@@ -59,6 +110,7 @@ class TaskLedger:
         self._tasks[task.task_id] = task
         while len(self._tasks) > _MAX_TASKS:
             self._tasks.pop(next(iter(self._tasks)))
+        self._save()
         return task
 
     def attach(self, task_id: str, job_id: str, agent: str) -> None:
@@ -69,6 +121,14 @@ class TaskLedger:
         task.attempts.append(Attempt(job_id=job_id, agent=agent))
         task.held_token = None
         task.held_agent = ""
+        self._save()
+
+    def amend(self, task_id: str, instructions: str) -> None:
+        """Replace ``task_id``'s instructions, e.g. with a user's correction added."""
+        task = self._tasks.get(task_id)
+        if task is not None:
+            task.instructions = instructions
+            self._save()
 
     def hold(self, task_id: str, token: str, agent: str) -> None:
         """Mark ``task_id`` as waiting on confirmation ``token`` for ``agent``."""
@@ -132,6 +192,17 @@ class TaskLedger:
             if score > best_score:
                 best, best_score = task, score
         return best
+
+
+def _task_from_dict(row: dict) -> ButlerTask:
+    attempts = [Attempt(job_id=str(a["job_id"]), agent=str(a["agent"])) for a in row["attempts"]]
+    return ButlerTask(
+        task_id=str(row["task_id"]),
+        subject=str(row["subject"]),
+        instructions=str(row["instructions"]),
+        created_at=float(row["created_at"]),
+        attempts=attempts,
+    )
 
 
 def _subject_from(instructions: str) -> str:

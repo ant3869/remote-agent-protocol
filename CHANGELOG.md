@@ -12,6 +12,15 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
 
 ### Added
 
+- Many tasks, one room (roadmap phase D): the Butler's tasks -- subject,
+  instructions, and every agent that tried them -- are kept in
+  `BUTLER_TASKS_FILE`, so "how's the email thing?" still resolves after a
+  restart. "What's been going on" (`list_tasks` recent) rolls up what is
+  running and what finished in the last two hours (`BUTLER_RECENT_TASK_SECS`)
+  into counts and one line per task. Per-harness job caps
+  (`ORCHESTRATION_HARNESS_JOB_CAPS_JSON`, e.g. `{"codex": 2}`) override the
+  default of one, and the global cap default rises from 2 to 4 so several
+  agents can work at once.
 - Turn timing on the Stage: under Butler's caption, the voice frontend's
   phases for the last turn (transcribe, think, voice, total) and the Butler's
   own steps -- each model call and tool with its seconds, the running one
