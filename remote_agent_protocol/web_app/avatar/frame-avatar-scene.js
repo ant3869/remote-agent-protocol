@@ -6,7 +6,7 @@ import { VisemeTrack, visemeScript } from "./viseme-script.js";
 // running browser cannot reuse an earlier response.
 export const FRAME_SETS = Object.freeze({
   butler: Object.freeze({ base: "/assets/avatars/butler/runtime_512_v1/", revision: "20260920" }),
-  jess: Object.freeze({ base: "/assets/avatars/jess/runtime_512_v1/", revision: "20260927" }),
+  jess: Object.freeze({ base: "/assets/avatars/jess/runtime_512_v1/", revision: "20260927b" }),
 });
 const ASSET_BASE = FRAME_SETS.butler.base;
 const ASSET_REVISION = FRAME_SETS.butler.revision;

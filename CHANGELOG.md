@@ -29,7 +29,10 @@ see `docs/CHANGELOG.pipecat.md` and https://github.com/pipecat-ai/pipecat.
   default, **Match persona**, shows Jess for Jess and Butler otherwise (a
   saved "Holo Butler" from before there was a choice moves to it). Her frames
   are drawn in SVG (`scripts/avatar/jess-portrait.mjs`) and re-rendered with
-  `node scripts/avatar/render-frames.mjs`.
+  `node scripts/avatar/render-frames.mjs`. She is drawn in detail: painted light and
+  shade across the face, about seventy hair strands with a gloss band,
+  textured irises with catchlights and lashes, brows drawn hair by hair, lip
+  texture, jacket lapels, stitching and a pendant, and a fine hologram grain.
 - Butler web lookup: "what's the weather in Leeds?", "read me this link".
   `read_page` works out of the box; `web_search` needs a Tavily or Brave
   Search key, or a SearXNG URL. Pages on your own machine or network are never
